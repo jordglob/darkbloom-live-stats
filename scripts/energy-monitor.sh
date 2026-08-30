@@ -105,6 +105,12 @@ while true; do
   AVG_W=0
   if [ -f "$RAW_LOG" ]; then
     SIZE=$(stat -f%z "$RAW_LOG" 2>/dev/null || echo 0)
+    # Self-heal: if the raw log got recreated/truncated (e.g. powermetrics
+    # restarted), LAST_OFFSET can end up bigger than the file ever was again,
+    # which silently stalls parsing at 0W forever. Catch up instead of stalling.
+    if [ "$LAST_OFFSET" -gt "$SIZE" ]; then
+      LAST_OFFSET=0
+    fi
     if [ "$SIZE" -gt "$LAST_OFFSET" ]; then
       AVG_MW=$(tail -c +$((LAST_OFFSET + 1)) "$RAW_LOG" | awk '
         /^CPU Power:/ { cpu=$3 }
