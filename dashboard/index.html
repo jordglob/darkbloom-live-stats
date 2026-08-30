@@ -1,0 +1,726 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Darkbloom Monitor</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f3f2ef;
+    --border:         #e3e1db;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #85837c;
+    --series-cost:    #2a78d6;
+    --series-revenue: #1baf7a;
+    --gauge-cpu:      #2a78d6;
+    --gauge-gpu:      #eb6834;
+    --gauge-total:    #1baf7a;
+    --gauge-track:    #e3e1db;
+    --status-good:      #0ca30c;
+    --status-warning:   #fab219;
+    --status-serious:   #ec835a;
+    --status-critical:  #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --surface-2:      #232321;
+      --border:         #3a3a37;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #8c8b83;
+      --series-cost:    #3987e5;
+      --series-revenue: #199e70;
+      --gauge-cpu:      #3987e5;
+      --gauge-gpu:      #d95926;
+      --gauge-total:    #199e70;
+      --gauge-track:    #3a3a37;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --surface-2:      #232321;
+    --border:         #3a3a37;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8c8b83;
+    --series-cost:    #3987e5;
+    --series-revenue: #199e70;
+    --gauge-cpu:      #3987e5;
+    --gauge-gpu:      #d95926;
+    --gauge-total:    #199e70;
+    --gauge-track:    #3a3a37;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface-1);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    padding: 24px;
+    max-width: 1000px;
+    margin-inline: auto;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  h1 { font-size: 20px; margin: 0; }
+  #updated { color: var(--text-muted); font-size: 12px; }
+  .banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-bottom: 12px;
+    border: 1px solid transparent;
+  }
+  .banner.critical { background: color-mix(in srgb, var(--status-critical) 12%, var(--surface-1)); border-color: color-mix(in srgb, var(--status-critical) 35%, transparent); }
+  .banner.serious  { background: color-mix(in srgb, var(--status-serious) 14%, var(--surface-1)); border-color: color-mix(in srgb, var(--status-serious) 35%, transparent); }
+  .banner.warning  { background: color-mix(in srgb, var(--status-warning) 14%, var(--surface-1)); border-color: color-mix(in srgb, var(--status-warning) 35%, transparent); }
+  .banner .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .banner.critical .dot { background: var(--status-critical); }
+  .banner.serious .dot { background: var(--status-serious); }
+  .banner.warning .dot { background: var(--status-warning); }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .card {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    cursor: default;
+  }
+  .card .label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+  .card .value { font-size: 20px; font-weight: 600; }
+  .card .sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  .panel {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 16px 8px;
+    margin-bottom: 20px;
+  }
+  .panel h2 { font-size: 14px; margin: 0 0 10px; color: var(--text-secondary); font-weight: 600; cursor: default; }
+  .legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  svg.chart { width: 100%; height: 180px; overflow: visible; }
+  .gridline { stroke: var(--border); stroke-width: 1; }
+  .axis-label { fill: var(--text-muted); font-size: 10px; }
+  .line-cost { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
+  .line-revenue { fill: none; stroke: var(--series-revenue); stroke-width: 2; stroke-linecap: round; }
+  .line-power { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
+  .area-power { fill: var(--series-cost); opacity: 0.08; }
+  .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 2; }
+  .hover-dot { r: 4; stroke: var(--surface-2); stroke-width: 2; }
+
+  .tooltip {
+    position: absolute;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    white-space: nowrap;
+    display: none;
+    z-index: 10;
+  }
+  .tooltip .t-time { color: var(--text-muted); margin-bottom: 4px; }
+  .tooltip .t-row { display: flex; justify-content: space-between; gap: 12px; }
+
+  footer { color: var(--text-muted); font-size: 11px; margin-top: 8px; line-height: 1.6; }
+  .chart-wrap { position: relative; }
+
+  .gauge-time { font-size: 11px; font-weight: 400; color: var(--text-muted); }
+  .gauges {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+  }
+  .gauge { text-align: center; cursor: default; }
+  .gauge svg { width: 100%; max-width: 200px; height: auto; }
+  .gauge-track { fill: none; stroke: var(--gauge-track); stroke-width: 14; stroke-linecap: round; }
+  .gauge-value { fill: none; stroke-width: 14; stroke-linecap: round; transition: stroke-dasharray 0.6s ease; }
+  .gauge-number { font-size: 26px; font-weight: 700; fill: var(--text-primary); }
+  .gauge-unit { font-size: 12px; fill: var(--text-muted); }
+  .gauge-label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; font-weight: 600; }
+  .gauge-scale { font-size: 10px; fill: var(--text-muted); }
+
+  .rotation-active { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .rotation-active .model-name { font-size: 18px; font-weight: 700; }
+  .rotation-active .countdown { font-size: 13px; color: var(--text-secondary); }
+  table.rotation-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.rotation-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border); cursor: default; }
+  table.rotation-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  table.rotation-table tr:last-child td { border-bottom: none; }
+  .rotation-summary { font-size: 12px; color: var(--text-secondary); margin: 10px 0; }
+  .rotation-summary strong { color: var(--text-primary); }
+
+  .warmup-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .warmup-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; font-size: 13px; }
+  .warmup-toggle input { width: 16px; height: 16px; cursor: pointer; }
+  .warmup-interval { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .warmup-interval input { width: 50px; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); }
+  .warmup-status { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+  .warmup-log { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, monospace; max-height: 120px; overflow-y: auto; background: var(--surface-1); border-radius: 8px; padding: 8px 10px; line-height: 1.6; }
+
+  .cut-positive { color: var(--status-critical); }
+  .cut-negative { color: var(--status-good); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Darkbloom Monitor</h1>
+    <div id="updated">loading…</div>
+  </header>
+
+  <div id="banners"></div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="panel">
+    <h2 title="Which model this Mac is currently configured to serve, and the 4-hour rotation timer.">Model Rotation <span class="gauge-time">(4h of continuous hardware-trust per period)</span></h2>
+    <div id="rotation"></div>
+  </div>
+
+  <div class="panel">
+    <h2 title="Real data pulled from your Darkbloom account (console.darkbloom.dev), not a live connection - refreshed manually.">Darkbloom Account <span class="gauge-time">(real data, not live-connected)</span></h2>
+    <div id="account"></div>
+    <div class="rotation-summary" style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border)">
+      <a id="sync-bookmarklet" href="javascript:(function(){fetch('/api/me/providers').then(function(r){return r.json();}).then(function(p){fetch('/api/me/earnings?limit=100').then(function(r){return r.json();}).then(function(e){var pm={};var arr=e.earnings||[];for(var i=0;i<arr.length;i++){var x=arr[i];var m=x.model||'unknown';if(!pm[m])pm[m]={amount_usd:0,prompt_tokens:0,completion_tokens:0,jobs:0};pm[m].amount_usd+=(x.amount_micro_usd||0)/1e6;pm[m].prompt_tokens+=x.prompt_tokens||0;pm[m].completion_tokens+=x.completion_tokens||0;pm[m].jobs+=1;}var p0=(p.providers||[])[0];var summary={balance_usd:e.available_balance_usd,total_jobs:e.count,sample_size:arr.length,per_model:pm,trust_level:p0?p0.trust_level:null,provider_status:p0?p0.status:null};window.open('http://127.0.0.1:8787/api/account_data_get?d='+encodeURIComponent(JSON.stringify(summary)),'_blank','width=320,height=120');});});})();" style="display:inline-block; background:var(--surface-1); border:1px solid var(--border); border-radius:8px; padding:6px 12px; font-weight:600; text-decoration:none; color:var(--text-primary); cursor:grab;" onclick="alert('Drag this button to your bookmarks bar instead of clicking it here - clicking it on this page won\'t do anything useful since this isn\'t the Darkbloom account page.'); return false;">↻ Sync Darkbloom Account</a>
+      <span style="font-size:11px"> — drag this to your bookmarks bar, then click it while on <code>console.darkbloom.dev</code> to refresh the data above.</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 title="Periodically pings the provider's local endpoint to keep the active model loaded in memory, so it's ready the instant real traffic arrives.">Warmup</h2>
+    <div id="warmup"></div>
+  </div>
+
+  <div class="panel">
+    <h2 title="Instantaneous CPU/GPU/Total power draw, read directly from the latest powermetrics sample.">Live Power <span id="live-power-time" class="gauge-time"></span></h2>
+    <div class="gauges" id="gauges"></div>
+    <div id="ollama-badge" style="margin-top:12px"></div>
+  </div>
+
+  <div class="panel">
+    <h2 title="5-minute-resolution power history, including the estimated 7W baseline for non-SoC system draw.">Power (W) — history</h2>
+    <div class="chart-wrap">
+      <svg class="chart" id="chart-power"></svg>
+      <div class="tooltip" id="tooltip-power"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Revenue (SEK)</h2>
+    <div class="legend">
+      <span><i style="background:var(--series-cost)"></i>Electricity cost</span>
+      <span><i style="background:var(--series-revenue)"></i>Estimated revenue</span>
+    </div>
+    <div class="chart-wrap">
+      <svg class="chart" id="chart-money"></svg>
+      <div class="tooltip" id="tooltip-money"></div>
+    </div>
+  </div>
+
+  <footer id="footnote"></footer>
+
+<script>
+const REFRESH_MS = 10000;
+const LIVE_POWER_REFRESH_MS = 2000;
+
+const GAUGES = [
+  { id: 'cpu', label: 'CPU', source: 'power', key: 'cpu_w', max: 30, unit: 'W', color: '--gauge-cpu' },
+  { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
+  { id: 'total', label: 'Total (incl. baseline)', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total' },
+  { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
+];
+const GAUGE_R = 80;
+const GAUGE_ARC_LEN = Math.PI * GAUGE_R; // half-circle arc length
+
+function gaugeArcPath() {
+  // half-circle from (20,100) to (180,100), radius GAUGE_R, center (100,100)
+  const cx = 100, cy = 100;
+  const x1 = cx - GAUGE_R, x2 = cx + GAUGE_R;
+  return `M ${x1} ${cy} A ${GAUGE_R} ${GAUGE_R} 0 0 1 ${x2} ${cy}`;
+}
+
+function initGauges() {
+  const wrap = document.getElementById('gauges');
+  wrap.innerHTML = GAUGES.map(g => `
+    <div class="gauge">
+      <svg viewBox="0 0 200 115">
+        <path class="gauge-track" d="${gaugeArcPath()}" />
+        <path class="gauge-value" id="gauge-arc-${g.id}" d="${gaugeArcPath()}"
+              stroke="var(${g.color})"
+              stroke-dasharray="0 ${GAUGE_ARC_LEN.toFixed(1)}" />
+        <text x="20" y="112" class="gauge-scale" text-anchor="start">0</text>
+        <text x="180" y="112" class="gauge-scale" id="gauge-max-${g.id}" text-anchor="end">${g.max}${g.unit}</text>
+        <text x="100" y="88" class="gauge-number" id="gauge-num-${g.id}" text-anchor="middle">–</text>
+        <text x="100" y="104" class="gauge-unit" text-anchor="middle">${g.unit === 'W' ? 'watt' : g.unit}</text>
+      </svg>
+      <div class="gauge-label">${g.label}</div>
+    </div>
+  `).join('');
+}
+
+function updateGauges(data) {
+  const timeEl = document.getElementById('live-power-time');
+  const power = data && data.power;
+  const ram = data && data.ram;
+  if (!power && !ram) {
+    timeEl.textContent = '(no data yet — waiting on powermetrics)';
+    GAUGES.forEach(g => {
+      document.getElementById(`gauge-num-${g.id}`).textContent = '–';
+      document.getElementById(`gauge-arc-${g.id}`).setAttribute('stroke-dasharray', `0 ${GAUGE_ARC_LEN.toFixed(1)}`);
+    });
+    return;
+  }
+  timeEl.textContent = power && power.sample_time ? `latest sample: ${power.sample_time}` : '';
+  GAUGES.forEach(g => {
+    const src = g.source === 'ram' ? ram : power;
+    if (!src) return;
+    const val = src[g.key] ?? 0;
+    let max = g.max;
+    if (g.source === 'ram' && ram && ram.total_gb) {
+      max = ram.total_gb;
+      document.getElementById(`gauge-max-${g.id}`).textContent = `${max.toFixed(0)}${g.unit}`;
+    }
+    const frac = Math.max(0, Math.min(1, val / max));
+    const len = frac * GAUGE_ARC_LEN;
+    const arcEl = document.getElementById(`gauge-arc-${g.id}`);
+    arcEl.setAttribute('stroke-dasharray', `${len.toFixed(1)} ${GAUGE_ARC_LEN.toFixed(1)}`);
+    // RAM specifically gets a color warning as it approaches full - this is the
+    // exact condition that caused real model-load failures earlier this session,
+    // so flag it before a request fails, not just after.
+    if (g.source === 'ram') {
+      arcEl.setAttribute('stroke', frac > 0.93 ? 'var(--status-critical)' : frac > 0.85 ? 'var(--status-warning)' : `var(${g.color})`);
+    }
+    document.getElementById(`gauge-num-${g.id}`).textContent = val.toFixed(g.source === 'ram' ? 1 : 2);
+  });
+}
+
+function renderOllamaBadge(ollama) {
+  const el = document.getElementById('ollama-badge');
+  if (!el) return;
+  if (!ollama || ollama.count === 0) {
+    el.innerHTML = `<span class="pill"><span class="dot" style="background:var(--status-good)"></span>Ollama idle</span>`;
+  } else {
+    el.innerHTML = `<span class="pill"><span class="dot" style="background:var(--status-warning)"></span>Ollama: ${ollama.count} model${ollama.count === 1 ? '' : 's'} loaded (${ollama.loaded.join(', ')}) — competing for RAM</span>`;
+  }
+}
+
+async function refreshLivePower() {
+  try {
+    const res = await fetch('/api/live_power');
+    const data = await res.json();
+    updateGauges(data);
+    renderOllamaBadge(data.ollama);
+  } catch (e) {
+    // silent - the main loop shows an error if this persists
+  }
+}
+
+function fmtSek(v) {
+  if (v == null || Number.isNaN(v)) return '–';
+  const abs = Math.abs(v);
+  // small amounts (typical early in a run) otherwise vanish at 2 decimals and
+  // show up misleadingly as "0 SEK"/"-0 SEK" - scale precision up instead.
+  let digits = 2;
+  if (abs > 0 && abs < 1) digits = 4;
+  if (abs > 0 && abs < 0.001) digits = 6;
+  let s = v.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits});
+  if (parseFloat(s.replace(',', '')) === 0) s = s.replace('-', ''); // avoid "-0.00"
+  return s + ' SEK';
+}
+function fmtW(v) { return (v ?? 0).toLocaleString('en-US', {maximumFractionDigits: 1}) + ' W'; }
+function fmtNum(v) { return (v ?? 0).toLocaleString('en-US'); }
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+function fmtPct(v) {
+  if (v == null || Number.isNaN(v)) return '–';
+  return (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+}
+
+function trustStatus(trust) {
+  if (!trust) return {status:'critical', label:'unknown'};
+  if (trust.startsWith('hardware')) return {status:'good', label:trust};
+  if (trust.startsWith('self_signed')) return {status:'warning', label:trust};
+  return {status:'critical', label:trust};
+}
+
+const CARD_TOOLTIPS = {
+  'Trust': 'Hardware-attestation level with the coordinator. "hardware" = eligible for real traffic. "self_signed" = online but receiving nothing yet.',
+  'Daemon': 'Whether the darkbloom provider background process is currently running.',
+  'Requests': 'Requests/tokens served since the LAST daemon restart (this counter resets on every restart - it is not the lifetime total).',
+  'Warm models': 'Number of models currently loaded in memory and ready to serve instantly, vs. total downloaded to disk.',
+  'Accumulated electricity cost': 'Running total electricity cost since energy-monitor.sh started, based on measured power draw x live SE3 spot price.',
+  'Net (estimated)': 'Local rough estimate: our own flat-rate guess at revenue, minus accumulated electricity cost. Only shown when the Darkbloom account is not connected.',
+  'Net (real balance)': 'Your real Darkbloom account balance (converted to SEK) minus accumulated electricity cost.',
+};
+
+function renderCards(status, energy, account) {
+  const t = trustStatus(status.trust);
+  const daemonUp = status.daemon && status.daemon.startsWith('running');
+  const latest = energy.latest;
+  const cards = [
+    {
+      label: 'Trust',
+      value: `<span class="pill"><span class="dot" style="background:var(--status-${t.status})"></span>${t.label}</span>`,
+      sub: status.trust_reason || ''
+    },
+    {
+      label: 'Daemon',
+      value: `<span class="pill"><span class="dot" style="background:var(--status-${daemonUp ? 'good' : 'critical'})"></span>${daemonUp ? 'running' : 'down'}</span>`,
+      sub: status.daemon || ''
+    },
+    { label: 'Requests', value: fmtNum(status.requests_served), sub: fmtNum(status.tokens) + ' tokens' },
+  ];
+  const warmList = (status.warm_models || '').split(',').map(s => s.trim()).filter(Boolean);
+  cards.push({
+    label: 'Warm models',
+    value: warmList.length,
+    sub: (warmList.join(', ') || '(none loaded)') + ` · ${status.local_models ?? 0} downloaded in total`
+  });
+  if (latest) {
+    const costSek = parseFloat(latest.cum_cost_sek);
+    cards.push({ label: 'Accumulated electricity cost', value: fmtSek(costSek), sub: '' });
+
+    let net, netLabel, netSub;
+    if (account && account.connected && account.balance_usd != null) {
+      const usdSek = parseFloat(latest.usd_sek) || 9.5;
+      net = parseFloat(account.balance_usd) * usdSek - costSek;
+      netLabel = 'Net (real balance)';
+      netSub = `balance ${account.balance_usd} USD − electricity cost`;
+    } else {
+      net = parseFloat(latest.net_sek_approx);
+      netLabel = 'Net (estimated)';
+      netSub = 'revenue (approx) − electricity cost';
+    }
+    cards.push({
+      label: netLabel,
+      value: `<span style="color: var(--status-${net >= 0 ? 'good' : 'critical'})">${fmtSek(net)}</span>`,
+      sub: netSub
+    });
+  }
+  document.getElementById('cards').innerHTML = cards.map(c => `
+    <div class="card" title="${CARD_TOOLTIPS[c.label] || ''}">
+      <div class="label">${c.label}</div>
+      <div class="value">${c.value}</div>
+      ${c.sub ? `<div class="sub">${c.sub}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function fmtDuration(sec) {
+  if (sec == null) return '–';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+function renderRotation(rotation) {
+  const el = document.getElementById('rotation');
+  if (!rotation || !rotation.current_model) {
+    el.innerHTML = `<div class="rotation-summary">No rotation running yet.</div>`;
+    return;
+  }
+
+  const history = rotation.history || [];
+  // sum per model across all history (to answer "which model is most requested")
+  const totals = {};
+  history.forEach(h => {
+    const m = h.ending_model;
+    if (!totals[m]) totals[m] = { requests: 0, tokens: 0, periods: 0 };
+    totals[m].requests += parseInt(h.requests_served || 0, 10);
+    totals[m].tokens += parseInt(h.tokens || 0, 10);
+    totals[m].periods += 1;
+  });
+  const summaryParts = Object.entries(totals).map(([m, t]) =>
+    `<strong>${m}</strong>: ${fmtNum(t.requests)} req / ${fmtNum(t.tokens)} tokens (${t.periods} period${t.periods === 1 ? '' : 's'})`
+  );
+
+  el.innerHTML = `
+    <div class="rotation-active">
+      <span class="model-name">${rotation.current_model}</span>
+      <span class="countdown">${rotation.waiting_for_trust ? 'waiting for hardware-trust before the timer starts' : 'next switch in ' + fmtDuration(rotation.next_switch_in_sec)}</span>
+    </div>
+    ${summaryParts.length ? `<div class="rotation-summary">Total so far — ${summaryParts.join(' &nbsp;·&nbsp; ')}</div>` : ''}
+    ${history.length ? `
+      <table class="rotation-table">
+        <thead><tr><th>Ended</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead>
+        <tbody>
+          ${history.slice().reverse().map(h => `
+            <tr><td>${fmtTime(h.timestamp)}</td><td>${h.ending_model}</td><td>${fmtNum(h.requests_served)}</td><td>${fmtNum(h.tokens)}</td></tr>
+          `).join('')}
+        </tbody>
+      </table>
+    ` : `<div class="rotation-summary">No switch has happened yet - history appears after the first period.</div>`}
+  `;
+}
+
+function renderWarmup(warmup) {
+  const el = document.getElementById('warmup');
+  if (!warmup) { el.innerHTML = ''; return; }
+
+  const lastRun = warmup.last_run ? new Date(warmup.last_run * 1000).toLocaleTimeString('en-US') : 'never';
+  const lastOkBadge = warmup.last_ok == null ? '' :
+    warmup.last_ok ? `<span style="color:var(--status-good)">✓ ok</span>` : `<span style="color:var(--status-critical)">✗ error</span>`;
+
+  el.innerHTML = `
+    <div class="warmup-row">
+      <label class="warmup-toggle">
+        <input type="checkbox" id="warmup-checkbox" ${warmup.enabled ? 'checked' : ''}>
+        Keep Warm
+      </label>
+      <span class="warmup-interval">every
+        <input type="number" id="warmup-interval-input" min="1" value="${warmup.interval_min}">
+        min
+      </span>
+      <span class="warmup-status">last: ${lastRun} ${lastOkBadge}</span>
+    </div>
+    ${warmup.log_tail && warmup.log_tail.length ? `<div class="warmup-log">${warmup.log_tail.join('<br>')}</div>` : ''}
+  `;
+
+  document.getElementById('warmup-checkbox').addEventListener('change', (e) => {
+    postWarmupConfig({ enabled: e.target.checked });
+  });
+  document.getElementById('warmup-interval-input').addEventListener('change', (e) => {
+    postWarmupConfig({ interval_min: parseInt(e.target.value, 10) || 20 });
+  });
+}
+
+async function postWarmupConfig(body) {
+  try {
+    await fetch('/api/warmup/toggle', { method: 'POST', body: JSON.stringify(body) });
+    refreshWarmup();
+  } catch (e) { /* silent */ }
+}
+
+async function refreshWarmup() {
+  try {
+    const res = await fetch('/api/warmup');
+    renderWarmup(await res.json());
+  } catch (e) { /* silent */ }
+}
+
+function renderAccount(account) {
+  const el = document.getElementById('account');
+  if (!account) { el.innerHTML = ''; return; }
+
+  if (!account.connected) {
+    el.innerHTML = `
+      <div class="pill"><span class="dot" style="background:var(--status-warning)"></span>Not connected</div>
+      <div class="rotation-summary">${account.reason || 'unknown reason'}. Open console.darkbloom.dev/providers/earnings in the browser and run the sync snippet there.</div>
+    `;
+    return;
+  }
+
+  const rows = Object.entries(account.per_model || {})
+    .sort((a, b) => b[1].jobs - a[1].jobs)
+    .map(([model, d]) => {
+      const cutClass = d.cut_pct == null ? '' : (d.cut_pct >= 0 ? 'cut-positive' : 'cut-negative');
+      return `
+      <tr>
+        <td>${model}</td>
+        <td>${fmtNum(d.jobs)}</td>
+        <td>${fmtNum(d.prompt_tokens + d.completion_tokens)}</td>
+        <td>$${d.amount_usd.toFixed(6)}</td>
+        <td>$${d.local_estimate_usd.toFixed(6)}</td>
+        <td class="${cutClass}">${fmtPct(d.cut_pct)}</td>
+        <td>${d.real_usd_per_m_tokens == null ? '–' : '$' + d.real_usd_per_m_tokens.toFixed(3)}</td>
+      </tr>
+    `;
+    }).join('');
+
+  const cs = account.cut_summary || {};
+
+  el.innerHTML = `
+    <div class="pill"><span class="dot" style="background:var(--status-good)"></span>Connected (synced ${Math.round(account.age_sec)}s ago)</div>
+    <div class="rotation-summary">Balance: <strong>$${account.balance_usd}</strong> · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here</div>
+    <table class="rotation-table">
+      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.125/M-token guess would have estimated for these same tokens.">Our local estimate</th><th title="Gap between our local estimate and the real payout. Positive = our estimate overstates reality (an effective &quot;cut&quot;); negative = the real payout exceeds our estimate.">DB cut</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="rotation-summary" style="margin-top:10px">
+      Totals — real payout: <strong>$${(cs.total_real_usd ?? 0).toFixed(6)}</strong> ·
+      local estimate: <strong>$${(cs.total_local_estimate_usd ?? 0).toFixed(6)}</strong> ·
+      overall DB cut: <strong class="${cs.cut_pct != null && cs.cut_pct >= 0 ? 'cut-positive' : 'cut-negative'}">${fmtPct(cs.cut_pct)}</strong>
+      <br><span style="font-size:11px">Note: this is NOT an official platform fee - Darkbloom's alpha terms advertise 0% fee. It's just the gap between our own naive per-token guess and what the real ledger paid; base_reward entries are excluded (not token-based).</span>
+    </div>
+  `;
+}
+
+function renderBanners(status, energy) {
+  const banners = [];
+  if (status.last_error) {
+    banners.push(`<div class="banner critical"><span class="dot"></span>${status.last_error}</div>`);
+  }
+  if (!energy.power_monitoring_active) {
+    banners.push(`<div class="banner warning"><span class="dot"></span>Power monitoring inactive — pm-start.sh (sudo) is not running, electricity cost is not being counted right now.</div>`);
+  }
+  document.getElementById('banners').innerHTML = banners.join('');
+}
+
+function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, valueFmt) {
+  const svg = document.getElementById(svgId);
+  const tooltip = document.getElementById(tooltipId);
+  const w = svg.clientWidth || 900;
+  const h = 180;
+  const padL = 4, padR = 4, padT = 8, padB = 20;
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.innerHTML = '';
+
+  if (!timestamps || timestamps.length === 0) {
+    svg.innerHTML = `<text x="${w/2}" y="${h/2}" text-anchor="middle" class="axis-label">No data yet</text>`;
+    return;
+  }
+
+  const allValues = series.flatMap(s => s.values);
+  const max = Math.max(...allValues, 0.0001);
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+
+  // gridlines (0, mid, max)
+  [0, 0.5, 1].forEach(frac => {
+    const y = padT + innerH - frac * innerH;
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    g.setAttribute('x1', padL); g.setAttribute('x2', w - padR);
+    g.setAttribute('y1', y); g.setAttribute('y2', y);
+    g.setAttribute('class', 'gridline');
+    svg.appendChild(g);
+  });
+
+  const allPoints = [];
+  series.forEach((s, si) => {
+    const n = s.values.length;
+    const points = s.values.map((v, i) => {
+      const x = padL + (n === 1 ? 0 : (i / (n - 1)) * innerW);
+      const y = padT + innerH - (v / max) * innerH;
+      return [x, y];
+    });
+    allPoints.push(points);
+    const path = points.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2)).join(' ');
+    const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    pathEl.setAttribute('d', path);
+    pathEl.setAttribute('class', colorClasses[si]);
+    svg.appendChild(pathEl);
+  });
+
+  // hover overlay
+  const hoverLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  hoverLine.setAttribute('class', 'crosshair');
+  hoverLine.setAttribute('y1', padT);
+  hoverLine.setAttribute('y2', h - padB);
+  hoverLine.style.display = 'none';
+  svg.appendChild(hoverLine);
+
+  const dots = series.map((s, si) => {
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('class', 'hover-dot');
+    dot.setAttribute('fill', getComputedStyle(document.body).getPropertyValue(si === 0 ? '--series-cost' : '--series-revenue'));
+    dot.style.display = 'none';
+    svg.appendChild(dot);
+    return dot;
+  });
+
+  const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  overlay.setAttribute('x', 0); overlay.setAttribute('y', 0);
+  overlay.setAttribute('width', w); overlay.setAttribute('height', h);
+  overlay.setAttribute('fill', 'transparent');
+  svg.appendChild(overlay);
+
+  const n = timestamps.length;
+  overlay.addEventListener('mousemove', (e) => {
+    const rect = svg.getBoundingClientRect();
+    const scaleX = w / rect.width;
+    const mx = (e.clientX - rect.left) * scaleX;
+    let idx = Math.round(((mx - padL) / innerW) * (n - 1));
+    idx = Math.max(0, Math.min(n - 1, idx));
+    const x = allPoints[0][idx][0];
+    hoverLine.setAttribute('x1', x); hoverLine.setAttribute('x2', x);
+    hoverLine.style.display = 'block';
+    dots.forEach((dot, si) => {
+      const [px, py] = allPoints[si][idx];
+      dot.setAttribute('cx', px); dot.setAttribute('cy', py);
+      dot.style.display = 'block';
+    });
+    tooltip.style.display = 'block';
+    tooltip.style.left = Math.min(rect.width - 160, Math.max(0, (x / scaleX) + 10)) + 'px';
+    tooltip.style.top = '0px';
+    tooltip.innerHTML = `<div class="t-time">${fmtTime(timestamps[idx])}</div>` +
+      series.map(s => `<div class="t-row"><span>${s.name}</span><strong>${valueFmt(s.values[idx])}</strong></div>`).join('');
+  });
+  overlay.addEventListener('mouseleave', () => {
+    hoverLine.style.display = 'none';
+    dots.forEach(d => d.style.display = 'none');
+    tooltip.style.display = 'none';
+  });
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/data');
+    const data = await res.json();
+    const { status, energy, rotation, account } = data;
+
+    renderCards(status, energy, account);
+    renderBanners(status, energy);
+    renderRotation(rotation);
+    renderAccount(account);
+
+    const rows = energy.rows || {};
+    renderLineChart('chart-power', 'tooltip-power',
+      rows.timestamps, [{name: 'Power (incl. baseline)', values: rows.total_power_w || []}],
+      ['line-power'], fmtW);
+    renderLineChart('chart-money', 'tooltip-money',
+      rows.timestamps,
+      [{name: 'Electricity cost', values: rows.cum_cost_sek || []}, {name: 'Revenue', values: rows.est_revenue_sek || []}],
+      ['line-cost', 'line-revenue'], fmtSek);
+
+    document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
+    document.getElementById('footnote').innerHTML =
+      `Current electricity price: ${(rows.elpris_sek_kwh || [])[rows.elpris_sek_kwh?.length - 1]?.toFixed(3) ?? '–'} SEK/kWh (SE3) ·
+       Power/cost includes an estimated baseline (7W) on top of measured CPU+GPU, since powermetrics only measures SoC power rails, not the whole machine's wall power ·
+       Revenue is a rough approximation (blended flat rate $0.125/M tokens, not split by input/output) ·
+       ${energy.total_rows ?? 0} data points logged · updates every 10s (gauges every 2s)`;
+  } catch (e) {
+    document.getElementById('updated').textContent = 'could not fetch data: ' + e;
+  }
+}
+
+initGauges();
+refresh();
+refreshLivePower();
+refreshWarmup();
+setInterval(refresh, REFRESH_MS);
+setInterval(refreshLivePower, LIVE_POWER_REFRESH_MS);
+setInterval(refreshWarmup, 15000);
+</script>
+</body>
+</html>
