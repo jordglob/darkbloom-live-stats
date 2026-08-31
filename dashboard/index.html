@@ -131,7 +131,11 @@
   .line-cost { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
   .line-revenue { fill: none; stroke: var(--series-revenue); stroke-width: 2; stroke-linecap: round; }
   .line-power { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
-  .area-power { fill: var(--series-cost); opacity: 0.08; }
+  .line-power-peak { fill: none; stroke: var(--series-cost); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
+  .line-net { fill: none; stroke: var(--gauge-total); stroke-width: 2; stroke-linecap: round; }
+  .zero-line { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 2; }
+  .pulse { animation: db-pulse 1.2s ease-in-out infinite; }
+  @keyframes db-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
   .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 2; }
   .hover-dot { r: 4; stroke: var(--surface-2); stroke-width: 2; }
 
@@ -223,7 +227,7 @@
       <div class="explainer-section">
         <h4>Top summary cards</h4>
         <p><strong>Trust</strong> — the hardware-attestation level the Darkbloom coordinator has assigned this Mac. <code>hardware</code> means it's eligible to actually receive inference traffic; <code>self_signed</code> means it's online but not yet trusted enough to be routed any jobs. A drop from hardware-level triggers a macOS notification and a red banner automatically.</p>
-        <p><strong>Daemon</strong> — whether the `darkbloom` background process itself is running.</p>
+        <p><strong>Daemon</strong> — whether the `darkbloom` background process itself is running, and (read straight from the daemon's own live state file) whether it's currently idle/warm or actively serving a request right this second (pulsing dot).</p>
         <p><strong>Requests</strong> — requests served and tokens processed since the daemon last (re)started. This resets on every restart, so it's not a lifetime total.</p>
         <p><strong>Warm models</strong> — how many models are currently loaded in memory (instant response) vs. how many are downloaded to disk in total.</p>
         <p><strong>Accumulated electricity cost</strong> and <strong>Net</strong> — see the calculation explainer under the cost/revenue chart further down for the exact formula.</p>
@@ -242,6 +246,11 @@
       </div>
 
       <div class="explainer-section">
+        <h4>Nerdy Stats</h4>
+        <p>Average prompt/completion length is computed from the same real earnings entries as the Account panel above, excluding <code>base_reward</code> floor-payment rows (which always carry zero token counts and would otherwise skew the average toward zero). Request duration is <strong>not</strong> data from Darkbloom at all - it doesn't expose timing anywhere - so a background thread here watches the daemon's own <code>inference_active</code> flag flip on and off, twice a second, and logs how long each "on" window lasts. It only starts counting from whenever this dashboard first started running, and can undercount requests shorter than the check interval. GPU memory active/cached and KV-backend/MTP settings come straight from the daemon's own state file. Health checks are `darkbloom doctor`'s own findings, refreshed every 5 minutes since doctor makes a real network call - anything doctor reports as a FAIL also shows up as a banner at the top of the page (shown as a caution, not a confirmed outage, since this exact check has been observed to be wrong before). Note: neither this dashboard nor Darkbloom's API expose actual prompt or response text anywhere — only token counts, which is what's shown.</p>
+      </div>
+
+      <div class="explainer-section">
         <h4>Warmup</h4>
         <p>Periodically sends a tiny request to the provider's local endpoint to keep the active model loaded in memory, so it's ready instantly instead of needing to reload when the first real request of the day arrives.</p>
       </div>
@@ -253,8 +262,9 @@
 
       <div class="explainer-section">
         <h4>Charts</h4>
-        <p><strong>Power history</strong> — the same wattage as the live gauges, logged every 5 minutes so you can see trends over hours/days.</p>
+        <p><strong>Power history</strong> — the same wattage as the live gauges, logged every 5 minutes so you can see trends over hours/days. Once there's enough history to need downsampling, a faint dashed "peak" line appears alongside the average — the highest single reading inside each plotted bucket, so brief spikes stay visible even when hundreds of raw samples are compressed into one line.</p>
         <p><strong>Electricity cost vs. estimated revenue</strong> — running totals over time; see its own "How is this calculated?" details below the chart for the exact formula.</p>
+        <p><strong>Net (Revenue − Cost) Over Time</strong> — the same figure as the Net summary card, plotted over time instead of just showing the current number, so you can see whether it's trending up or down.</p>
       </div>
 
       <div class="explainer-section">
@@ -276,6 +286,11 @@
   </div>
 
   <div class="panel">
+    <h2 title="Technical detail pulled from the daemon's own state file and the real earnings API - not needed day to day, but useful when something looks off.">Nerdy Stats</h2>
+    <div id="nerdy-stats"></div>
+  </div>
+
+  <div class="panel">
     <h2 title="Periodically pings the provider's local endpoint to keep the active model loaded in memory, so it's ready the instant real traffic arrives.">Warmup</h2>
     <div id="warmup"></div>
   </div>
@@ -286,7 +301,8 @@
   </div>
 
   <div class="panel">
-    <h2 title="5-minute-resolution power history, including the estimated 7W baseline for non-SoC system draw.">Power (W) — history</h2>
+    <h2 title="5-minute-resolution power history, including the estimated 7W baseline for non-SoC system draw.">Power (W) — history <span id="power-chart-stats" class="gauge-time"></span></h2>
+    <div class="legend" id="power-legend"></div>
     <div class="chart-wrap">
       <svg class="chart" id="chart-power"></svg>
       <div class="tooltip" id="tooltip-power"></div>
@@ -294,7 +310,7 @@
   </div>
 
   <div class="panel">
-    <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Revenue (USD)</h2>
+    <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Revenue (USD) <span id="money-chart-stats" class="gauge-time"></span></h2>
     <div class="legend">
       <span><i style="background:var(--series-cost)"></i>Electricity cost</span>
       <span><i style="background:var(--series-revenue)"></i>Estimated revenue</span>
@@ -310,6 +326,11 @@
       <p><strong>Estimated revenue:</strong> Darkbloom's alpha pricing is roughly $0.05/M input tokens + $0.20/M output tokens; since <code>darkbloom status</code> only reports a combined token count (not split input/output), this uses a blended midpoint of $0.125/M tokens as a rough stand-in - already USD-native, no conversion needed.</p>
       <p><strong>Net (estimated) = Estimated revenue − Accumulated electricity cost.</strong> This is our own guess built from local numbers, not what Darkbloom actually paid - once the account is synced (see the Darkbloom Account panel above), "Net (real balance)" replaces it with your real ledger balance instead.</p>
     </details>
+    <h2 style="margin-top:16px" title="Net = estimated revenue minus electricity cost, over time. Uses the same net_usd figures as the Net card above.">Net (Revenue − Cost) Over Time <span id="net-chart-stats" class="gauge-time"></span></h2>
+    <div class="chart-wrap">
+      <svg class="chart" id="chart-net"></svg>
+      <div class="tooltip" id="tooltip-net"></div>
+    </div>
   </div>
 
   <footer id="footnote"></footer>
@@ -493,7 +514,7 @@ function trustStatus(trust) {
 
 const CARD_TOOLTIPS = {
   'Trust': 'Hardware-attestation level with the coordinator. "hardware" = eligible for real traffic. "self_signed" = online but receiving nothing yet.',
-  'Daemon': 'Whether the darkbloom provider background process is currently running.',
+  'Daemon': 'Whether the darkbloom provider background process is running, and - read straight from the daemon\'s own live state file - whether it\'s idle (warm, waiting) or actively serving a request right this second (pulsing dot).',
   'Requests': 'Requests/tokens served since the LAST daemon restart (this counter resets on every restart - it is not the lifetime total).',
   'Warm models': 'Number of models currently loaded in memory and ready to serve instantly, vs. total downloaded to disk.',
   'Accumulated electricity cost': 'Running total electricity cost since energy-monitor.sh started, based on measured power draw x live SE3 spot price.',
@@ -501,9 +522,11 @@ const CARD_TOOLTIPS = {
   'Net (real balance)': 'Your real Darkbloom account balance (USD) minus accumulated electricity cost (converted from SEK).',
 };
 
-function renderCards(status, energy, account) {
+function renderCards(status, energy, account, daemonState) {
   const t = trustStatus(status.trust);
   const daemonUp = status.daemon && status.daemon.startsWith('running');
+  const active = daemonUp && daemonState && daemonState.inference_active === true;
+  const daemonLabel = !daemonUp ? 'down' : active ? 'running, actively serving' : 'running, idle';
   const latest = energy.latest;
   const cards = [
     {
@@ -513,7 +536,7 @@ function renderCards(status, energy, account) {
     },
     {
       label: 'Daemon',
-      value: `<span class="pill"><span class="dot" style="background:var(--status-${daemonUp ? 'good' : 'critical'})"></span>${daemonUp ? 'running' : 'down'}</span>`,
+      value: `<span class="pill"><span class="dot ${active ? 'pulse' : ''}" style="background:var(--status-${daemonUp ? 'good' : 'critical'})"></span>${daemonLabel}</span>`,
       sub: status.daemon || ''
     },
     { label: 'Requests', value: fmtNum(status.requests_served), sub: fmtNum(status.tokens) + ' tokens' },
@@ -700,7 +723,45 @@ function renderAccount(account) {
   `;
 }
 
-function renderBanners(status, energy) {
+function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
+  const el = document.getElementById('nerdy-stats');
+  if (!el) return;
+
+  const ns = account && account.connected ? account.nerdy_stats : null;
+  const tokenLine = ns && ns.real_jobs
+    ? `Avg prompt length: <strong>${fmtNum(Math.round(ns.avg_prompt_tokens))} tokens</strong> · Avg completion length: <strong>${fmtNum(Math.round(ns.avg_completion_tokens))} tokens</strong> · from ${fmtNum(ns.real_jobs)} real job${ns.real_jobs === 1 ? '' : 's'} (excludes ${fmtNum(ns.base_reward_jobs)} base-reward floor payments, which carry no token counts)`
+    : 'Not enough real (non-base-reward) job data yet to compute token averages.';
+
+  const idur = inferenceDurations || {};
+  const durLine = idur.count > 0
+    ? `Observed request duration: avg <strong>${idur.avg_sec.toFixed(1)}s</strong> · min ${idur.min_sec.toFixed(1)}s · max ${idur.max_sec.toFixed(1)}s, from ${fmtNum(idur.count)} request${idur.count === 1 ? '' : 's'} <span title="Darkbloom exposes no duration/latency data anywhere - this is tracked locally by watching the daemon's inference_active flag twice a second since this dashboard started. May undercount requests shorter than that.">(tracked locally, not from Darkbloom)</span>`
+    : 'No request durations observed yet - builds up over time as real requests come in (Darkbloom itself exposes no timing data, so this is tracked locally).';
+
+  const ds = daemonState || {};
+  const capLine = ds.total_memory_gb != null
+    ? `GPU memory: <strong>${(ds.gpu_memory_active_gb ?? 0).toFixed(2)} GB active</strong> + <strong>${(ds.gpu_memory_cache_gb ?? 0).toFixed(2)} GB cached</strong> of ${ds.total_memory_gb} GB unified memory · usage gaps: <strong>${fmtNum(ds.usage_gaps ?? 0)}</strong>`
+    : 'Daemon state file not available.';
+  const slotsLine = (ds.slots || []).map(s =>
+    `<span class="pill" style="margin-right:12px"><span class="dot" style="background:var(--status-good)"></span>${s.model}: ${s.kv_backend || '?'} KV${s.mtp_enabled ? ', MTP on' : ''}</span>`
+  ).join('');
+
+  const warns = (doctor && doctor.warns) || [];
+  const warnLines = warns.length
+    ? warns.map(w => `<div class="rotation-summary" style="color:var(--status-warning)">⚠ ${w.check ? w.check + ' — ' : ''}${w.detail}</div>`).join('')
+    : `<div class="rotation-summary">No warnings from \`darkbloom doctor\`.</div>`;
+
+  el.innerHTML = `
+    <div class="rotation-summary">${tokenLine}</div>
+    <div class="rotation-summary">${durLine}</div>
+    <div class="rotation-summary">${capLine}</div>
+    ${slotsLine ? `<div class="rotation-summary">${slotsLine}</div>` : ''}
+    <div class="rotation-summary" style="margin-top:6px"><strong>Health checks (\`darkbloom doctor\`, refreshed every 5 min)</strong></div>
+    ${warnLines}
+    <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Actual prompt/response text isn't available anywhere - not in the API, not locally. Only token counts exist, which is what's shown above.</p>
+  `;
+}
+
+function renderBanners(status, energy, doctor) {
   const banners = [];
   if (status.last_error) {
     banners.push(`<div class="banner critical"><span class="dot"></span>${status.last_error}</div>`);
@@ -711,15 +772,30 @@ function renderBanners(status, energy) {
   if (status.trust && !status.trust.startsWith('hardware')) {
     banners.push(`<div class="banner warning"><span class="dot"></span>Trust is "${status.trust}", not hardware-level — no real traffic is being routed here right now. A macOS notification fires automatically if this changes.</div>`);
   }
+  if (doctor && doctor.fails && doctor.fails.length) {
+    doctor.fails.forEach(f => {
+      const label = f.check ? `${f.check}: ` : '';
+      // Darkbloom's own "doctor" check has flagged real false positives before
+      // (e.g. this RAM check, which claims every request fails while hundreds
+      // have visibly succeeded) - show it as a health-check concern to look
+      // into, not a confirmed outage, and reconcile it against what's actually
+      // happening right on this same page instead of leaving that contradiction
+      // for the reader to spot themselves.
+      const reqNote = status.requests_served
+        ? ` In practice, ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} already succeeded since the daemon last started, so treat this as worth a look, not a confirmed outage.`
+        : '';
+      banners.push(`<div class="banner warning"><span class="dot"></span>Darkbloom's own health check ("darkbloom doctor") flags: ${label}${f.detail}${reqNote}${f.fix ? ` Suggested fix: ${f.fix}` : ''}</div>`);
+    });
+  }
   document.getElementById('banners').innerHTML = banners.join('');
 }
 
-function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, valueFmt) {
+function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, valueFmt, opts = {}) {
   const svg = document.getElementById(svgId);
   const tooltip = document.getElementById(tooltipId);
   const w = svg.clientWidth || 900;
   const h = 180;
-  const padL = 4, padR = 4, padT = 8, padB = 20;
+  const padL = 46, padR = 4, padT = 8, padB = 22;
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
   svg.innerHTML = '';
 
@@ -729,26 +805,60 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   }
 
   const allValues = series.flatMap(s => s.values);
-  const max = Math.max(...allValues, 0.0001);
+  const yMax = Math.max(opts.allowNegative ? 0 : -Infinity, ...allValues, 0.0001);
+  const yMin = opts.allowNegative ? Math.min(0, ...allValues) : 0;
+  const yRange = (yMax - yMin) || 0.0001;
   const innerW = w - padL - padR;
   const innerH = h - padT - padB;
+  const yToPixel = (v) => padT + innerH - ((v - yMin) / yRange) * innerH;
 
-  // gridlines (0, mid, max)
+  // gridlines (min, mid, max), labeled with valueFmt
   [0, 0.5, 1].forEach(frac => {
-    const y = padT + innerH - frac * innerH;
+    const val = yMin + frac * yRange;
+    const y = yToPixel(val);
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     g.setAttribute('x1', padL); g.setAttribute('x2', w - padR);
     g.setAttribute('y1', y); g.setAttribute('y2', y);
     g.setAttribute('class', 'gridline');
     svg.appendChild(g);
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', padL - 6); label.setAttribute('y', y + 3);
+    label.setAttribute('text-anchor', 'end');
+    label.setAttribute('class', 'axis-label');
+    label.textContent = valueFmt(val);
+    svg.appendChild(label);
+  });
+
+  // zero-line reference, only meaningful when the domain actually crosses zero
+  if (yMin < 0 && yMax > 0) {
+    const zy = yToPixel(0);
+    const zl = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    zl.setAttribute('x1', padL); zl.setAttribute('x2', w - padR);
+    zl.setAttribute('y1', zy); zl.setAttribute('y2', zy);
+    zl.setAttribute('class', 'zero-line');
+    svg.appendChild(zl);
+  }
+
+  // x-axis time labels: first / middle / last
+  const n0 = timestamps.length;
+  [[0, 'start'], [Math.floor((n0 - 1) / 2), 'middle'], [n0 - 1, 'end']].forEach(([idx, anchor]) => {
+    const x = padL + (n0 === 1 ? 0 : (idx / (n0 - 1)) * innerW);
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', Math.min(w - padR, Math.max(padL, x)));
+    label.setAttribute('y', h - 4);
+    label.setAttribute('text-anchor', anchor);
+    label.setAttribute('class', 'axis-label');
+    label.textContent = fmtTime(timestamps[idx]);
+    svg.appendChild(label);
   });
 
   const allPoints = [];
+  const pathEls = [];
   series.forEach((s, si) => {
     const n = s.values.length;
     const points = s.values.map((v, i) => {
       const x = padL + (n === 1 ? 0 : (i / (n - 1)) * innerW);
-      const y = padT + innerH - (v / max) * innerH;
+      const y = yToPixel(v);
       return [x, y];
     });
     allPoints.push(points);
@@ -757,6 +867,7 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     pathEl.setAttribute('d', path);
     pathEl.setAttribute('class', colorClasses[si]);
     svg.appendChild(pathEl);
+    pathEls.push(pathEl);
   });
 
   // hover overlay
@@ -770,7 +881,7 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const dots = series.map((s, si) => {
     const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     dot.setAttribute('class', 'hover-dot');
-    dot.setAttribute('fill', getComputedStyle(document.body).getPropertyValue(si === 0 ? '--series-cost' : '--series-revenue'));
+    dot.setAttribute('fill', getComputedStyle(pathEls[si]).stroke);
     dot.style.display = 'none';
     svg.appendChild(dot);
     return dot;
@@ -839,23 +950,44 @@ async function refresh() {
   try {
     const res = await fetch('/api/data');
     const data = await res.json();
-    const { status, energy, account, utilization, disk } = data;
+    const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations } = data;
     lastUtilization = utilization || null;
 
-    renderCards(status, energy, account);
-    renderBanners(status, energy);
+    renderCards(status, energy, account, daemon_state);
+    renderBanners(status, energy, doctor);
     renderAccount(account);
     renderDisk(disk);
+    renderNerdyStats(daemon_state, account, doctor, inference_durations);
     updateFavicon(status);
 
     const rows = energy.rows || {};
-    renderLineChart('chart-power', 'tooltip-power',
-      rows.timestamps, [{name: 'Power (incl. baseline)', values: rows.total_power_w || []}],
-      ['line-power'], fmtW);
+
+    const hasPeak = !!(rows.peak_total_power_w && rows.peak_total_power_w.length);
+    document.getElementById('power-legend').innerHTML = hasPeak
+      ? `<span><i style="background:var(--series-cost)"></i>Power (avg per bucket)</span><span><i style="background:var(--series-cost);opacity:.5"></i>Peak (per bucket)</span>`
+      : '';
+    const powerSeries = [{name: 'Power (incl. baseline)', values: rows.total_power_w || []}];
+    const powerColors = ['line-power'];
+    if (hasPeak) { powerSeries.push({name: 'Peak', values: rows.peak_total_power_w}); powerColors.push('line-power-peak'); }
+    renderLineChart('chart-power', 'tooltip-power', rows.timestamps, powerSeries, powerColors, fmtW);
+    const nowW = (rows.total_power_w || []).at(-1);
+    const maxW = Math.max(...(hasPeak ? rows.peak_total_power_w : (rows.total_power_w || [0])));
+    document.getElementById('power-chart-stats').textContent = nowW != null ? `now: ${fmtW(nowW)} · max: ${fmtW(maxW)}` : '';
+
     renderLineChart('chart-money', 'tooltip-money',
       rows.timestamps,
       [{name: 'Electricity cost', values: rows.cum_cost_usd || []}, {name: 'Revenue', values: rows.est_revenue_usd || []}],
       ['line-cost', 'line-revenue'], fmtUsd);
+    const costNow = (rows.cum_cost_usd || []).at(-1), revNow = (rows.est_revenue_usd || []).at(-1);
+    document.getElementById('money-chart-stats').textContent = costNow != null ? `cost now: ${fmtUsd(costNow)} · revenue now: ${fmtUsd(revNow)}` : '';
+
+    renderLineChart('chart-net', 'tooltip-net', rows.timestamps,
+      [{name: 'Net', values: rows.net_usd || []}], ['line-net'], fmtUsd, {allowNegative: true});
+    const netVals = rows.net_usd || [];
+    const netNow = netVals.at(-1);
+    document.getElementById('net-chart-stats').textContent = netNow != null
+      ? `now: ${fmtUsd(netNow)} · min: ${fmtUsd(Math.min(...netVals))} · max: ${fmtUsd(Math.max(...netVals))}`
+      : '';
 
     document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
     const kwhPrice = (rows.elpris_usd_kwh || [])[rows.elpris_usd_kwh?.length - 1];

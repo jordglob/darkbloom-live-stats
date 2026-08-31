@@ -35,6 +35,8 @@ LOCAL_JSON = HOME / ".darkbloom" / "local.json"
 WARMUP_CONFIG = HOME / ".darkbloom" / "warmup.json"
 WARMUP_LOG = HOME / ".darkbloom" / "warmup.log"
 WARMUP_DEFAULT_INTERVAL_MIN = 20  # same cadence as SplittyDev/darkbloom-dashboard
+DAEMON_STATE_PATH = HOME / ".darkbloom" / "daemon-state.json"
+DOCTOR_POLL_INTERVAL_SEC = 300  # doctor makes a real network call + ~2 dozen checks - too heavy for the 10s cadence
 
 # Real account data pulled directly from Darkbloom's own API, using the same
 # device token the `darkbloom` CLI already stores locally after `darkbloom
@@ -224,6 +226,92 @@ def get_ollama_status():
         return {"loaded": models, "count": len(models)}
     except Exception:
         return {"loaded": [], "count": 0}
+
+
+def get_daemon_state():
+    """Reads the daemon's own live state file directly (plain local JSON the
+    daemon rewrites continuously) - gives us inference_active (a request is
+    being served RIGHT NOW, vs. idle-but-warm) plus GPU memory/KV-backend
+    detail that `darkbloom status`'s text output doesn't expose at all."""
+    try:
+        data = json.loads(DAEMON_STATE_PATH.read_text())
+    except Exception:
+        return None
+    stats = data.get("stats") or {}
+    capacity = data.get("capacity") or {}
+    slots = data.get("slots") or []
+    written_at = data.get("written_at")
+    return {
+        "inference_active": data.get("inference_active"),
+        "requests_served": stats.get("requests_served"),
+        "tokens_generated": stats.get("tokens_generated"),
+        "usage_gaps": stats.get("usage_gaps"),
+        "gpu_memory_active_gb": capacity.get("gpu_memory_active_gb"),
+        "gpu_memory_cache_gb": capacity.get("gpu_memory_cache_gb"),
+        "total_memory_gb": capacity.get("total_memory_gb"),
+        "slots": [
+            {"model": s.get("model"), "kv_backend": s.get("kv_backend"), "mtp_enabled": s.get("mtp_enabled")}
+            for s in slots
+        ],
+        "age_sec": round(time.time() - written_at, 1) if written_at else None,
+    }
+
+
+INFERENCE_POLL_SEC = 0.5
+INFERENCE_DURATIONS_LOG = HOME / ".darkbloom" / "inference-durations.csv"
+
+
+def inference_duration_tracker_loop():
+    """Darkbloom exposes no per-request duration/latency anywhere - not in the
+    earnings API, not in logs, not in daemon-state.json beyond the
+    instantaneous inference_active flag. This builds real duration stats
+    ourselves by watching that flag's true->false transitions at a tight poll
+    interval. Necessarily our own observation, not an official Darkbloom
+    number: can undercount requests shorter than the poll interval, and only
+    accumulates data from whenever this thread first started running."""
+    INFERENCE_DURATIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    if not INFERENCE_DURATIONS_LOG.exists():
+        INFERENCE_DURATIONS_LOG.write_text("started_at,ended_at,duration_sec\n")
+    active_since = None
+    while True:
+        try:
+            state = get_daemon_state()
+            active = bool(state and state.get("inference_active"))
+        except Exception:
+            active = None
+        now = time.time()
+        if active and active_since is None:
+            active_since = now
+        elif not active and active_since is not None:
+            duration = now - active_since
+            try:
+                with open(INFERENCE_DURATIONS_LOG, "a") as f:
+                    f.write(f"{active_since},{now},{duration:.3f}\n")
+            except Exception:
+                pass
+            active_since = None
+        time.sleep(INFERENCE_POLL_SEC)
+
+
+def get_inference_duration_stats():
+    """Reads back the local duration log the tracker thread above writes."""
+    empty = {"count": 0, "avg_sec": None, "min_sec": None, "max_sec": None}
+    if not INFERENCE_DURATIONS_LOG.exists():
+        return empty
+    try:
+        with open(INFERENCE_DURATIONS_LOG, newline="") as f:
+            reader = csv.DictReader(f)
+            durations = [float(r["duration_sec"]) for r in reader if r.get("duration_sec")]
+    except Exception:
+        return empty
+    if not durations:
+        return empty
+    return {
+        "count": len(durations),
+        "avg_sec": sum(durations) / len(durations),
+        "min_sec": min(durations),
+        "max_sec": max(durations),
+    }
 
 
 STATUS_PATTERNS = {
@@ -481,6 +569,20 @@ def _build_account_view(raw, age_sec):
             total_local_est += local_est
             total_real += real
 
+    # base_reward entries are flat floor payments with 0 tokens - folding them
+    # into an "average query length" stat would skew it hard toward zero, so
+    # they're excluded here the same way they're excluded from cut_summary above.
+    real_models = {m: d for m, d in per_model.items() if m != "base_reward"}
+    real_jobs = sum(d["jobs"] for d in real_models.values())
+    real_prompt_tokens = sum(d["prompt_tokens"] for d in real_models.values())
+    real_completion_tokens = sum(d["completion_tokens"] for d in real_models.values())
+    nerdy_stats = {
+        "real_jobs": real_jobs,
+        "base_reward_jobs": per_model.get("base_reward", {}).get("jobs", 0),
+        "avg_prompt_tokens": (real_prompt_tokens / real_jobs) if real_jobs else None,
+        "avg_completion_tokens": (real_completion_tokens / real_jobs) if real_jobs else None,
+    }
+
     return {
         "connected": True,
         "age_sec": round(age_sec, 1),
@@ -490,6 +592,7 @@ def _build_account_view(raw, age_sec):
         "total_jobs": raw.get("count"),
         "sample_size": len(raw.get("earnings", [])),
         "per_model": per_model,
+        "nerdy_stats": nerdy_stats,
         "cut_summary": {
             "total_local_estimate_usd": total_local_est,
             "total_real_usd": total_real,
@@ -526,6 +629,65 @@ def get_account_data():
     return _build_account_view(raw, 0)
 
 
+DOCTOR_FIX_RE = re.compile(r"↳\s*fix:\s*(.+)")
+_doctor_cache = {"data": None, "fetched_at": 0.0}
+_doctor_cache_lock = threading.Lock()
+
+
+def _parse_doctor_line(line, prefix):
+    """Parses one [FAIL]/[WARN] line into (check, detail). Most lines use
+    'label — detail'; falls back to the whole remainder as detail with no
+    check label when there's no em-dash (e.g. "[WARN] config: missing,
+    defaults are in memory only"), so nothing is silently dropped."""
+    body = line.split(prefix, 1)[1].strip()
+    if "—" in body:
+        check, detail = body.split("—", 1)
+        return check.strip(), detail.strip()
+    return None, body
+
+
+def _run_doctor():
+    try:
+        out = subprocess.run([str(DARKBLOOM_BIN), "doctor"], capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return None
+    fails, warns = [], []
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[FAIL]"):
+            check, detail = _parse_doctor_line(stripped, "[FAIL]")
+            fails.append({"check": check, "detail": detail, "fix": None})
+        elif stripped.startswith("[WARN]"):
+            check, detail = _parse_doctor_line(stripped, "[WARN]")
+            warns.append({"check": check, "detail": detail})
+        else:
+            m = DOCTOR_FIX_RE.search(stripped)
+            if m and fails:
+                fails[-1]["fix"] = m.group(1).strip()
+    return {"fails": fails, "warns": warns}
+
+
+def get_doctor_report():
+    """`darkbloom doctor` output, parsed for [FAIL]/[WARN] lines - operational
+    health signals (e.g. model doesn't fit in RAM = requests failing to load
+    right now) distinct from routine stats. Unlike daemon-state.json, doctor
+    makes its own network call and runs ~2 dozen checks, so it's cached and
+    refreshed on its own slow cadence, same pattern as get_account_data()."""
+    now = time.time()
+    with _doctor_cache_lock:
+        cached, fetched_at = _doctor_cache["data"], _doctor_cache["fetched_at"]
+        if cached is not None and (now - fetched_at) < DOCTOR_POLL_INTERVAL_SEC:
+            return cached
+    result = _run_doctor()
+    if result is None:
+        with _doctor_cache_lock:
+            return _doctor_cache["data"]  # serve stale rather than nothing
+    with _doctor_cache_lock:
+        _doctor_cache["data"] = result
+        _doctor_cache["fetched_at"] = now
+    return result
+
+
 def get_disk_usage():
     """Downloaded MLX models and how much disk they use, split into the
     currently active model vs. everything else - the leftovers from past
@@ -560,6 +722,33 @@ def get_disk_usage():
     }
 
 
+def _bucket_downsample(rows, max_points):
+    """Groups rows into max_points contiguous buckets and returns each
+    bucket's per-column AVG (for the plotted line) plus the bucket's peak
+    total_power_w (for a peak-envelope overlay) - unlike a fixed-stride pick,
+    this can't silently skip over a brief power spike that happened to fall
+    between two picked samples. Cumulative columns (cost/revenue) are
+    monotonic, so avg vs. peak barely differs there; it mainly matters for
+    the bursty instantaneous power columns."""
+    n = len(rows)
+    bucket_size = n / max_points
+    numeric_keys = ["avg_power_w", "total_power_w", "cum_wh", "cum_cost_sek",
+                     "elpris_sek_kwh", "usd_sek", "est_revenue_usd_approx"]
+    out_rows = []
+    peak_total_power_w = []
+    for i in range(max_points):
+        start = int(i * bucket_size)
+        end = n if i == max_points - 1 else max(int((i + 1) * bucket_size), start + 1)
+        bucket = rows[start:end]
+        last = dict(bucket[-1])
+        for k in numeric_keys:
+            vals = [float(r.get(k, 0) or 0) for r in bucket]
+            last[k] = sum(vals) / len(vals)
+        peak_total_power_w.append(max(float(r.get("total_power_w", 0) or 0) for r in bucket))
+        out_rows.append(last)
+    return out_rows, peak_total_power_w
+
+
 def get_energy_series():
     if not CSV_PATH.exists():
         return {"rows": [], "latest": None, "power_monitoring_active": False}
@@ -573,15 +762,14 @@ def get_energy_series():
     if not rows:
         return {"rows": [], "latest": None, "power_monitoring_active": False}
 
-    # downsample evenly if there are too many points
-    if len(rows) > MAX_POINTS:
-        step = len(rows) / MAX_POINTS
-        sampled = [rows[int(i * step)] for i in range(MAX_POINTS)]
-        sampled[-1] = rows[-1]
-        rows = sampled
-
     latest = rows[-1]
     power_active = any(float(r.get("avg_power_w", 0) or 0) > 0 for r in rows[-20:])
+
+    # downsample evenly if there are too many points - bucket-averaged, with a
+    # separate peak-power track so brief spikes survive the downsampling.
+    peak_total_power_w = None
+    if len(rows) > MAX_POINTS:
+        rows, peak_total_power_w = _bucket_downsample(rows, MAX_POINTS)
 
     # Electricity price is sourced in SEK (Swedish spot market) but the dashboard
     # displays USD throughout - convert per-row using that row's own exchange
@@ -595,6 +783,7 @@ def get_energy_series():
         "timestamps": [r["timestamp"] for r in rows],
         "avg_power_w": [float(r.get("avg_power_w", 0) or 0) for r in rows],
         "total_power_w": [float(r.get("total_power_w", 0) or 0) for r in rows],
+        "peak_total_power_w": peak_total_power_w,
         "cum_wh": [float(r.get("cum_wh", 0) or 0) for r in rows],
         "cum_cost_usd": cum_cost_usd,
         "est_revenue_usd": est_revenue_usd,
@@ -632,6 +821,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "account": get_account_data(),
                 "utilization": get_utilization(),
                 "disk": get_disk_usage(),
+                "daemon_state": get_daemon_state(),
+                "doctor": get_doctor_report(),
+                "inference_durations": get_inference_duration_stats(),
             }
             self._send_json(data)
         elif self.path == "/api/power":
@@ -692,6 +884,7 @@ class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 if __name__ == "__main__":
     threading.Thread(target=warmup_loop, daemon=True).start()
     threading.Thread(target=trust_monitor_loop, daemon=True).start()
+    threading.Thread(target=inference_duration_tracker_loop, daemon=True).start()
     with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:
         print(f"Darkbloom Live & Stats running at http://127.0.0.1:{PORT}")
         httpd.serve_forever()
