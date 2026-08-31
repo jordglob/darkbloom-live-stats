@@ -189,6 +189,18 @@
 
   .cut-positive { color: var(--status-critical); }
   .cut-negative { color: var(--status-good); }
+
+  @keyframes bounce-up {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-6px); }
+  }
+  .bounce-arrow { display: inline-block; animation: bounce-up 1s infinite; font-size: 18px; color: var(--status-good); }
+  .sync-steps { font-size: 12px; margin: 8px 0 8px 20px; padding: 0; color: var(--text-secondary); line-height: 1.7; }
+  .sync-steps a { color: var(--series-cost); }
+  kbd { background: var(--surface-1); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: ui-monospace, monospace; font-size: 11px; }
+  .sync-help summary { cursor: pointer; font-size: 11px; color: var(--text-muted); }
+  .sync-help[open] summary { margin-bottom: 6px; }
+  .sync-help p { font-size: 11px; color: var(--text-muted); margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -210,8 +222,20 @@
     <h2 title="Real data pulled from your Darkbloom account (console.darkbloom.dev), not a live connection - refreshed manually.">Darkbloom Account <span class="gauge-time">(real data, not live-connected)</span></h2>
     <div id="account"></div>
     <div class="rotation-summary" style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border)">
-      <a id="sync-bookmarklet" href="javascript:(function(){fetch('/api/me/providers').then(function(r){return r.json();}).then(function(p){fetch('/api/me/earnings?limit=100').then(function(r){return r.json();}).then(function(e){var pm={};var arr=e.earnings||[];for(var i=0;i<arr.length;i++){var x=arr[i];var m=x.model||'unknown';if(!pm[m])pm[m]={amount_usd:0,prompt_tokens:0,completion_tokens:0,jobs:0};pm[m].amount_usd+=(x.amount_micro_usd||0)/1e6;pm[m].prompt_tokens+=x.prompt_tokens||0;pm[m].completion_tokens+=x.completion_tokens||0;pm[m].jobs+=1;}var p0=(p.providers||[])[0];var summary={balance_usd:e.available_balance_usd,total_jobs:e.count,sample_size:arr.length,per_model:pm,trust_level:p0?p0.trust_level:null,provider_status:p0?p0.status:null};window.open('http://127.0.0.1:8787/api/account_data_get?d='+encodeURIComponent(JSON.stringify(summary)),'_blank','width=320,height=120');});});})();" style="display:inline-block; background:var(--surface-1); border:1px solid var(--border); border-radius:8px; padding:6px 12px; font-weight:600; text-decoration:none; color:var(--text-primary); cursor:grab;" onclick="alert('Drag this button to your bookmarks bar instead of clicking it here - clicking it on this page won\'t do anything useful since this isn\'t the Darkbloom account page.'); return false;">↻ Sync Darkbloom Account</a>
-      <span style="font-size:11px"> — drag this to your bookmarks bar, then click it while on <code>console.darkbloom.dev</code> to refresh the data above.</span>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span class="bounce-arrow" title="Drag this button, don't click it here">↑</span>
+        <a id="sync-bookmarklet" href="javascript:(function(){fetch('/api/me/providers').then(function(r){return r.json();}).then(function(p){fetch('/api/me/earnings?limit=100').then(function(r){return r.json();}).then(function(e){var pm={};var arr=e.earnings||[];for(var i=0;i<arr.length;i++){var x=arr[i];var m=x.model||'unknown';if(!pm[m])pm[m]={amount_usd:0,prompt_tokens:0,completion_tokens:0,jobs:0};pm[m].amount_usd+=(x.amount_micro_usd||0)/1e6;pm[m].prompt_tokens+=x.prompt_tokens||0;pm[m].completion_tokens+=x.completion_tokens||0;pm[m].jobs+=1;}var p0=(p.providers||[])[0];var summary={balance_usd:e.available_balance_usd,total_jobs:e.count,sample_size:arr.length,per_model:pm,trust_level:p0?p0.trust_level:null,provider_status:p0?p0.status:null};window.open('http://127.0.0.1:8787/api/account_data_get?d='+encodeURIComponent(JSON.stringify(summary)),'_blank','width=320,height=120');});});})();" style="display:inline-block; background:var(--surface-1); border:1px solid var(--border); border-radius:8px; padding:6px 12px; font-weight:600; text-decoration:none; color:var(--text-primary); cursor:grab;" onclick="alert('This button needs to be DRAGGED to your bookmarks bar first (see the steps below) - clicking it here on the dashboard does nothing, because the sync code needs to run on the Darkbloom account page, not this one.'); return false;">↻ Sync Darkbloom Account</a>
+      </div>
+      <ol class="sync-steps">
+        <li>No bookmarks bar visible in Chrome? Press <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>B</kbd> to show it (or Chrome menu → Bookmarks → Show Bookmarks Bar)</li>
+        <li><strong>Drag</strong> the button above (↑) up into that bar - don't click it here, dragging is what saves it</li>
+        <li>Open <a href="https://console.darkbloom.dev/providers/earnings" target="_blank" rel="noopener">console.darkbloom.dev</a> in a new tab while logged in, then <strong>click</strong> the bookmark from the bar - a tiny tab flashes and closes itself, that's the sync completing</li>
+      </ol>
+      <details class="sync-help">
+        <summary>Still stuck? More detail</summary>
+        <p>A "bookmarklet" is a bookmark whose address is a bit of code instead of a link - clicking it runs that code on whatever page you're currently on. That's why it only works from console.darkbloom.dev: it needs to fetch data from that page.</p>
+        <p>Dragging works differently per browser: on Chrome/Safari, click-and-hold on the button then move your mouse up to the bar before releasing. If dragging genuinely won't work for you, right-click the bookmarks bar → Add page..., name it anything, and paste the button's link as the URL (right-click the button above → Copy Link).</p>
+      </details>
     </div>
   </div>
 
