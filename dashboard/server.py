@@ -12,7 +12,6 @@ import subprocess
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -37,12 +36,14 @@ WARMUP_CONFIG = HOME / ".darkbloom" / "warmup.json"
 WARMUP_LOG = HOME / ".darkbloom" / "warmup.log"
 WARMUP_DEFAULT_INTERVAL_MIN = 20  # same cadence as SplittyDev/darkbloom-dashboard
 
-# Real account data from console.darkbloom.dev (api/me/providers + api/me/earnings).
-# We NEVER extract the session cookie - the data comes in via a small snippet
-# that runs in your already-logged-in browser tab (see README/bookmarklet).
-# If no sync has arrived in a while, "not connected" is shown instead of guessed data.
-ACCOUNT_DATA_PATH = HOME / ".darkbloom" / "account-data.json"
-ACCOUNT_DATA_STALE_SEC = 300  # >5 min without an update = "not connected"
+# Real account data pulled directly from Darkbloom's own API, using the same
+# device token the `darkbloom` CLI already stores locally after `darkbloom
+# login` - we never touch or store any credential ourselves, just read the
+# same file the CLI reads. No browser step needed.
+AUTH_TOKEN_PATH = HOME / ".darkbloom" / "auth_token"
+ACCOUNT_API_URL = "https://api.darkbloom.dev/v1/provider/account-earnings"
+ACCOUNT_API_LIMIT = 1000  # the API's practical max per request; plenty for per-model stats
+ACCOUNT_POLL_INTERVAL_SEC = 30  # how often we actually hit Darkbloom's API
 
 SAMPLE_HEADER_RE = re.compile(r"\*\*\* Sampled system activity \((.+?)\) \((.+?)\) \*\*\*")
 
@@ -174,6 +175,42 @@ def get_ram_status():
         }
     except Exception:
         return None
+
+
+FAN_RE = re.compile(r"Fan \d+:\s*actual\s*(\d+),\s*target\s*(\d+),\s*range\s*(\d+)-(\d+)")
+GPU_SENSOR_TEMP_RE = re.compile(r"=([\d.]+)\s*C")
+
+
+def get_fan_temp():
+    """Fan RPM and GPU temperature, read via `darkbloom fan status` - a
+    read-only report that does NOT enable Darkbloom's fan-control helper,
+    just reads the same hardware sensors it would use. Apple Silicon doesn't
+    expose fan speed or die temperature through powermetrics at all, so this
+    is the only practical source without writing a native SMC-reading helper."""
+    try:
+        out = subprocess.run(
+            [str(DARKBLOOM_BIN), "fan", "status"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except Exception:
+        return None
+
+    fan_match = FAN_RE.search(out)
+    fan_rpm = int(fan_match.group(1)) if fan_match else None
+    fan_max_rpm = int(fan_match.group(4)) if fan_match else None
+
+    gpu_temps = [float(v) for v in GPU_SENSOR_TEMP_RE.findall(out)]
+    gpu_temp_c = round(sum(gpu_temps) / len(gpu_temps), 1) if gpu_temps else None
+    gpu_temp_max_c = round(max(gpu_temps), 1) if gpu_temps else None
+
+    if fan_rpm is None and gpu_temp_c is None:
+        return None
+    return {
+        "fan_rpm": fan_rpm,
+        "fan_max_rpm": fan_max_rpm,
+        "gpu_temp_c": gpu_temp_c,
+        "gpu_temp_max_c": gpu_temp_max_c,
+    }
 
 
 def get_ollama_status():
@@ -362,10 +399,10 @@ def trust_monitor_loop():
                     was_hw = last_trust.startswith("hardware")
                     now_hw = trust.startswith("hardware")
                     if was_hw and not now_hw:
-                        notify_mac("Darkbloom Monitor", f"Trust dropped: {last_trust} -> {trust}")
+                        notify_mac("Darkbloom Live & Stats", f"Trust dropped: {last_trust} -> {trust}")
                         log_trust_change(f"DROP {last_trust} -> {trust}")
                     elif not was_hw and now_hw:
-                        notify_mac("Darkbloom Monitor", f"Trust recovered: {trust}")
+                        notify_mac("Darkbloom Live & Stats", f"Trust recovered: {trust}")
                         log_trust_change(f"RECOVER {last_trust} -> {trust}")
                     else:
                         log_trust_change(f"{last_trust} -> {trust}")
@@ -389,41 +426,50 @@ def warmup_loop():
         time.sleep(sleep_sec)
 
 
-def get_account_data():
-    """Real account data (already aggregated per model), last received via a
-    local POST - not directly from the browser (mixed-content/CORS makes that
-    impractical from an https page to an http server). See the README for how
-    to grab a snapshot from the logged-in browser tab and post it here.
-    Returns connected=False if it's too old or missing."""
-    if not ACCOUNT_DATA_PATH.exists():
-        return {"connected": False, "reason": "no account data received yet"}
+_account_cache = {"data": None, "fetched_at": 0.0}
+_account_cache_lock = threading.Lock()
+
+
+def _fetch_real_account_data():
+    """Hits Darkbloom's real earnings API directly with the CLI's own local
+    device token - no browser, no bookmarklet. Returns parsed JSON or None
+    on any failure (missing token, network error, non-200, bad JSON)."""
+    if not AUTH_TOKEN_PATH.exists():
+        return None
     try:
-        raw = json.loads(ACCOUNT_DATA_PATH.read_text())
-    except Exception as e:
-        return {"connected": False, "reason": f"could not read cached data: {e}"}
+        token = AUTH_TOKEN_PATH.read_text().strip()
+        if not token:
+            return None
+        req = urllib.request.Request(
+            f"{ACCOUNT_API_URL}?limit={ACCOUNT_API_LIMIT}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
 
-    received_at = raw.get("received_at", 0)
-    age_sec = time.time() - received_at
-    if age_sec > ACCOUNT_DATA_STALE_SEC:
-        return {
-            "connected": False,
-            "reason": f"last sync is {int(age_sec)}s old (>{ACCOUNT_DATA_STALE_SEC}s)",
-        }
 
-    raw["connected"] = True
-    raw["age_sec"] = age_sec
+def _build_account_view(raw, age_sec):
+    """Aggregates the raw earnings list per model and computes the same
+    'local estimate vs. real payout' comparison as before. base_reward-style
+    entries (no model tag) naturally fall into their own 'unknown' bucket and
+    are excluded from the aggregate cut, since they aren't token-based."""
+    per_model = {}
+    for e in raw.get("earnings", []):
+        model = e.get("model") or "unknown"
+        d = per_model.setdefault(model, {"amount_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "jobs": 0})
+        d["amount_usd"] += (e.get("amount_micro_usd", 0) or 0) / 1e6
+        d["prompt_tokens"] += e.get("prompt_tokens", 0) or 0
+        d["completion_tokens"] += e.get("completion_tokens", 0) or 0
+        d["jobs"] += 1
 
-    # "DB cut": compare what our own naive flat-rate formula would have guessed
-    # for the SAME real tokens against what Darkbloom's ledger actually paid.
-    # This is not an official platform fee (alpha is advertised as 0% fee) - it's
-    # just the gap between our guess and reality, whatever is driving it.
     total_local_est = 0.0
     total_real = 0.0
-    per_model = raw.get("per_model", {})
     for model, d in per_model.items():
-        tokens = (d.get("prompt_tokens", 0) or 0) + (d.get("completion_tokens", 0) or 0)
+        tokens = d["prompt_tokens"] + d["completion_tokens"]
         local_est = tokens * LOCAL_BLENDED_USD_PER_TOKEN
-        real = d.get("amount_usd", 0) or 0
+        real = d["amount_usd"]
         d["local_estimate_usd"] = local_est
         d["cut_pct"] = ((local_est - real) / local_est * 100) if local_est > 0 else None
         # Profitability per model: the REAL rate Darkbloom actually paid per
@@ -431,19 +477,53 @@ def get_account_data():
         # not just raw job/token volume (a model with fewer jobs can still pay
         # a higher effective rate per token).
         d["real_usd_per_m_tokens"] = (real / tokens * 1_000_000) if tokens > 0 else None
-        # Only fold token-based models into the aggregate cut - a flat, non-token
-        # reward like base_reward has no comparable local estimate and would
-        # otherwise skew the overall percentage meaninglessly.
         if tokens > 0:
             total_local_est += local_est
             total_real += real
 
-    raw["cut_summary"] = {
-        "total_local_estimate_usd": total_local_est,
-        "total_real_usd": total_real,
-        "cut_pct": ((total_local_est - total_real) / total_local_est * 100) if total_local_est > 0 else None,
+    return {
+        "connected": True,
+        "age_sec": round(age_sec, 1),
+        "balance_usd": raw.get("available_balance_usd"),
+        "withdrawable_balance_usd": raw.get("withdrawable_balance_usd"),
+        "lifetime_usd": raw.get("total_usd"),
+        "total_jobs": raw.get("count"),
+        "sample_size": len(raw.get("earnings", [])),
+        "per_model": per_model,
+        "cut_summary": {
+            "total_local_estimate_usd": total_local_est,
+            "total_real_usd": total_real,
+            "cut_pct": ((total_local_est - total_real) / total_local_est * 100) if total_local_est > 0 else None,
+        },
     }
-    return raw
+
+
+def get_account_data():
+    """Real account data, polled directly from Darkbloom's API on its own
+    cadence (ACCOUNT_POLL_INTERVAL_SEC), independent of how often the
+    dashboard itself is polled. Serves a cached snapshot between refreshes,
+    and keeps serving the last good snapshot (rather than going blank) if a
+    refresh attempt fails."""
+    now = time.time()
+    with _account_cache_lock:
+        cached, fetched_at = _account_cache["data"], _account_cache["fetched_at"]
+        if cached is not None and (now - fetched_at) < ACCOUNT_POLL_INTERVAL_SEC:
+            return _build_account_view(cached, now - fetched_at)
+
+    raw = _fetch_real_account_data()
+    if raw is None:
+        with _account_cache_lock:
+            cached, fetched_at = _account_cache["data"], _account_cache["fetched_at"]
+        if cached is not None:
+            return _build_account_view(cached, now - fetched_at)
+        if not AUTH_TOKEN_PATH.exists():
+            return {"connected": False, "reason": "no auth_token found - run `darkbloom login` first"}
+        return {"connected": False, "reason": "could not reach Darkbloom's API right now"}
+
+    with _account_cache_lock:
+        _account_cache["data"] = raw
+        _account_cache["fetched_at"] = now
+    return _build_account_view(raw, 0)
 
 
 def get_disk_usage():
@@ -503,15 +583,24 @@ def get_energy_series():
     latest = rows[-1]
     power_active = any(float(r.get("avg_power_w", 0) or 0) > 0 for r in rows[-20:])
 
+    # Electricity price is sourced in SEK (Swedish spot market) but the dashboard
+    # displays USD throughout - convert per-row using that row's own exchange
+    # rate rather than a single current rate, so historical points stay accurate.
+    def usd_rate(r):
+        return float(r.get("usd_sek", 0) or 0) or 9.5
+
+    cum_cost_usd = [float(r.get("cum_cost_sek", 0) or 0) / usd_rate(r) for r in rows]
+    est_revenue_usd = [float(r.get("est_revenue_usd_approx", 0) or 0) for r in rows]
     series = {
         "timestamps": [r["timestamp"] for r in rows],
         "avg_power_w": [float(r.get("avg_power_w", 0) or 0) for r in rows],
         "total_power_w": [float(r.get("total_power_w", 0) or 0) for r in rows],
         "cum_wh": [float(r.get("cum_wh", 0) or 0) for r in rows],
-        "cum_cost_sek": [float(r.get("cum_cost_sek", 0) or 0) for r in rows],
-        "est_revenue_sek": [float(r.get("est_revenue_sek_approx", 0) or 0) for r in rows],
-        "net_sek": [float(r.get("net_sek_approx", 0) or 0) for r in rows],
-        "elpris_sek_kwh": [float(r.get("elpris_sek_kwh", 0) or 0) for r in rows],
+        "cum_cost_usd": cum_cost_usd,
+        "est_revenue_usd": est_revenue_usd,
+        "net_usd": [rev - cost for rev, cost in zip(est_revenue_usd, cum_cost_usd)],
+        "elpris_usd_kwh": [float(r.get("elpris_sek_kwh", 0) or 0) / usd_rate(r) for r in rows],
+        "usd_sek": [usd_rate(r) for r in rows],
     }
     return {
         "rows": series,
@@ -519,13 +608,6 @@ def get_energy_series():
         "power_monitoring_active": power_active,
         "total_rows": len(rows),
     }
-
-
-SYNC_OK_HTML = b"""<!doctype html><html><body style="font-family:-apple-system,sans-serif;padding:24px;color:#0a0">
-<div style="font-size:20px">Darkbloom Monitor: synced</div>
-<div style="font-size:13px;color:#888">This tab closes itself...</div>
-<script>setTimeout(function(){window.close();}, 500);</script>
-</body></html>"""
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -542,29 +624,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.startswith("/api/account_data_get"):
-            # Bookmarklet sync (see dashboard footer): an https page can't fetch()
-            # OR <img src=...> a plain http:// endpoint - Chrome now blocks both as
-            # mixed content. Top-level NAVIGATION isn't restricted, though, so the
-            # bookmarklet opens this URL in a new tab (window.open), which we
-            # immediately close again via the returned page's own script.
-            parsed = urllib.parse.urlparse(self.path)
-            qs = urllib.parse.parse_qs(parsed.query)
-            raw = qs.get("d", [None])[0]
-            if raw:
-                try:
-                    body = json.loads(urllib.parse.unquote(raw))
-                    body["received_at"] = time.time()
-                    ACCOUNT_DATA_PATH.write_text(json.dumps(body))
-                except Exception:
-                    pass
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(SYNC_OK_HTML)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(SYNC_OK_HTML)
-        elif self.path == "/api/data":
+        if self.path == "/api/data":
             data = {
                 "status": get_darkbloom_status(),
                 "energy": get_energy_series(),
@@ -584,6 +644,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "power": get_live_power(),
                 "ram": get_ram_status(),
                 "ollama": get_ollama_status(),
+                "fan_temp": get_fan_temp(),
             })
         elif self.path == "/api/warmup":
             cfg = read_warmup_config()
@@ -602,8 +663,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        # Note: these are POSTed locally (curl on the same machine), not from the
-        # browser - no CORS needed. See README for the account_data flow.
         if self.path == "/api/warmup/toggle":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -615,12 +674,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cfg["interval_min"] = max(1, int(body["interval_min"]))
             write_warmup_config(cfg)
             self._send_json(cfg)
-        elif self.path == "/api/account_data":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length) or b"{}")
-            body["received_at"] = time.time()
-            ACCOUNT_DATA_PATH.write_text(json.dumps(body))
-            self._send_json({"ok": True})
         else:
             self.send_response(404)
             self.end_headers()
@@ -640,5 +693,5 @@ if __name__ == "__main__":
     threading.Thread(target=warmup_loop, daemon=True).start()
     threading.Thread(target=trust_monitor_loop, daemon=True).start()
     with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:
-        print(f"Darkbloom Monitor running at http://127.0.0.1:{PORT}")
+        print(f"Darkbloom Live & Stats running at http://127.0.0.1:{PORT}")
         httpd.serve_forever()

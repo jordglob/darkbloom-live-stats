@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Darkbloom Monitor</title>
+<title>Darkbloom Live & Stats</title>
 <style>
   :root {
     color-scheme: light;
@@ -190,14 +190,6 @@
   .cut-positive { color: var(--status-critical); }
   .cut-negative { color: var(--status-good); }
 
-  @keyframes bounce-up {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-6px); }
-  }
-  .bounce-arrow { display: inline-block; animation: bounce-up 1s infinite; font-size: 18px; color: var(--status-good); }
-  .sync-steps { font-size: 12px; margin: 8px 0 8px 20px; padding: 0; color: var(--text-secondary); line-height: 1.7; }
-  .sync-steps a { color: var(--series-cost); }
-  kbd { background: var(--surface-1); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-family: ui-monospace, monospace; font-size: 11px; }
   .sync-help summary { cursor: pointer; font-size: 11px; color: var(--text-muted); }
   .sync-help[open] summary { margin-bottom: 6px; }
   .sync-help p { font-size: 11px; color: var(--text-muted); margin: 4px 0; }
@@ -213,8 +205,11 @@
 </head>
 <body>
   <header>
-    <h1>Darkbloom Monitor</h1>
-    <div id="updated">loading…</div>
+    <h1>Darkbloom Live & Stats</h1>
+    <div style="text-align:right;">
+      <div id="kwh-price" style="font-size:13px; font-weight:600; color:var(--text-secondary);"></div>
+      <div id="updated">loading…</div>
+    </div>
   </header>
 
   <div id="banners"></div>
@@ -243,7 +238,7 @@
 
       <div class="explainer-section">
         <h4>Darkbloom Account (real payout vs. our own estimate)</h4>
-        <p>Real jobs/tokens/payout per model, pulled from your actual Darkbloom account ledger via the sync bookmarklet (not a live connection — you refresh it manually). The "Darkbloom gap" column compares what this dashboard's own rough flat-rate guess would have paid for the same tokens against what Darkbloom's ledger actually paid — it is <strong>not</strong> an official platform fee or a claim about Darkbloom's pricing. It's just a check on our own estimate's accuracy, and our simplistic single blended rate (not split by input/output pricing) is probably the thing that's actually off.</p>
+        <p>Real jobs/tokens/payout per model, pulled directly from Darkbloom's own API every 30 seconds - the same device token `darkbloom login` already stores locally, no browser step needed. The "Darkbloom gap" column compares what this dashboard's own rough flat-rate guess would have paid for the same tokens against what Darkbloom's ledger actually paid — it is <strong>not</strong> an official platform fee or a claim about Darkbloom's pricing. It's just a check on our own estimate's accuracy, and our simplistic single blended rate (not split by input/output pricing) is probably the thing that's actually off.</p>
       </div>
 
       <div class="explainer-section">
@@ -276,24 +271,8 @@
   </div>
 
   <div class="panel">
-    <h2 title="Real data pulled from your Darkbloom account (console.darkbloom.dev), not a live connection - refreshed manually.">Darkbloom Account <span class="gauge-time">(real data, not live-connected)</span></h2>
+    <h2 title="Real data pulled directly from Darkbloom's own API, using the same device token the CLI already stores locally. Refreshed automatically every 30s.">Darkbloom Account <span class="gauge-time">(live, synced automatically)</span></h2>
     <div id="account"></div>
-    <div class="rotation-summary" style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border)">
-      <div style="display:flex; align-items:center; gap:8px;">
-        <span class="bounce-arrow" title="Drag this button, don't click it here">↑</span>
-        <a id="sync-bookmarklet" href="javascript:(function(){fetch('/api/me/providers').then(function(r){return r.json();}).then(function(p){fetch('/api/me/earnings?limit=100').then(function(r){return r.json();}).then(function(e){var pm={};var arr=e.earnings||[];for(var i=0;i<arr.length;i++){var x=arr[i];var m=x.model||'unknown';if(!pm[m])pm[m]={amount_usd:0,prompt_tokens:0,completion_tokens:0,jobs:0};pm[m].amount_usd+=(x.amount_micro_usd||0)/1e6;pm[m].prompt_tokens+=x.prompt_tokens||0;pm[m].completion_tokens+=x.completion_tokens||0;pm[m].jobs+=1;}var p0=(p.providers||[])[0];var summary={balance_usd:e.available_balance_usd,total_jobs:e.count,sample_size:arr.length,per_model:pm,trust_level:p0?p0.trust_level:null,provider_status:p0?p0.status:null};window.open('http://127.0.0.1:8787/api/account_data_get?d='+encodeURIComponent(JSON.stringify(summary)),'_blank','width=320,height=120');});});})();" style="display:inline-block; background:var(--surface-1); border:1px solid var(--border); border-radius:8px; padding:6px 12px; font-weight:600; text-decoration:none; color:var(--text-primary); cursor:grab;" onclick="alert('This button needs to be DRAGGED to your bookmarks bar first (see the steps below) - clicking it here on the dashboard does nothing, because the sync code needs to run on the Darkbloom account page, not this one.'); return false;">↻ Sync Darkbloom Account</a>
-      </div>
-      <ol class="sync-steps">
-        <li>No bookmarks bar visible in Chrome? Press <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>B</kbd> to show it (or Chrome menu → Bookmarks → Show Bookmarks Bar)</li>
-        <li><strong>Drag</strong> the button above (↑) up into that bar - don't click it here, dragging is what saves it</li>
-        <li>Open <a href="https://console.darkbloom.dev/providers/earnings" target="_blank" rel="noopener">console.darkbloom.dev</a> in a new tab while logged in, then <strong>click</strong> the bookmark from the bar - a tiny tab flashes and closes itself, that's the sync completing</li>
-      </ol>
-      <details class="sync-help">
-        <summary>Still stuck? More detail</summary>
-        <p>A "bookmarklet" is a bookmark whose address is a bit of code instead of a link - clicking it runs that code on whatever page you're currently on. That's why it only works from console.darkbloom.dev: it needs to fetch data from that page.</p>
-        <p>Dragging works differently per browser: on Chrome/Safari, click-and-hold on the button then move your mouse up to the bar before releasing. If dragging genuinely won't work for you, right-click the bookmarks bar → Add page..., name it anything, and paste the button's link as the URL (right-click the button above → Copy Link).</p>
-      </details>
-    </div>
   </div>
 
   <div class="panel">
@@ -315,7 +294,7 @@
   </div>
 
   <div class="panel">
-    <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Revenue (SEK)</h2>
+    <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Revenue (USD)</h2>
     <div class="legend">
       <span><i style="background:var(--series-cost)"></i>Electricity cost</span>
       <span><i style="background:var(--series-revenue)"></i>Estimated revenue</span>
@@ -326,9 +305,9 @@
     </div>
     <details class="sync-help" style="margin-top:10px">
       <summary>How is the kWh price and Net figure calculated?</summary>
-      <p><strong>Electricity price:</strong> fetched live from <a href="https://www.elprisetjustnu.se" target="_blank" rel="noopener">elprisetjustnu.se</a> (Sweden, zone SE3), re-checked every 15 minutes. It's the actual spot price for the current hour, not an estimate.</p>
-      <p><strong>Cost so far:</strong> every 5 minutes, measured power draw (CPU+GPU from powermetrics, plus a fixed 7W baseline guess for RAM/disk/fans/PSU loss that powermetrics doesn't see) is converted to the energy used in that 5-minute slice, then priced at the current SEK/kWh. Those slices add up into the running "Accumulated electricity cost" card and the cost line on this chart.</p>
-      <p><strong>Estimated revenue:</strong> Darkbloom's alpha pricing is roughly $0.05/M input tokens + $0.20/M output tokens; since <code>darkbloom status</code> only reports a combined token count (not split input/output), this uses a blended midpoint of $0.125/M tokens as a rough stand-in, converted to SEK at the current USD/SEK rate (checked hourly).</p>
+      <p><strong>Electricity price:</strong> fetched live from <a href="https://www.elprisetjustnu.se" target="_blank" rel="noopener">elprisetjustnu.se</a> (Sweden, zone SE3), re-checked every 15 minutes - it's the actual spot price for the current hour, not an estimate. The source is Swedish SEK; this dashboard converts to USD (checked hourly) so everything on the page shares one currency.</p>
+      <p><strong>Cost so far:</strong> every 5 minutes, measured power draw (CPU+GPU from powermetrics, plus a fixed 7W baseline guess for RAM/disk/fans/PSU loss that powermetrics doesn't see) is converted to the energy used in that 5-minute slice, then priced at that slice's own USD/kWh rate. Those slices add up into the running "Accumulated electricity cost" card and the cost line on this chart.</p>
+      <p><strong>Estimated revenue:</strong> Darkbloom's alpha pricing is roughly $0.05/M input tokens + $0.20/M output tokens; since <code>darkbloom status</code> only reports a combined token count (not split input/output), this uses a blended midpoint of $0.125/M tokens as a rough stand-in - already USD-native, no conversion needed.</p>
       <p><strong>Net (estimated) = Estimated revenue − Accumulated electricity cost.</strong> This is our own guess built from local numbers, not what Darkbloom actually paid - once the account is synced (see the Darkbloom Account panel above), "Net (real balance)" replaces it with your real ledger balance instead.</p>
     </details>
   </div>
@@ -345,12 +324,17 @@ const GAUGES = [
   { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
   { id: 'total', label: 'Total (incl. baseline)', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total' },
   { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
+  { id: 'fan', label: 'Fan Speed', source: 'fan_temp', key: 'fan_rpm', max: 4900, unit: 'RPM', color: '--gauge-cpu',
+    tooltip: 'Fan RPM, read via `darkbloom fan status` (read-only - does not enable fan control). Apple Silicon does not expose this via powermetrics at all.' },
+  { id: 'temp', label: 'GPU Temp', source: 'fan_temp', key: 'gpu_temp_c', max: 100, unit: '°C', color: '--gauge-gpu',
+    tooltip: 'Average across all reported GPU thermal sensors, via `darkbloom fan status`.' },
   { id: 'util', label: 'Utilization (last hour)', source: 'utilization', key: 'active_pct', max: 100, unit: '%', color: '--gauge-total',
     tooltip: 'Percent of the 5-minute windows in the last hour that actually saw new requests arrive (based on the real requests_served counter, not a power-draw guess). 0% with normal trust/daemon status just means no traffic is coming in right now, not a fault.' },
 ];
 let lastUtilization = null;
 let lastRam = null;
 let lastOllama = null;
+let lastFanTemp = null;
 const GAUGE_R = 80;
 const GAUGE_ARC_LEN = Math.PI * GAUGE_R; // half-circle arc length
 
@@ -386,6 +370,7 @@ function updateGauges(data) {
   const power = data && data.power;
   const ram = data && data.ram;
   const utilization = data && data.utilization;
+  const fanTemp = data && data.fan_temp;
   if (!power && !ram) {
     timeEl.textContent = '(no data yet — waiting on powermetrics)';
     GAUGES.forEach(g => {
@@ -396,7 +381,7 @@ function updateGauges(data) {
   }
   timeEl.textContent = power && power.sample_time ? `latest sample: ${power.sample_time}` : '';
   GAUGES.forEach(g => {
-    const src = g.source === 'ram' ? ram : g.source === 'utilization' ? utilization : power;
+    const src = g.source === 'ram' ? ram : g.source === 'utilization' ? utilization : g.source === 'fan_temp' ? fanTemp : power;
     const numEl = document.getElementById(`gauge-num-${g.id}`);
     const detailEl = document.getElementById(`gauge-detail-${g.id}`);
     if (!src || src[g.key] == null) {
@@ -411,6 +396,10 @@ function updateGauges(data) {
       max = ram.total_gb;
       document.getElementById(`gauge-max-${g.id}`).textContent = `${max.toFixed(0)}${g.unit}`;
     }
+    if (g.id === 'fan' && fanTemp && fanTemp.fan_max_rpm) {
+      max = fanTemp.fan_max_rpm;
+      document.getElementById(`gauge-max-${g.id}`).textContent = `${max}${g.unit}`;
+    }
     const frac = Math.max(0, Math.min(1, val / max));
     const len = frac * GAUGE_ARC_LEN;
     const arcEl = document.getElementById(`gauge-arc-${g.id}`);
@@ -421,7 +410,8 @@ function updateGauges(data) {
     if (g.source === 'ram') {
       arcEl.setAttribute('stroke', frac > 0.93 ? 'var(--status-critical)' : frac > 0.85 ? 'var(--status-warning)' : `var(${g.color})`);
     }
-    numEl.textContent = val.toFixed(g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : 2);
+    const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : g.id === 'temp' ? 1 : 2;
+    numEl.textContent = val.toFixed(decimals);
     if (g.source === 'utilization' && detailEl) {
       const reqH = utilization.requests_per_hour;
       const tokH = utilization.tokens_per_hour;
@@ -448,7 +438,7 @@ async function refreshPowerFast() {
   try {
     const res = await fetch('/api/power');
     const data = await res.json();
-    updateGauges({ power: data.power, ram: lastRam, ollama: lastOllama, utilization: lastUtilization });
+    updateGauges({ power: data.power, ram: lastRam, ollama: lastOllama, utilization: lastUtilization, fan_temp: lastFanTemp });
   } catch (e) {
     // silent - the main loop shows an error if this persists
   }
@@ -460,6 +450,7 @@ async function refreshLivePower() {
     const data = await res.json();
     lastRam = data.ram;
     lastOllama = data.ollama;
+    lastFanTemp = data.fan_temp;
     // utilization is 5-min/60-min-resolution data from /api/data (10s poll), not
     // part of this endpoint - carry the last known value across so the
     // gauge doesn't flicker to "no data" between the two polling cadences.
@@ -470,17 +461,17 @@ async function refreshLivePower() {
   }
 }
 
-function fmtSek(v) {
+function fmtUsd(v) {
   if (v == null || Number.isNaN(v)) return '–';
   const abs = Math.abs(v);
   // small amounts (typical early in a run) otherwise vanish at 2 decimals and
-  // show up misleadingly as "0 SEK"/"-0 SEK" - scale precision up instead.
+  // show up misleadingly as "$0.00"/"-$0.00" - scale precision up instead.
   let digits = 2;
   if (abs > 0 && abs < 1) digits = 4;
   if (abs > 0 && abs < 0.001) digits = 6;
   let s = v.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits});
-  if (parseFloat(s.replace(',', '')) === 0) s = s.replace('-', ''); // avoid "-0.00"
-  return s + ' SEK';
+  if (parseFloat(s.replace(',', '')) === 0) s = s.replace('-', ''); // avoid "-$0.00"
+  return '$' + s;
 }
 function fmtW(v) { return (v ?? 0).toLocaleString('en-US', {maximumFractionDigits: 1}) + ' W'; }
 function fmtNum(v) { return (v ?? 0).toLocaleString('en-US'); }
@@ -507,7 +498,7 @@ const CARD_TOOLTIPS = {
   'Warm models': 'Number of models currently loaded in memory and ready to serve instantly, vs. total downloaded to disk.',
   'Accumulated electricity cost': 'Running total electricity cost since energy-monitor.sh started, based on measured power draw x live SE3 spot price.',
   'Net (estimated)': 'Local rough estimate: our own flat-rate guess at revenue, minus accumulated electricity cost. Only shown when the Darkbloom account is not connected.',
-  'Net (real balance)': 'Your real Darkbloom account balance (converted to SEK) minus accumulated electricity cost.',
+  'Net (real balance)': 'Your real Darkbloom account balance (USD) minus accumulated electricity cost (converted from SEK).',
 };
 
 function renderCards(status, energy, account) {
@@ -534,23 +525,23 @@ function renderCards(status, energy, account) {
     sub: (warmList.join(', ') || '(none loaded)') + ` · ${status.local_models ?? 0} downloaded in total`
   });
   if (latest) {
-    const costSek = parseFloat(latest.cum_cost_sek);
-    cards.push({ label: 'Accumulated electricity cost', value: fmtSek(costSek), sub: '' });
+    const usdSek = parseFloat(latest.usd_sek) || 9.5;
+    const costUsd = parseFloat(latest.cum_cost_sek) / usdSek;
+    cards.push({ label: 'Accumulated electricity cost', value: fmtUsd(costUsd), sub: '' });
 
     let net, netLabel, netSub;
     if (account && account.connected && account.balance_usd != null) {
-      const usdSek = parseFloat(latest.usd_sek) || 9.5;
-      net = parseFloat(account.balance_usd) * usdSek - costSek;
+      net = parseFloat(account.balance_usd) - costUsd;
       netLabel = 'Net (real balance)';
-      netSub = `balance ${account.balance_usd} USD − electricity cost`;
+      netSub = `balance $${account.balance_usd} − electricity cost`;
     } else {
-      net = parseFloat(latest.net_sek_approx);
+      net = parseFloat(latest.est_revenue_usd_approx) - costUsd;
       netLabel = 'Net (estimated)';
       netSub = 'revenue (approx) − electricity cost';
     }
     cards.push({
       label: netLabel,
-      value: `<span style="color: var(--status-${net >= 0 ? 'good' : 'critical'})">${fmtSek(net)}</span>`,
+      value: `<span style="color: var(--status-${net >= 0 ? 'good' : 'critical'})">${fmtUsd(net)}</span>`,
       sub: netSub
     });
   }
@@ -666,7 +657,7 @@ function renderAccount(account) {
   if (!account.connected) {
     el.innerHTML = `
       <div class="pill"><span class="dot" style="background:var(--status-warning)"></span>Not connected</div>
-      <div class="rotation-summary">${account.reason || 'unknown reason'}. Open console.darkbloom.dev/providers/earnings in the browser and run the sync snippet there.</div>
+      <div class="rotation-summary">${account.reason || 'unknown reason'}. Make sure this Mac is logged in (\`darkbloom login\`) - the dashboard reads the same local device token.</div>
     `;
     return;
   }
@@ -691,8 +682,11 @@ function renderAccount(account) {
   const cs = account.cut_summary || {};
 
   el.innerHTML = `
-    <div class="pill"><span class="dot" style="background:var(--status-good)"></span>Connected (synced ${Math.round(account.age_sec)}s ago)</div>
-    <div class="rotation-summary">Balance: <strong>$${account.balance_usd}</strong> · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here</div>
+    <div class="pill"><span class="dot" style="background:var(--status-good)"></span>Connected (refreshed ${Math.round(account.age_sec)}s ago)</div>
+    <div class="rotation-summary" title="Withdrawable can be lower than available if part of the balance is pending; lifetime is total earned all-time, never decreases.">
+      Available: <strong>$${account.balance_usd}</strong> · Withdrawable: <strong>$${account.withdrawable_balance_usd}</strong> · Lifetime: <strong>$${account.lifetime_usd}</strong>
+      · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here
+    </div>
     <table class="rotation-table">
       <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.125/M-token guess would have estimated for these same tokens.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means our guess ran low.">Darkbloom gap</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -816,6 +810,31 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   });
 }
 
+function updateFavicon(status) {
+  // Small color-coded status indicator, visible in the browser tab even when
+  // this isn't the active tab - green = online and trusted (eligible for
+  // real traffic), orange = daemon running but not yet hardware-trusted,
+  // red = daemon not running.
+  const daemonUp = status && status.daemon && status.daemon.startsWith('running');
+  const trusted = status && status.trust && status.trust.startsWith('hardware');
+  const color = (daemonUp && trusted) ? '#22c55e' : daemonUp ? '#f59e0b' : '#ef4444';
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.beginPath();
+  ctx.arc(32, 32, 26, 0, 2 * Math.PI);
+  ctx.fillStyle = color;
+  ctx.fill();
+  let link = document.querySelector("link[rel~='icon']");
+  if (!link) {
+    link = document.createElement('link');
+    link.rel = 'icon';
+    document.head.appendChild(link);
+  }
+  link.href = canvas.toDataURL('image/png');
+}
+
 async function refresh() {
   try {
     const res = await fetch('/api/data');
@@ -827,6 +846,7 @@ async function refresh() {
     renderBanners(status, energy);
     renderAccount(account);
     renderDisk(disk);
+    updateFavicon(status);
 
     const rows = energy.rows || {};
     renderLineChart('chart-power', 'tooltip-power',
@@ -834,13 +854,14 @@ async function refresh() {
       ['line-power'], fmtW);
     renderLineChart('chart-money', 'tooltip-money',
       rows.timestamps,
-      [{name: 'Electricity cost', values: rows.cum_cost_sek || []}, {name: 'Revenue', values: rows.est_revenue_sek || []}],
-      ['line-cost', 'line-revenue'], fmtSek);
+      [{name: 'Electricity cost', values: rows.cum_cost_usd || []}, {name: 'Revenue', values: rows.est_revenue_usd || []}],
+      ['line-cost', 'line-revenue'], fmtUsd);
 
     document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
+    const kwhPrice = (rows.elpris_usd_kwh || [])[rows.elpris_usd_kwh?.length - 1];
+    document.getElementById('kwh-price').textContent = kwhPrice != null ? `⚡ $${kwhPrice.toFixed(4)}/kWh right now (SE3)` : '';
     document.getElementById('footnote').innerHTML =
-      `Current electricity price: ${(rows.elpris_sek_kwh || [])[rows.elpris_sek_kwh?.length - 1]?.toFixed(3) ?? '–'} SEK/kWh (SE3) ·
-       Power/cost includes an estimated baseline (7W) on top of measured CPU+GPU, since powermetrics only measures SoC power rails, not the whole machine's wall power ·
+      `Power/cost includes an estimated baseline (7W) on top of measured CPU+GPU, since powermetrics only measures SoC power rails, not the whole machine's wall power ·
        Revenue is a rough approximation (blended flat rate $0.125/M tokens, not split by input/output) ·
        ${energy.total_rows ?? 0} data points logged · updates every 10s (power gauges ~5Hz, RAM/Ollama every 2s)`;
   } catch (e) {
