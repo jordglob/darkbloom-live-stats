@@ -626,8 +626,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
 
-class ReusableTCPServer(socketserver.TCPServer):
+class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    # Plain TCPServer handles one request at a time - fine at the old 10s/2s
+    # poll rates, but the 200ms power poll (potentially from multiple tabs)
+    # would queue up and stall behind slower requests like /api/data (which
+    # spawns several subprocesses, one with up to a 15s timeout).
+    # ThreadingMixIn serves each request on its own thread instead.
     allow_reuse_address = True
+    daemon_threads = True
 
 
 if __name__ == "__main__":

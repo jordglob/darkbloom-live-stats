@@ -214,6 +214,12 @@
   <div class="cards" id="cards"></div>
 
   <div class="panel">
+    <h2 title="Instantaneous CPU/GPU/Total power draw, read directly from the latest powermetrics sample.">Live Power <span id="live-power-time" class="gauge-time"></span></h2>
+    <div class="gauges" id="gauges"></div>
+    <div id="ollama-badge" style="margin-top:12px"></div>
+  </div>
+
+  <div class="panel">
     <h2 title="Real data pulled from your Darkbloom account (console.darkbloom.dev), not a live connection - refreshed manually.">Darkbloom Account <span class="gauge-time">(real data, not live-connected)</span></h2>
     <div id="account"></div>
     <div class="rotation-summary" style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border)">
@@ -242,12 +248,6 @@
   <div class="panel">
     <h2 title="Downloaded MLX models and how much disk they use. Models left over from stopped rotation experiments are safe to remove if you need the space back.">Disk Usage</h2>
     <div id="disk"></div>
-  </div>
-
-  <div class="panel">
-    <h2 title="Instantaneous CPU/GPU/Total power draw, read directly from the latest powermetrics sample.">Live Power <span id="live-power-time" class="gauge-time"></span></h2>
-    <div class="gauges" id="gauges"></div>
-    <div id="ollama-badge" style="margin-top:12px"></div>
   </div>
 
   <div class="panel">
