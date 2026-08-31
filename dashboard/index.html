@@ -242,8 +242,8 @@
       </div>
 
       <div class="explainer-section">
-        <h4>Darkbloom Account ("DB cut")</h4>
-        <p>Real jobs/tokens/payout per model, pulled from your actual Darkbloom account ledger via the sync bookmarklet (not a live connection — you refresh it manually). "DB cut" compares what this dashboard's own naive flat-rate guess would have paid for the same tokens against what Darkbloom's ledger actually paid — it is <strong>not</strong> an official platform fee, just the gap between a rough local guess and reality, whatever is driving it.</p>
+        <h4>Darkbloom Account (real payout vs. our own estimate)</h4>
+        <p>Real jobs/tokens/payout per model, pulled from your actual Darkbloom account ledger via the sync bookmarklet (not a live connection — you refresh it manually). The "Darkbloom gap" column compares what this dashboard's own rough flat-rate guess would have paid for the same tokens against what Darkbloom's ledger actually paid — it is <strong>not</strong> an official platform fee or a claim about Darkbloom's pricing. It's just a check on our own estimate's accuracy, and our simplistic single blended rate (not split by input/output pricing) is probably the thing that's actually off.</p>
       </div>
 
       <div class="explainer-section">
@@ -694,14 +694,14 @@ function renderAccount(account) {
     <div class="pill"><span class="dot" style="background:var(--status-good)"></span>Connected (synced ${Math.round(account.age_sec)}s ago)</div>
     <div class="rotation-summary">Balance: <strong>$${account.balance_usd}</strong> · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here</div>
     <table class="rotation-table">
-      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.125/M-token guess would have estimated for these same tokens.">Our local estimate</th><th title="Gap between our local estimate and the real payout. Positive = our estimate overstates reality (an effective &quot;cut&quot;); negative = the real payout exceeds our estimate.">DB cut</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
+      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.125/M-token guess would have estimated for these same tokens.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means our guess ran low.">Darkbloom gap</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <div class="rotation-summary" style="margin-top:10px">
       Totals — real payout: <strong>$${(cs.total_real_usd ?? 0).toFixed(6)}</strong> ·
       local estimate: <strong>$${(cs.total_local_estimate_usd ?? 0).toFixed(6)}</strong> ·
-      overall DB cut: <strong class="${cs.cut_pct != null && cs.cut_pct >= 0 ? 'cut-positive' : 'cut-negative'}">${fmtPct(cs.cut_pct)}</strong>
-      <br><span style="font-size:11px">Note: this is NOT an official platform fee - Darkbloom's alpha terms advertise 0% fee. It's just the gap between our own naive per-token guess and what the real ledger paid; base_reward entries are excluded (not token-based).</span>
+      overall gap vs. Darkbloom: <strong class="${cs.cut_pct != null && cs.cut_pct >= 0 ? 'cut-positive' : 'cut-negative'}">${fmtPct(cs.cut_pct)}</strong>
+      <br><span style="font-size:11px">Not an official platform fee or any claim about Darkbloom's pricing - Darkbloom's alpha terms advertise 0% fee. This is purely how far off OUR OWN rough flat-rate guess (a single blended $/token number, not split by input/output) turned out to be; base_reward entries are excluded since they aren't token-based.</span>
     </div>
   `;
 }
