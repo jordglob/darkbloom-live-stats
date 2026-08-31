@@ -92,6 +92,79 @@ def get_live_power():
         "sample_time": sample_time,
     }
 
+UTIL_WINDOW_MIN = 60  # how far back "recent" looks
+UTIL_IDLE_W = 1.5  # SoC power above this = actively computing, not just sitting warm in RAM
+UTIL_RAW_TAIL_BYTES = 400_000  # powermetrics samples every 60s; enough tail to cover >60 samples
+
+
+def get_utilization():
+    """Answers 'is the fan silent because nothing is coming in, or is
+    something broken': % of the last ~60 min where SoC power was above idle,
+    plus real request/token throughput over the same window. A 0% reading
+    with normal trust/daemon status just means genuinely no traffic, not a fault."""
+    samples = []
+    if RAW_POWER_LOG.exists():
+        try:
+            size = RAW_POWER_LOG.stat().st_size
+            with open(RAW_POWER_LOG, "rb") as f:
+                f.seek(max(0, size - UTIL_RAW_TAIL_BYTES))
+                chunk = f.read().decode("utf-8", errors="ignore")
+            cpu_mw = gpu_mw = None
+            for line in chunk.splitlines():
+                if line.startswith("CPU Power:"):
+                    try:
+                        cpu_mw = float(line.split()[2])
+                    except (IndexError, ValueError):
+                        pass
+                elif line.startswith("GPU Power:"):
+                    try:
+                        gpu_mw = float(line.split()[2])
+                    except (IndexError, ValueError):
+                        pass
+                    if cpu_mw is not None and gpu_mw is not None:
+                        samples.append((cpu_mw + gpu_mw) / 1000)
+                        cpu_mw = gpu_mw = None
+        except Exception:
+            pass
+    samples = samples[-UTIL_WINDOW_MIN:]  # ~1 sample/min -> roughly the last hour
+    active_pct = (sum(1 for s in samples if s > UTIL_IDLE_W) / len(samples) * 100) if samples else None
+
+    req_per_hour = tok_per_hour = None
+    if CSV_PATH.exists():
+        try:
+            size = CSV_PATH.stat().st_size
+            with open(CSV_PATH, "rb") as f:
+                f.seek(max(0, size - 6000))
+                chunk = f.read().decode("utf-8", errors="ignore")
+            now = time.time()
+            rows = []
+            for parts in csv.reader(l for l in chunk.splitlines() if l and not l.startswith("timestamp")):
+                if len(parts) < 10:
+                    continue
+                try:
+                    ts = time.mktime(time.strptime(parts[0][:19], "%Y-%m-%dT%H:%M:%S"))
+                    rows.append((ts, int(parts[8]), int(parts[9])))
+                except Exception:
+                    continue
+            rows = [r for r in rows if now - r[0] <= UTIL_WINDOW_MIN * 60]
+            if len(rows) >= 2:
+                span_hr = (rows[-1][0] - rows[0][0]) / 3600
+                if span_hr > 0:
+                    req_per_hour = (rows[-1][1] - rows[0][1]) / span_hr
+                    tok_per_hour = (rows[-1][2] - rows[0][2]) / span_hr
+        except Exception:
+            pass
+
+    if active_pct is None and req_per_hour is None:
+        return None
+    return {
+        "active_pct": round(active_pct, 1) if active_pct is not None else None,
+        "sample_count": len(samples),
+        "requests_per_hour": round(req_per_hour, 1) if req_per_hour is not None else None,
+        "tokens_per_hour": round(tok_per_hour) if tok_per_hour is not None else None,
+    }
+
+
 PHYSMEM_RE = re.compile(r"PhysMem:\s*([\d.]+)([GM])\s*used.*?([\d.]+)([GM])\s*unused")
 
 
@@ -481,6 +554,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "live_power": get_live_power(),
                 "rotation": get_rotation_info(),
                 "account": get_account_data(),
+                "utilization": get_utilization(),
             }
             self._send_json(data)
         elif self.path == "/api/live_power":

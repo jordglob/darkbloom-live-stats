@@ -167,6 +167,7 @@
   .gauge-number { font-size: 26px; font-weight: 700; fill: var(--text-primary); }
   .gauge-unit { font-size: 12px; fill: var(--text-muted); }
   .gauge-label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; font-weight: 600; }
+  .gauge-detail { font-size: 10px; color: var(--text-muted); margin-top: 1px; min-height: 12px; }
   .gauge-scale { font-size: 10px; fill: var(--text-muted); }
 
   .rotation-active { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -281,7 +282,10 @@ const GAUGES = [
   { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
   { id: 'total', label: 'Total (incl. baseline)', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total' },
   { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
+  { id: 'util', label: 'Utilization (last hour)', source: 'utilization', key: 'active_pct', max: 100, unit: '%', color: '--gauge-total',
+    tooltip: 'Percent of the last ~60 minutes where SoC power was above idle, i.e. actually running inference - not just sitting warm in memory. 0% with normal trust/daemon status just means no traffic is coming in right now, not a fault.' },
 ];
+let lastUtilization = null;
 const GAUGE_R = 80;
 const GAUGE_ARC_LEN = Math.PI * GAUGE_R; // half-circle arc length
 
@@ -295,7 +299,7 @@ function gaugeArcPath() {
 function initGauges() {
   const wrap = document.getElementById('gauges');
   wrap.innerHTML = GAUGES.map(g => `
-    <div class="gauge">
+    <div class="gauge" ${g.tooltip ? `title="${g.tooltip}"` : ''}>
       <svg viewBox="0 0 200 115">
         <path class="gauge-track" d="${gaugeArcPath()}" />
         <path class="gauge-value" id="gauge-arc-${g.id}" d="${gaugeArcPath()}"
@@ -307,6 +311,7 @@ function initGauges() {
         <text x="100" y="104" class="gauge-unit" text-anchor="middle">${g.unit === 'W' ? 'watt' : g.unit}</text>
       </svg>
       <div class="gauge-label">${g.label}</div>
+      <div class="gauge-detail" id="gauge-detail-${g.id}"></div>
     </div>
   `).join('');
 }
@@ -315,6 +320,7 @@ function updateGauges(data) {
   const timeEl = document.getElementById('live-power-time');
   const power = data && data.power;
   const ram = data && data.ram;
+  const utilization = data && data.utilization;
   if (!power && !ram) {
     timeEl.textContent = '(no data yet — waiting on powermetrics)';
     GAUGES.forEach(g => {
@@ -325,8 +331,15 @@ function updateGauges(data) {
   }
   timeEl.textContent = power && power.sample_time ? `latest sample: ${power.sample_time}` : '';
   GAUGES.forEach(g => {
-    const src = g.source === 'ram' ? ram : power;
-    if (!src) return;
+    const src = g.source === 'ram' ? ram : g.source === 'utilization' ? utilization : power;
+    const numEl = document.getElementById(`gauge-num-${g.id}`);
+    const detailEl = document.getElementById(`gauge-detail-${g.id}`);
+    if (!src || src[g.key] == null) {
+      numEl.textContent = '–';
+      document.getElementById(`gauge-arc-${g.id}`).setAttribute('stroke-dasharray', `0 ${GAUGE_ARC_LEN.toFixed(1)}`);
+      if (detailEl) detailEl.textContent = g.source === 'utilization' ? 'not enough data yet' : '';
+      return;
+    }
     const val = src[g.key] ?? 0;
     let max = g.max;
     if (g.source === 'ram' && ram && ram.total_gb) {
@@ -343,7 +356,12 @@ function updateGauges(data) {
     if (g.source === 'ram') {
       arcEl.setAttribute('stroke', frac > 0.93 ? 'var(--status-critical)' : frac > 0.85 ? 'var(--status-warning)' : `var(${g.color})`);
     }
-    document.getElementById(`gauge-num-${g.id}`).textContent = val.toFixed(g.source === 'ram' ? 1 : 2);
+    numEl.textContent = val.toFixed(g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : 2);
+    if (g.source === 'utilization' && detailEl) {
+      const reqH = utilization.requests_per_hour;
+      const tokH = utilization.tokens_per_hour;
+      detailEl.textContent = (reqH != null) ? `${reqH}/h · ${(tokH ?? 0).toLocaleString('en-US')} tok/h` : '';
+    }
   });
 }
 
@@ -361,7 +379,10 @@ async function refreshLivePower() {
   try {
     const res = await fetch('/api/live_power');
     const data = await res.json();
-    updateGauges(data);
+    // utilization is 5-min/60-min-resolution data from /api/data (10s poll), not
+    // part of this fast 2s endpoint - carry the last known value across so the
+    // gauge doesn't flicker to "no data" between the two polling cadences.
+    updateGauges({ ...data, utilization: lastUtilization });
     renderOllamaBadge(data.ollama);
   } catch (e) {
     // silent - the main loop shows an error if this persists
@@ -711,7 +732,8 @@ async function refresh() {
   try {
     const res = await fetch('/api/data');
     const data = await res.json();
-    const { status, energy, rotation, account } = data;
+    const { status, energy, rotation, account, utilization } = data;
+    lastUtilization = utilization || null;
 
     renderCards(status, energy, account);
     renderBanners(status, energy);
