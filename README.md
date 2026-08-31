@@ -1,4 +1,4 @@
-# Darkbloom Monitor
+# Darkbloom Live & Stats
 
 A local dashboard + background services for a [Darkbloom](https://darkbloom.dev)
 provider Mac: live CPU/GPU/RAM gauges, a recent-utilization gauge, disk usage
@@ -51,8 +51,8 @@ machine it runs on:
 ## Install
 
 ```bash
-git clone https://github.com/jordglob/darkbloom-monitor.git
-cd darkbloom-monitor
+git clone https://github.com/jordglob/darkbloom-live-stats.git
+cd darkbloom-live-stats
 ./install.sh
 ```
 

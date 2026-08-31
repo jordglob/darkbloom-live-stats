@@ -1,5 +1,5 @@
 #!/bin/bash
-# Installs the Darkbloom Monitor dashboard + background services for the
+# Installs the Darkbloom Live & Stats dashboard + background services for the
 # CURRENT user. Safe to re-run - it just overwrites its own files.
 #
 # What this does automatically (no sudo needed):
@@ -18,7 +18,7 @@ TARGET="$HOME/.darkbloom"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 CURRENT_USER="$(id -un)"
 
-echo "== Darkbloom Monitor installer =="
+echo "== Darkbloom Live & Stats installer =="
 echo "Target directory: $TARGET"
 echo ""
 
