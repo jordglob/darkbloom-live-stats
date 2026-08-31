@@ -170,9 +170,6 @@
   .gauge-detail { font-size: 10px; color: var(--text-muted); margin-top: 1px; min-height: 12px; }
   .gauge-scale { font-size: 10px; fill: var(--text-muted); }
 
-  .rotation-active { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-  .rotation-active .model-name { font-size: 18px; font-weight: 700; }
-  .rotation-active .countdown { font-size: 13px; color: var(--text-secondary); }
   table.rotation-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   table.rotation-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border); cursor: default; }
   table.rotation-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
@@ -215,11 +212,6 @@
   <div id="banners"></div>
 
   <div class="cards" id="cards"></div>
-
-  <div class="panel">
-    <h2 title="Which model this Mac is currently configured to serve, and the 4-hour rotation timer.">Model Rotation <span class="gauge-time">(4h of continuous hardware-trust per period)</span></h2>
-    <div id="rotation"></div>
-  </div>
 
   <div class="panel">
     <h2 title="Real data pulled from your Darkbloom account (console.darkbloom.dev), not a live connection - refreshed manually.">Darkbloom Account <span class="gauge-time">(real data, not live-connected)</span></h2>
@@ -289,7 +281,8 @@
 
 <script>
 const REFRESH_MS = 10000;
-const LIVE_POWER_REFRESH_MS = 2000;
+const LIVE_POWER_REFRESH_MS = 2000;   // slow poll: RAM + Ollama status (spawns subprocesses, not cheap)
+const POWER_FAST_REFRESH_MS = 200;    // fast poll: CPU/GPU/Total watts only (cheap file tail, matches powermetrics' own ~200ms sampling)
 
 const GAUGES = [
   { id: 'cpu', label: 'CPU', source: 'power', key: 'cpu_w', max: 30, unit: 'W', color: '--gauge-cpu' },
@@ -297,9 +290,11 @@ const GAUGES = [
   { id: 'total', label: 'Total (incl. baseline)', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total' },
   { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
   { id: 'util', label: 'Utilization (last hour)', source: 'utilization', key: 'active_pct', max: 100, unit: '%', color: '--gauge-total',
-    tooltip: 'Percent of the last ~60 minutes where SoC power was above idle, i.e. actually running inference - not just sitting warm in memory. 0% with normal trust/daemon status just means no traffic is coming in right now, not a fault.' },
+    tooltip: 'Percent of the 5-minute windows in the last hour that actually saw new requests arrive (based on the real requests_served counter, not a power-draw guess). 0% with normal trust/daemon status just means no traffic is coming in right now, not a fault.' },
 ];
 let lastUtilization = null;
+let lastRam = null;
+let lastOllama = null;
 const GAUGE_R = 80;
 const GAUGE_ARC_LEN = Math.PI * GAUGE_R; // half-circle arc length
 
@@ -389,12 +384,28 @@ function renderOllamaBadge(ollama) {
   }
 }
 
+async function refreshPowerFast() {
+  // Cheap file-tail endpoint, safe to poll at ~5Hz - matches powermetrics'
+  // own ~200ms sampling interval. RAM/Ollama status are NOT re-fetched here
+  // (those spawn subprocesses - top/sysctl/ollama ps - and don't change fast
+  // enough to need it); last known values are carried across instead.
+  try {
+    const res = await fetch('/api/power');
+    const data = await res.json();
+    updateGauges({ power: data.power, ram: lastRam, ollama: lastOllama, utilization: lastUtilization });
+  } catch (e) {
+    // silent - the main loop shows an error if this persists
+  }
+}
+
 async function refreshLivePower() {
   try {
     const res = await fetch('/api/live_power');
     const data = await res.json();
+    lastRam = data.ram;
+    lastOllama = data.ollama;
     // utilization is 5-min/60-min-resolution data from /api/data (10s poll), not
-    // part of this fast 2s endpoint - carry the last known value across so the
+    // part of this endpoint - carry the last known value across so the
     // gauge doesn't flicker to "no data" between the two polling cadences.
     updateGauges({ ...data, utilization: lastUtilization });
     renderOllamaBadge(data.ollama);
@@ -496,52 +507,6 @@ function renderCards(status, energy, account) {
   `).join('');
 }
 
-function fmtDuration(sec) {
-  if (sec == null) return '–';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  return `${h}h ${m}m`;
-}
-
-function renderRotation(rotation) {
-  const el = document.getElementById('rotation');
-  if (!rotation || !rotation.current_model) {
-    el.innerHTML = `<div class="rotation-summary">No rotation running yet.</div>`;
-    return;
-  }
-
-  const history = rotation.history || [];
-  // sum per model across all history (to answer "which model is most requested")
-  const totals = {};
-  history.forEach(h => {
-    const m = h.ending_model;
-    if (!totals[m]) totals[m] = { requests: 0, tokens: 0, periods: 0 };
-    totals[m].requests += parseInt(h.requests_served || 0, 10);
-    totals[m].tokens += parseInt(h.tokens || 0, 10);
-    totals[m].periods += 1;
-  });
-  const summaryParts = Object.entries(totals).map(([m, t]) =>
-    `<strong>${m}</strong>: ${fmtNum(t.requests)} req / ${fmtNum(t.tokens)} tokens (${t.periods} period${t.periods === 1 ? '' : 's'})`
-  );
-
-  el.innerHTML = `
-    <div class="rotation-active">
-      <span class="model-name">${rotation.current_model}</span>
-      <span class="countdown">${rotation.waiting_for_trust ? 'waiting for hardware-trust before the timer starts' : 'next switch in ' + fmtDuration(rotation.next_switch_in_sec)}</span>
-    </div>
-    ${summaryParts.length ? `<div class="rotation-summary">Total so far — ${summaryParts.join(' &nbsp;·&nbsp; ')}</div>` : ''}
-    ${history.length ? `
-      <table class="rotation-table">
-        <thead><tr><th>Ended</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead>
-        <tbody>
-          ${history.slice().reverse().map(h => `
-            <tr><td>${fmtTime(h.timestamp)}</td><td>${h.ending_model}</td><td>${fmtNum(h.requests_served)}</td><td>${fmtNum(h.tokens)}</td></tr>
-          `).join('')}
-        </tbody>
-      </table>
-    ` : `<div class="rotation-summary">No switch has happened yet - history appears after the first period.</div>`}
-  `;
-}
 
 function renderWarmup(warmup) {
   const el = document.getElementById('warmup');
@@ -799,12 +764,11 @@ async function refresh() {
   try {
     const res = await fetch('/api/data');
     const data = await res.json();
-    const { status, energy, rotation, account, utilization, disk } = data;
+    const { status, energy, account, utilization, disk } = data;
     lastUtilization = utilization || null;
 
     renderCards(status, energy, account);
     renderBanners(status, energy);
-    renderRotation(rotation);
     renderAccount(account);
     renderDisk(disk);
 
@@ -822,7 +786,7 @@ async function refresh() {
       `Current electricity price: ${(rows.elpris_sek_kwh || [])[rows.elpris_sek_kwh?.length - 1]?.toFixed(3) ?? '–'} SEK/kWh (SE3) ·
        Power/cost includes an estimated baseline (7W) on top of measured CPU+GPU, since powermetrics only measures SoC power rails, not the whole machine's wall power ·
        Revenue is a rough approximation (blended flat rate $0.125/M tokens, not split by input/output) ·
-       ${energy.total_rows ?? 0} data points logged · updates every 10s (gauges every 2s)`;
+       ${energy.total_rows ?? 0} data points logged · updates every 10s (power gauges ~5Hz, RAM/Ollama every 2s)`;
   } catch (e) {
     document.getElementById('updated').textContent = 'could not fetch data: ' + e;
   }
@@ -831,9 +795,11 @@ async function refresh() {
 initGauges();
 refresh();
 refreshLivePower();
+refreshPowerFast();
 refreshWarmup();
 setInterval(refresh, REFRESH_MS);
 setInterval(refreshLivePower, LIVE_POWER_REFRESH_MS);
+setInterval(refreshPowerFast, POWER_FAST_REFRESH_MS);
 setInterval(refreshWarmup, 15000);
 </script>
 </body>

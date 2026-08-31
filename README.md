@@ -1,15 +1,14 @@
 # Darkbloom Monitor
 
 A local dashboard + background services for a [Darkbloom](https://darkbloom.dev)
-provider Mac: live CPU/GPU/RAM gauges, electricity-cost vs. revenue tracking,
-automatic model warmup, timed model rotation (so you can compare demand
-between models), and a real-vs-estimated payout comparison pulled from your
-actual Darkbloom account.
+provider Mac: live CPU/GPU/RAM gauges, a recent-utilization gauge, disk usage
+for downloaded models, electricity-cost vs. revenue tracking, automatic model
+warmup, trust-drop alerts, and a real-vs-estimated payout comparison pulled
+from your actual Darkbloom account.
 
 **Not affiliated with or endorsed by Darkbloom, Eigen Labs, or EigenLayer.**
 Community tool, use at your own risk. It only reads local system state and
-your own Darkbloom account data - it does not modify your provider's behavior
-beyond the model-rotation feature you opt into.
+your own Darkbloom account data - it does not modify your provider's behavior.
 
 ![status](https://img.shields.io/badge/status-community%20project-blue)
 
@@ -20,22 +19,26 @@ machine it runs on:
 
 - **Status cards** - trust level, daemon state, requests served, warm models,
   accumulated electricity cost, net (real balance or estimate)
-- **Model rotation** - alternates between two models you configure, but only
-  counts time toward the next switch once hardware-trust is actually achieved
-  (so idle self-signed time doesn't inflate a period's "uptime")
 - **Darkbloom account** - real jobs/tokens/payout per model from your account
   ledger, compared against what a naive flat per-token estimate would guess
   (labeled "DB cut" - **not** an official platform fee, just the gap between
   guess and reality)
+- **Disk usage** - downloaded models and their sizes, with a one-click "copy
+  remove command" for anything not currently active (never deletes for you)
 - **Warmup** - periodically pings the provider's local endpoint so the active
   model stays loaded instead of unloading between requests
 - **Live power gauges** - CPU / GPU / Total watts (with an estimated non-SoC
-  baseline added in) / RAM used, all updating every 2 seconds
+  baseline added in) / RAM used, updating at ~5Hz (matching powermetrics'
+  own sampling rate) / recent utilization (% of the last hour's 5-min windows
+  that actually saw new requests arrive)
+- **Trust-drop alerts** - a native macOS notification plus an in-page banner
+  the moment trust drops below hardware-level, even if the tab isn't open
 - **Ollama indicator** - flags when Ollama has a model loaded, since that's a
   common cause of memory contention with the Darkbloom provider on the same
   machine
 - **History charts** - power over time, cumulative electricity cost vs.
-  estimated revenue
+  estimated revenue, with an expandable explainer for exactly how the kWh
+  price and net figure are calculated
 
 ## Prerequisites
 
@@ -44,8 +47,6 @@ machine it runs on:
   `darkbloom status` should work)
 - `python3`, `bc`, `jq`, `curl` - all present on a stock macOS install except
   `jq`, which you may need to install (`brew install jq`)
-- Two or more models downloaded (`darkbloom models download <id>`) if you want
-  to use the model-rotation feature
 
 ## Install
 
@@ -56,13 +57,13 @@ cd darkbloom-monitor
 ```
 
 This copies the dashboard and scripts into `~/.darkbloom/`, writes LaunchAgent
-plists to `~/Library/LaunchAgents/`, and starts three of the four background
-services (dashboard, energy-monitor, model-rotate). It will **not** touch
-`/etc/sudoers` or ask for your password - see below.
+plists to `~/Library/LaunchAgents/`, and starts two of the three background
+services (dashboard, energy-monitor). It will **not** touch `/etc/sudoers` or
+ask for your password - see below.
 
 Open **http://127.0.0.1:8787** - the dashboard should already be showing
-status, warmup, and model-rotation info at this point. Power gauges and
-electricity-cost tracking will show "no data yet" until you do the next step.
+status and warmup info at this point. Power gauges and electricity-cost
+tracking will show "no data yet" until you do the next step.
 
 ### Enabling electricity-cost tracking (one-time, needs your password)
 
@@ -76,37 +77,20 @@ bash ~/.darkbloom/setup-powermetrics-sudoers.sh
 ```
 
 It validates the rule's syntax with `visudo -c` before touching the real
-sudoers config, so a typo can't lock you out of sudo. Then start the fourth
+sudoers config, so a typo can't lock you out of sudo. Then start the third
 service:
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.darkbloom.powermetrics.plist
 ```
 
-From here on, everything (all four services) survives reboots and
+From here on, everything (all three services) survives reboots and
 auto-restarts if killed - `launchd`'s `KeepAlive` is the watchdog, nothing runs
-in a terminal or `tmux` session that needs to stay open.
-
-## Configuring which models it rotates between
-
-Edit `~/.darkbloom/model-rotate.sh` and change this line to models you've
-actually downloaded:
-
-```bash
-MODELS=(gpt-oss-20b qwen3-vl-30b-a3b-instruct)
-```
-
-Then restart the service:
-
-```bash
-launchctl kickstart -k gui/$(id -u)/io.darkbloom.model-rotate
-```
-
-Only one model is ever loaded at a time - this is meant for comparing demand
-between two models over multi-hour periods, not for serving multiple models
-concurrently (if your machine has enough RAM for that, you don't need this
-tool's rotation feature - just pass multiple `--model` flags to
-`darkbloom start` yourself).
+in a terminal or `tmux` session that needs to stay open. `powermetrics` samples
+at ~5Hz by default (edit the `-i` value, in milliseconds, in
+`io.darkbloom.powermetrics.plist` to change it) - the raw log self-rotates
+past 300MB by restarting the LaunchAgent, since `powermetrics -o` truncates
+its target file on start.
 
 ## Electricity price
 
@@ -150,22 +134,21 @@ numbers, open `console.darkbloom.dev` (logged in) and click it.
 | `dashboard/server.py` | `io.darkbloom.dashboard` LaunchAgent | No |
 | `scripts/pm-start.sh` (powermetrics) | `io.darkbloom.powermetrics` LaunchAgent | Yes (scoped rule) |
 | `scripts/energy-monitor.sh` | `io.darkbloom.energy-monitor` LaunchAgent | No |
-| `scripts/model-rotate.sh` | `io.darkbloom.model-rotate` LaunchAgent | No |
 
-All four are `KeepAlive` LaunchAgents - if one crashes, `launchd` restarts it.
+All three are `KeepAlive` LaunchAgents - if one crashes, `launchd` restarts it.
 None depend on a Terminal window or `tmux` session staying open.
 
 ## Uninstall
 
 ```bash
-for svc in dashboard powermetrics energy-monitor model-rotate; do
+for svc in dashboard powermetrics energy-monitor; do
   launchctl bootout gui/$(id -u)/io.darkbloom.$svc 2>/dev/null
   rm -f ~/Library/LaunchAgents/io.darkbloom.$svc.plist
 done
 sudo rm -f /etc/sudoers.d/darkbloom-powermetrics
 rm -rf ~/.darkbloom/dashboard ~/.darkbloom/*.sh ~/.darkbloom/energy-log.csv \
-       ~/.darkbloom/model-rotate.log ~/.darkbloom/model-rotate.state \
-       ~/.darkbloom/warmup.json ~/.darkbloom/warmup.log ~/.darkbloom/account-data.json
+       ~/.darkbloom/warmup.json ~/.darkbloom/warmup.log ~/.darkbloom/account-data.json \
+       ~/.darkbloom/trust-changes.log
 ```
 
 (This leaves your actual Darkbloom install - `~/.darkbloom/bin`,

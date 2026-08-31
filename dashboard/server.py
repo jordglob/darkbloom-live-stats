@@ -20,9 +20,6 @@ HOME = Path.home()
 CSV_PATH = HOME / ".darkbloom" / "energy-log.csv"
 DARKBLOOM_BIN = HOME / ".darkbloom" / "bin" / "darkbloom"
 RAW_POWER_LOG = Path("/tmp/darkbloom-pm-raw.log")
-ROTATE_STATE = HOME / ".darkbloom" / "model-rotate.state"
-ROTATE_LOG = HOME / ".darkbloom" / "model-rotate.log"
-ROTATE_INTERVAL_SEC = 14400  # 4h of continuous hardware-trust time, see model-rotate.sh
 PORT = 8787
 MAX_POINTS = 300  # downsample if the log grows large
 # Same baseline assumption as energy-monitor.sh: powermetrics cpu_power/gpu_power
@@ -34,7 +31,7 @@ BASELINE_W = 7
 # manually. Used only to show what our own naive local formula WOULD have guessed,
 # so it can be compared against what Darkbloom's real ledger actually paid.
 LOCAL_BLENDED_USD_PER_TOKEN = 0.125 / 1_000_000
-LIVE_POWER_TAIL_BYTES = 20000  # plenty for a few samples of lookback
+LIVE_POWER_TAIL_BYTES = 40000  # a few complete samples of lookback at ~5Hz (~5-8KB/sample)
 LOCAL_JSON = HOME / ".darkbloom" / "local.json"
 WARMUP_CONFIG = HOME / ".darkbloom" / "warmup.json"
 WARMUP_LOG = HOME / ".darkbloom" / "warmup.log"
@@ -93,73 +90,53 @@ def get_live_power():
     }
 
 UTIL_WINDOW_MIN = 60  # how far back "recent" looks
-UTIL_IDLE_W = 1.5  # SoC power above this = actively computing, not just sitting warm in RAM
-UTIL_RAW_TAIL_BYTES = 400_000  # powermetrics samples every 60s; enough tail to cover >60 samples
 
 
 def get_utilization():
     """Answers 'is the fan silent because nothing is coming in, or is
-    something broken': % of the last ~60 min where SoC power was above idle,
-    plus real request/token throughput over the same window. A 0% reading
-    with normal trust/daemon status just means genuinely no traffic, not a fault."""
-    samples = []
-    if RAW_POWER_LOG.exists():
-        try:
-            size = RAW_POWER_LOG.stat().st_size
-            with open(RAW_POWER_LOG, "rb") as f:
-                f.seek(max(0, size - UTIL_RAW_TAIL_BYTES))
-                chunk = f.read().decode("utf-8", errors="ignore")
-            cpu_mw = gpu_mw = None
-            for line in chunk.splitlines():
-                if line.startswith("CPU Power:"):
-                    try:
-                        cpu_mw = float(line.split()[2])
-                    except (IndexError, ValueError):
-                        pass
-                elif line.startswith("GPU Power:"):
-                    try:
-                        gpu_mw = float(line.split()[2])
-                    except (IndexError, ValueError):
-                        pass
-                    if cpu_mw is not None and gpu_mw is not None:
-                        samples.append((cpu_mw + gpu_mw) / 1000)
-                        cpu_mw = gpu_mw = None
-        except Exception:
-            pass
-    samples = samples[-UTIL_WINDOW_MIN:]  # ~1 sample/min -> roughly the last hour
-    active_pct = (sum(1 for s in samples if s > UTIL_IDLE_W) / len(samples) * 100) if samples else None
-
-    req_per_hour = tok_per_hour = None
-    if CSV_PATH.exists():
-        try:
-            size = CSV_PATH.stat().st_size
-            with open(CSV_PATH, "rb") as f:
-                f.seek(max(0, size - 6000))
-                chunk = f.read().decode("utf-8", errors="ignore")
-            now = time.time()
-            rows = []
-            for parts in csv.reader(l for l in chunk.splitlines() if l and not l.startswith("timestamp")):
-                if len(parts) < 10:
-                    continue
-                try:
-                    ts = time.mktime(time.strptime(parts[0][:19], "%Y-%m-%dT%H:%M:%S"))
-                    rows.append((ts, int(parts[8]), int(parts[9])))
-                except Exception:
-                    continue
-            rows = [r for r in rows if now - r[0] <= UTIL_WINDOW_MIN * 60]
-            if len(rows) >= 2:
-                span_hr = (rows[-1][0] - rows[0][0]) / 3600
-                if span_hr > 0:
-                    req_per_hour = (rows[-1][1] - rows[0][1]) / span_hr
-                    tok_per_hour = (rows[-1][2] - rows[0][2]) / span_hr
-        except Exception:
-            pass
-
-    if active_pct is None and req_per_hour is None:
+    something broken': real request/token throughput over the last ~60 min,
+    plus what fraction of the 5-min energy-log slices in that window actually
+    saw new requests arrive (duty cycle). Tied directly to the same
+    requests_served counter shown elsewhere on the dashboard - NOT a SoC
+    power-draw threshold, which turned out to be unreliable: idle power on
+    this Mac floats around 2W just from background OS/dashboard load, so a
+    naive wattage cutoff read as "100% active" even during genuinely quiet
+    stretches with zero new requests."""
+    if not CSV_PATH.exists():
         return None
+    try:
+        size = CSV_PATH.stat().st_size
+        with open(CSV_PATH, "rb") as f:
+            f.seek(max(0, size - 6000))
+            chunk = f.read().decode("utf-8", errors="ignore")
+        now = time.time()
+        rows = []
+        for parts in csv.reader(l for l in chunk.splitlines() if l and not l.startswith("timestamp")):
+            if len(parts) < 10:
+                continue
+            try:
+                ts = time.mktime(time.strptime(parts[0][:19], "%Y-%m-%dT%H:%M:%S"))
+                rows.append((ts, int(parts[8]), int(parts[9])))
+            except Exception:
+                continue
+        rows = [r for r in rows if now - r[0] <= UTIL_WINDOW_MIN * 60]
+    except Exception:
+        return None
+
+    if len(rows) < 2:
+        return None
+
+    intervals = len(rows) - 1
+    active_intervals = sum(1 for i in range(1, len(rows)) if rows[i][1] > rows[i - 1][1])
+    active_pct = (active_intervals / intervals * 100) if intervals > 0 else None
+
+    span_hr = (rows[-1][0] - rows[0][0]) / 3600
+    req_per_hour = (rows[-1][1] - rows[0][1]) / span_hr if span_hr > 0 else None
+    tok_per_hour = (rows[-1][2] - rows[0][2]) / span_hr if span_hr > 0 else None
+
     return {
         "active_pct": round(active_pct, 1) if active_pct is not None else None,
-        "sample_count": len(samples),
+        "sample_count": len(rows),
         "requests_per_hour": round(req_per_hour, 1) if req_per_hour is not None else None,
         "tokens_per_hour": round(tok_per_hour) if tok_per_hour is not None else None,
     }
@@ -304,12 +281,7 @@ def log_warmup(line):
 
 
 def get_active_model():
-    """The model currently configured, per model-rotate.state if it exists,
-    otherwise 'Warm models'/'Configured model' from darkbloom status."""
-    if ROTATE_STATE.exists():
-        for line in ROTATE_STATE.read_text().splitlines():
-            if line.startswith("CURRENT_MODEL="):
-                return line.split("=", 1)[1].strip()
+    """The model currently configured, from 'Warm models' in darkbloom status."""
     status = get_darkbloom_status()
     if status.get("warm_models"):
         return status["warm_models"].split(",")[0].strip()
@@ -474,41 +446,6 @@ def get_account_data():
     return raw
 
 
-def get_rotation_info():
-    if not ROTATE_STATE.exists():
-        return None
-    state = {}
-    for line in ROTATE_STATE.read_text().splitlines():
-        if "=" in line:
-            k, v = line.split("=", 1)
-            state[k] = v
-
-    current_model = state.get("CURRENT_MODEL")
-    trust_achieved_at = int(state.get("TRUST_ACHIEVED_AT", "0") or 0)
-    now = int(time.time())
-    if trust_achieved_at:
-        next_switch_in = max(0, ROTATE_INTERVAL_SEC - (now - trust_achieved_at))
-        waiting_for_trust = False
-    else:
-        next_switch_in = None
-        waiting_for_trust = True
-
-    history = []
-    if ROTATE_LOG.exists():
-        with open(ROTATE_LOG, newline="") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                history.append(r)
-        history = history[-10:]  # last 10 switches is plenty for comparison
-
-    return {
-        "current_model": current_model,
-        "next_switch_in_sec": next_switch_in,
-        "waiting_for_trust": waiting_for_trust,
-        "history": history,
-    }
-
-
 def get_disk_usage():
     """Downloaded MLX models and how much disk they use, split into the
     currently active model vs. everything else - the leftovers from past
@@ -632,12 +569,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "status": get_darkbloom_status(),
                 "energy": get_energy_series(),
                 "live_power": get_live_power(),
-                "rotation": get_rotation_info(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),
                 "disk": get_disk_usage(),
             }
             self._send_json(data)
+        elif self.path == "/api/power":
+            # Cheap, fast-poll-friendly: just a file tail, no subprocess spawns.
+            # Kept separate from /api/live_power so polling this at 5Hz doesn't
+            # also spawn top/sysctl/ollama ps five times a second.
+            self._send_json({"power": get_live_power()})
         elif self.path == "/api/live_power":
             self._send_json({
                 "power": get_live_power(),

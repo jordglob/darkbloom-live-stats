@@ -12,7 +12,7 @@
     <string>--samplers</string>
     <string>cpu_power,gpu_power</string>
     <string>-i</string>
-    <string>60000</string>
+    <string>200</string>
     <string>-o</string>
     <string>/tmp/darkbloom-pm-raw.log</string>
   </array>

@@ -4,7 +4,7 @@
 #
 # What this does automatically (no sudo needed):
 #   - Copies dashboard/ and scripts/ into ~/.darkbloom/
-#   - Installs and starts 3 LaunchAgents: dashboard, energy-monitor, model-rotate
+#   - Installs and starts 2 LaunchAgents: dashboard, energy-monitor
 #
 # What it prepares but does NOT run for you (needs your password, on purpose -
 # see README "Security notes"):
@@ -39,7 +39,7 @@ mkdir -p "$TARGET/dashboard"
 cp "$REPO_DIR/dashboard/server.py" "$TARGET/dashboard/server.py"
 cp "$REPO_DIR/dashboard/index.html" "$TARGET/dashboard/index.html"
 
-for f in pm-start.sh energy-monitor.sh model-rotate.sh; do
+for f in pm-start.sh energy-monitor.sh; do
   cp "$REPO_DIR/scripts/$f" "$TARGET/$f"
   chmod +x "$TARGET/$f"
 done
@@ -76,8 +76,8 @@ echo "SUDOERS_INSTALLED_OK"
 SETUP
 chmod +x "$TARGET/setup-powermetrics-sudoers.sh"
 
-# Start the 3 services that don't need root right away.
-for svc in dashboard energy-monitor model-rotate; do
+# Start the 2 services that don't need root right away.
+for svc in dashboard energy-monitor; do
   launchctl bootout "gui/$(id -u)/io.darkbloom.$svc" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENTS/io.darkbloom.$svc.plist"
 done
