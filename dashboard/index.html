@@ -201,6 +201,14 @@
   .sync-help summary { cursor: pointer; font-size: 11px; color: var(--text-muted); }
   .sync-help[open] summary { margin-bottom: 6px; }
   .sync-help p { font-size: 11px; color: var(--text-muted); margin: 4px 0; }
+
+  .explainer summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .explainer[open] summary { margin-bottom: 12px; }
+  .explainer-section { margin-bottom: 14px; }
+  .explainer-section:last-child { margin-bottom: 0; }
+  .explainer-section h4 { font-size: 12px; font-weight: 700; margin: 0 0 4px; color: var(--text-primary); }
+  .explainer-section p { font-size: 12px; color: var(--text-secondary); margin: 3px 0; line-height: 1.55; }
+  .explainer-section code { background: var(--surface-1); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, monospace; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -212,6 +220,54 @@
   <div id="banners"></div>
 
   <div class="cards" id="cards"></div>
+
+  <div class="panel">
+    <details class="explainer">
+      <summary>❓ What does everything on this dashboard mean?</summary>
+
+      <div class="explainer-section">
+        <h4>Top summary cards</h4>
+        <p><strong>Trust</strong> — the hardware-attestation level the Darkbloom coordinator has assigned this Mac. <code>hardware</code> means it's eligible to actually receive inference traffic; <code>self_signed</code> means it's online but not yet trusted enough to be routed any jobs. A drop from hardware-level triggers a macOS notification and a red banner automatically.</p>
+        <p><strong>Daemon</strong> — whether the `darkbloom` background process itself is running.</p>
+        <p><strong>Requests</strong> — requests served and tokens processed since the daemon last (re)started. This resets on every restart, so it's not a lifetime total.</p>
+        <p><strong>Warm models</strong> — how many models are currently loaded in memory (instant response) vs. how many are downloaded to disk in total.</p>
+        <p><strong>Accumulated electricity cost</strong> and <strong>Net</strong> — see the calculation explainer under the cost/revenue chart further down for the exact formula.</p>
+      </div>
+
+      <div class="explainer-section">
+        <h4>Live Power gauges</h4>
+        <p><strong>CPU / GPU / Total</strong> — instantaneous power draw read straight from `powermetrics`, sampled ~5 times per second. "Total" adds a fixed 7W estimate on top for everything `powermetrics` can't see (RAM, disk, fans, PSU losses) — real wall power is somewhat higher than shown.</p>
+        <p><strong>RAM used</strong> — system-wide memory pressure, not just this app's usage. Turns red/orange as it approaches full, since that's the exact condition that caused real model-load failures during testing.</p>
+        <p><strong>Utilization (last hour)</strong> — % of the last ~60 minutes (in 5-minute slices) that actually saw new requests arrive, based on the real request counter. A low or 0% reading with a healthy Trust/Daemon status just means genuinely no traffic right now, not a fault — the fan being quiet is expected in that case.</p>
+      </div>
+
+      <div class="explainer-section">
+        <h4>Darkbloom Account ("DB cut")</h4>
+        <p>Real jobs/tokens/payout per model, pulled from your actual Darkbloom account ledger via the sync bookmarklet (not a live connection — you refresh it manually). "DB cut" compares what this dashboard's own naive flat-rate guess would have paid for the same tokens against what Darkbloom's ledger actually paid — it is <strong>not</strong> an official platform fee, just the gap between a rough local guess and reality, whatever is driving it.</p>
+      </div>
+
+      <div class="explainer-section">
+        <h4>Warmup</h4>
+        <p>Periodically sends a tiny request to the provider's local endpoint to keep the active model loaded in memory, so it's ready instantly instead of needing to reload when the first real request of the day arrives.</p>
+      </div>
+
+      <div class="explainer-section">
+        <h4>Disk Usage</h4>
+        <p>Every model `darkbloom` has downloaded, with size and whether it's the one currently active. Models not currently in use get a one-click "copy remove command" — this dashboard never deletes files itself, it only prepares the exact command for you to run.</p>
+      </div>
+
+      <div class="explainer-section">
+        <h4>Charts</h4>
+        <p><strong>Power history</strong> — the same wattage as the live gauges, logged every 5 minutes so you can see trends over hours/days.</p>
+        <p><strong>Electricity cost vs. estimated revenue</strong> — running totals over time; see its own "How is this calculated?" details below the chart for the exact formula.</p>
+      </div>
+
+      <div class="explainer-section">
+        <h4>Ollama indicator</h4>
+        <p>Flags when Ollama has a model loaded in memory at the same time, since that competed for RAM with the Darkbloom provider and caused real crashes during testing on this 48GB Mac.</p>
+      </div>
+    </details>
+  </div>
 
   <div class="panel">
     <h2 title="Instantaneous CPU/GPU/Total power draw, read directly from the latest powermetrics sample.">Live Power <span id="live-power-time" class="gauge-time"></span></h2>
