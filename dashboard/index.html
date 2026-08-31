@@ -176,6 +176,8 @@
   table.rotation-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   table.rotation-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border); cursor: default; }
   table.rotation-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .copy-cmd-btn { font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
+  .copy-cmd-btn:hover { background: var(--surface-2, var(--surface-1)); }
   table.rotation-table tr:last-child td { border-bottom: none; }
   .rotation-summary { font-size: 12px; color: var(--text-secondary); margin: 10px 0; }
   .rotation-summary strong { color: var(--text-primary); }
@@ -246,6 +248,11 @@
   </div>
 
   <div class="panel">
+    <h2 title="Downloaded MLX models and how much disk they use. Models left over from stopped rotation experiments are safe to remove if you need the space back.">Disk Usage</h2>
+    <div id="disk"></div>
+  </div>
+
+  <div class="panel">
     <h2 title="Instantaneous CPU/GPU/Total power draw, read directly from the latest powermetrics sample.">Live Power <span id="live-power-time" class="gauge-time"></span></h2>
     <div class="gauges" id="gauges"></div>
     <div id="ollama-badge" style="margin-top:12px"></div>
@@ -269,6 +276,13 @@
       <svg class="chart" id="chart-money"></svg>
       <div class="tooltip" id="tooltip-money"></div>
     </div>
+    <details class="sync-help" style="margin-top:10px">
+      <summary>How is the kWh price and Net figure calculated?</summary>
+      <p><strong>Electricity price:</strong> fetched live from <a href="https://www.elprisetjustnu.se" target="_blank" rel="noopener">elprisetjustnu.se</a> (Sweden, zone SE3), re-checked every 15 minutes. It's the actual spot price for the current hour, not an estimate.</p>
+      <p><strong>Cost so far:</strong> every 5 minutes, measured power draw (CPU+GPU from powermetrics, plus a fixed 7W baseline guess for RAM/disk/fans/PSU loss that powermetrics doesn't see) is converted to the energy used in that 5-minute slice, then priced at the current SEK/kWh. Those slices add up into the running "Accumulated electricity cost" card and the cost line on this chart.</p>
+      <p><strong>Estimated revenue:</strong> Darkbloom's alpha pricing is roughly $0.05/M input tokens + $0.20/M output tokens; since <code>darkbloom status</code> only reports a combined token count (not split input/output), this uses a blended midpoint of $0.125/M tokens as a rough stand-in, converted to SEK at the current USD/SEK rate (checked hourly).</p>
+      <p><strong>Net (estimated) = Estimated revenue − Accumulated electricity cost.</strong> This is our own guess built from local numbers, not what Darkbloom actually paid - once the account is synced (see the Darkbloom Account panel above), "Net (real balance)" replaces it with your real ledger balance instead.</p>
+    </details>
   </div>
 
   <footer id="footnote"></footer>
@@ -574,6 +588,56 @@ async function refreshWarmup() {
   } catch (e) { /* silent */ }
 }
 
+function copyRemoveCmd(id, btn) {
+  const cmd = `darkbloom models remove ${id}`;
+  const orig = btn.textContent;
+  const flash = (text) => { btn.textContent = text; setTimeout(() => { btn.textContent = orig; }, 1800); };
+  const fallbackCopy = () => {
+    // Clipboard API can refuse outside a fully-focused document (some window
+    // managers, embedded views) - a hidden input + execCommand still works there.
+    const input = document.createElement('input');
+    input.value = cmd;
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(input);
+    flash(ok ? 'Copied!' : cmd);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).then(() => flash('Copied!')).catch(fallbackCopy);
+  } else {
+    fallbackCopy();
+  }
+}
+
+function renderDisk(disk) {
+  const el = document.getElementById('disk');
+  if (!disk || !disk.models || disk.models.length === 0) {
+    el.innerHTML = `<div class="rotation-summary">No local model info available.</div>`;
+    return;
+  }
+  const unused = disk.models.filter(m => !m.active);
+  el.innerHTML = `
+    ${unused.length ? `<div class="rotation-summary">${unused.length} model${unused.length === 1 ? '' : 's'} not currently in use — ${disk.unused_total_gb} GB reclaimable</div>` : `<div class="rotation-summary">Only the active model is downloaded — nothing to reclaim.</div>`}
+    <table class="rotation-table">
+      <thead><tr><th>Model</th><th>Size</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        ${disk.models.map(m => `
+          <tr>
+            <td>${m.id}</td>
+            <td>${m.size_gb} GB</td>
+            <td>${m.active ? '<span class="cut-negative">active</span>' : 'unused'}</td>
+            <td>${m.active ? '' : `<button class="copy-cmd-btn" onclick="copyRemoveCmd('${m.id}', this)" title="Copies the removal command - run it yourself in Terminal, this dashboard never deletes files for you">Copy remove command</button>`}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
 function renderAccount(account) {
   const el = document.getElementById('account');
   if (!account) { el.innerHTML = ''; return; }
@@ -628,6 +692,9 @@ function renderBanners(status, energy) {
   }
   if (!energy.power_monitoring_active) {
     banners.push(`<div class="banner warning"><span class="dot"></span>Power monitoring inactive — pm-start.sh (sudo) is not running, electricity cost is not being counted right now.</div>`);
+  }
+  if (status.trust && !status.trust.startsWith('hardware')) {
+    banners.push(`<div class="banner warning"><span class="dot"></span>Trust is "${status.trust}", not hardware-level — no real traffic is being routed here right now. A macOS notification fires automatically if this changes.</div>`);
   }
   document.getElementById('banners').innerHTML = banners.join('');
 }
@@ -732,13 +799,14 @@ async function refresh() {
   try {
     const res = await fetch('/api/data');
     const data = await res.json();
-    const { status, energy, rotation, account, utilization } = data;
+    const { status, energy, rotation, account, utilization, disk } = data;
     lastUtilization = utilization || null;
 
     renderCards(status, energy, account);
     renderBanners(status, energy);
     renderRotation(rotation);
     renderAccount(account);
+    renderDisk(disk);
 
     const rows = energy.rows || {};
     renderLineChart('chart-power', 'tooltip-power',

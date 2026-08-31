@@ -357,6 +357,52 @@ def send_warmup_ping():
         return False
 
 
+TRUST_LOG = HOME / ".darkbloom" / "trust-changes.log"
+
+
+def notify_mac(title, message):
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'display notification {json.dumps(message)} with title {json.dumps(title)}'],
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def log_trust_change(line):
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with open(TRUST_LOG, "a") as f:
+        f.write(f"[{ts}] {line}\n")
+
+
+def trust_monitor_loop():
+    """Watches the trust level and fires a real macOS notification on change -
+    catches the same flicker bug that already bit us once, even if nobody is
+    looking at the dashboard tab right then."""
+    last_trust = None
+    while True:
+        try:
+            status = get_darkbloom_status()
+            trust = status.get("trust")
+            if trust and trust != last_trust:
+                if last_trust is not None:  # skip the very first read at startup
+                    was_hw = last_trust.startswith("hardware")
+                    now_hw = trust.startswith("hardware")
+                    if was_hw and not now_hw:
+                        notify_mac("Darkbloom Monitor", f"Trust dropped: {last_trust} -> {trust}")
+                        log_trust_change(f"DROP {last_trust} -> {trust}")
+                    elif not was_hw and now_hw:
+                        notify_mac("Darkbloom Monitor", f"Trust recovered: {trust}")
+                        log_trust_change(f"RECOVER {last_trust} -> {trust}")
+                    else:
+                        log_trust_change(f"{last_trust} -> {trust}")
+                last_trust = trust
+        except Exception:
+            pass
+        time.sleep(60)
+
+
 def warmup_loop():
     while True:
         cfg = read_warmup_config()
@@ -463,6 +509,40 @@ def get_rotation_info():
     }
 
 
+def get_disk_usage():
+    """Downloaded MLX models and how much disk they use, split into the
+    currently active model vs. everything else - the leftovers from past
+    model-rotation experiments that are safe to remove if disk space matters."""
+    try:
+        out = subprocess.run(
+            [str(DARKBLOOM_BIN), "models", "list", "--json"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        data = json.loads(out)
+    except Exception:
+        return None
+
+    active_model = get_active_model()
+    models = []
+    unused_total_bytes = 0
+    for m in data.get("models", []):
+        size_bytes = m.get("size_bytes", 0) or 0
+        is_active = m.get("id") == active_model
+        if not is_active:
+            unused_total_bytes += size_bytes
+        models.append({
+            "id": m.get("id"),
+            "size_gb": round(size_bytes / 1e9, 1),
+            "active": is_active,
+        })
+    models.sort(key=lambda m: (not m["active"], -m["size_gb"]))
+    return {
+        "models": models,
+        "active_model": active_model,
+        "unused_total_gb": round(unused_total_bytes / 1e9, 1),
+    }
+
+
 def get_energy_series():
     if not CSV_PATH.exists():
         return {"rows": [], "latest": None, "power_monitoring_active": False}
@@ -555,6 +635,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "rotation": get_rotation_info(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),
+                "disk": get_disk_usage(),
             }
             self._send_json(data)
         elif self.path == "/api/live_power":
@@ -610,6 +691,7 @@ class ReusableTCPServer(socketserver.TCPServer):
 
 if __name__ == "__main__":
     threading.Thread(target=warmup_loop, daemon=True).start()
+    threading.Thread(target=trust_monitor_loop, daemon=True).start()
     with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:
         print(f"Darkbloom Monitor running at http://127.0.0.1:{PORT}")
         httpd.serve_forever()

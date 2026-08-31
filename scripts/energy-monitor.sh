@@ -77,6 +77,20 @@ while true; do
   NOW=$(date +%s)
   NOW_ISO=$(date "+%Y-%m-%dT%H:%M:%S%z" | sed -E 's/([0-9]{2})([0-9]{2})$/\1:\2/')
 
+  # --- rotate the root-owned raw log if it's grown large. We don't own the file
+  # and can't truncate/write it ourselves - but powermetrics -o TRUNCATES its
+  # target file on start, so restarting it via launchctl (no sudo needed for
+  # that, it's our own launchd job) rotates it effectively. ---
+  RAW_LOG_MAX_BYTES=104857600  # 100MB
+  if [ -f "$RAW_LOG" ]; then
+    RAW_SIZE=$(stat -f%z "$RAW_LOG" 2>/dev/null || echo 0)
+    if [ "$RAW_SIZE" -gt "$RAW_LOG_MAX_BYTES" ]; then
+      log "Raw power log is ${RAW_SIZE} bytes (>${RAW_LOG_MAX_BYTES}) - restarting powermetrics to rotate it"
+      launchctl kickstart -k "gui/$(id -u)/io.darkbloom.powermetrics" 2>/dev/null || true
+      LAST_OFFSET=0
+    fi
+  fi
+
   # --- electricity price, cached 15 min ---
   if [ -n "$FIXED_PRICE_PER_KWH" ]; then
     ELPRIS_VAL="$FIXED_PRICE_PER_KWH"
