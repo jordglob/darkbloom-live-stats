@@ -6,6 +6,7 @@ Binds to 127.0.0.1 (this machine only) on port 8787.
 import csv
 import http.server
 import json
+import plistlib
 import re
 import socketserver
 import subprocess
@@ -13,6 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HOME = Path.home()
@@ -29,7 +31,13 @@ BASELINE_W = 7
 # Same flat-rate guess as energy-monitor.sh's BLENDED_USD_PER_TOKEN - kept in sync
 # manually. Used only to show what our own naive local formula WOULD have guessed,
 # so it can be compared against what Darkbloom's real ledger actually paid.
-LOCAL_BLENDED_USD_PER_TOKEN = 0.125 / 1_000_000
+# Recalibrated 2026-09-02 from this account's real ledger (gpt-oss-20b and
+# gemma-4-26b real rates both landed within ~2% of each other around
+# $0.044/M tokens, despite very different model sizes - a stable blended
+# network rate, not noise). Previous guess of $0.125/M was never measured
+# and was off by ~2.8x, which is what most of the old "gap" number turned
+# out to be.
+LOCAL_BLENDED_USD_PER_TOKEN = 0.044 / 1_000_000
 LIVE_POWER_TAIL_BYTES = 40000  # a few complete samples of lookback at ~5Hz (~5-8KB/sample)
 LOCAL_JSON = HOME / ".darkbloom" / "local.json"
 WARMUP_CONFIG = HOME / ".darkbloom" / "warmup.json"
@@ -37,6 +45,7 @@ WARMUP_LOG = HOME / ".darkbloom" / "warmup.log"
 WARMUP_DEFAULT_INTERVAL_MIN = 20  # same cadence as SplittyDev/darkbloom-dashboard
 DAEMON_STATE_PATH = HOME / ".darkbloom" / "daemon-state.json"
 DOCTOR_POLL_INTERVAL_SEC = 300  # doctor makes a real network call + ~2 dozen checks - too heavy for the 10s cadence
+PROVIDER_PLIST = HOME / "Library" / "LaunchAgents" / "io.darkbloom.provider.plist"
 
 # Real account data pulled directly from Darkbloom's own API, using the same
 # device token the `darkbloom` CLI already stores locally after `darkbloom
@@ -294,23 +303,31 @@ def inference_duration_tracker_loop():
 
 
 def get_inference_duration_stats():
-    """Reads back the local duration log the tracker thread above writes."""
-    empty = {"count": 0, "avg_sec": None, "min_sec": None, "max_sec": None}
+    """Reads back the local duration log the tracker thread above writes.
+    total_sec/window_start_at let callers compute a real $/hour rate over
+    the exact same wall-clock window this log covers - not overall history,
+    since the log only started recording at some point after account history
+    began."""
+    empty = {"count": 0, "avg_sec": None, "min_sec": None, "max_sec": None,
+              "total_sec": 0.0, "window_start_at": None}
     if not INFERENCE_DURATIONS_LOG.exists():
         return empty
     try:
         with open(INFERENCE_DURATIONS_LOG, newline="") as f:
             reader = csv.DictReader(f)
-            durations = [float(r["duration_sec"]) for r in reader if r.get("duration_sec")]
+            rows = [r for r in reader if r.get("duration_sec") and r.get("started_at")]
     except Exception:
         return empty
-    if not durations:
+    if not rows:
         return empty
+    durations = [float(r["duration_sec"]) for r in rows]
     return {
         "count": len(durations),
         "avg_sec": sum(durations) / len(durations),
         "min_sec": min(durations),
         "max_sec": max(durations),
+        "total_sec": sum(durations),
+        "window_start_at": min(float(r["started_at"]) for r in rows),
     }
 
 
@@ -405,17 +422,32 @@ def log_warmup(line):
         f.write(f"[{ts}] {line}\n")
 
 
-def get_active_model():
-    """The model currently configured, from 'Warm models' in darkbloom status."""
+def get_configured_models():
+    """The full set of models this provider is configured to serve, read from
+    the launchd plist's --model flags. Deliberately not 'Warm models' from
+    darkbloom status - that only lists models actually loaded into memory so
+    far, which misses any configured model that hasn't taken its first real
+    job yet (exactly the case right after adding a second --model)."""
+    try:
+        with open(PROVIDER_PLIST, "rb") as f:
+            plist = plistlib.load(f)
+        args = plist.get("ProgramArguments", [])
+        models = [args[i + 1] for i, a in enumerate(args) if a == "--model" and i + 1 < len(args)]
+        if models:
+            return models
+    except Exception:
+        pass
     status = get_darkbloom_status()
     if status.get("warm_models"):
-        return status["warm_models"].split(",")[0].strip()
-    return None
+        return [m.strip() for m in status["warm_models"].split(",") if m.strip()]
+    return []
 
 
 def send_warmup_ping():
-    """Sends a minimal chat completion to the provider's local endpoint to force
-    the active model into memory - the same daemon that serves the network."""
+    """Sends a minimal chat completion per configured model to the provider's
+    local endpoint, forcing each into memory - the same daemon that serves the
+    network. One ping per model since MLX only loads a given model on its
+    first request."""
     if not LOCAL_JSON.exists():
         log_warmup("ERROR: local.json missing - start the provider with --local-endpoint")
         return False
@@ -425,33 +457,35 @@ def send_warmup_ping():
         log_warmup(f"ERROR: could not read local.json: {e}")
         return False
 
-    model = get_active_model()
-    if not model:
-        log_warmup("ERROR: no active model found to warm up")
+    models = get_configured_models()
+    if not models:
+        log_warmup("ERROR: no configured models found to warm up")
         return False
 
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 1,
-    }).encode()
-    req = urllib.request.Request(
-        conf["base_url"].rstrip("/") + "/chat/completions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {conf['api_key']}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            resp.read()
-        log_warmup(f"OK: warmed up {model}")
-        return True
-    except Exception as e:
-        log_warmup(f"ERROR: warmup against {model} failed: {e}")
-        return False
+    all_ok = True
+    for model in models:
+        body = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        }).encode()
+        req = urllib.request.Request(
+            conf["base_url"].rstrip("/") + "/chat/completions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {conf['api_key']}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                resp.read()
+            log_warmup(f"OK: warmed up {model}")
+        except Exception as e:
+            log_warmup(f"ERROR: warmup against {model} failed: {e}")
+            all_ok = False
+    return all_ok
 
 
 TRUST_LOG = HOME / ".darkbloom" / "trust-changes.log"
@@ -538,6 +572,100 @@ def _fetch_real_account_data():
         return None
 
 
+def _parse_iso_ts(ts):
+    """Parses ISO8601 timestamps from either data source this file talks to:
+    the earnings ledger's created_at (trailing 'Z' = UTC, variable-length
+    fractional seconds, e.g. '.83428' vs '.178346' - Python's fromisoformat
+    is strict about fraction length) and elprisetjustnu.se's price entries
+    (explicit +HH:MM offset, no 'Z', no fractional seconds). Returns a unix
+    timestamp either way."""
+    ts = ts.strip()
+    if ts.endswith("Z"):
+        ts = ts[:-1]
+        if "." in ts:
+            base, frac = ts.split(".")
+            ts = base + "." + (frac + "000000")[:6]
+        return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc).timestamp()
+    return datetime.fromisoformat(ts).timestamp()
+
+
+FLOOR_JOB_ID_RE = re.compile(r"^floor:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})Z:")
+
+
+def _compute_hourly_rate_comparison(raw, duration_stats):
+    """Compares two real, locally-verifiable $/hour rates from this account's
+    own ledger - no advertised/quoted pricing involved:
+    - 'active' rate: real earnings (excl. base_reward) during the exact wall-
+      clock window our own inference_active-flag tracker has been running,
+      divided by the real active-serving seconds that tracker measured.
+    - 'floor' rate: base_reward earnings in that same window, divided by
+      real elapsed floor-slot time. Slot width isn't assumed - it's read
+      straight from the 'floor:<minute>Z:...' job_id Darkbloom itself embeds
+      in every base_reward entry, by taking the smallest gap between
+      consecutive slot timestamps (i.e. two genuinely back-to-back idle
+      slots), so it's derived from the account's own data either way.
+    Returns None until the local tracker has logged at least one real
+    duration - before that there's no time-aligned window to compare against."""
+    window_start = duration_stats.get("window_start_at")
+    active_sec = duration_stats.get("total_sec") or 0.0
+    if not window_start or active_sec <= 0:
+        return None
+
+    real_usd = 0.0
+    real_jobs = 0
+    base_usd = 0.0
+    floor_slot_starts = set()
+    for e in raw.get("earnings", []):
+        try:
+            t = _parse_iso_ts(e["created_at"])
+        except Exception:
+            continue
+        if t < window_start:
+            continue
+        amt = (e.get("amount_micro_usd", 0) or 0) / 1e6
+        if e.get("model") == "base_reward":
+            base_usd += amt
+            m = FLOOR_JOB_ID_RE.match(e.get("job_id") or "")
+            if m:
+                floor_slot_starts.add(m.group(1))
+        else:
+            real_usd += amt
+            real_jobs += 1
+
+    active_hours = active_sec / 3600
+    active_rate_per_hour = real_usd / active_hours if active_hours > 0 else None
+
+    floor_slots = sorted(floor_slot_starts)
+    slot_minutes = None
+    if len(floor_slots) >= 2:
+        gaps_min = []
+        for a, b in zip(floor_slots, floor_slots[1:]):
+            ta = datetime.fromisoformat(a).replace(tzinfo=timezone.utc).timestamp()
+            tb = datetime.fromisoformat(b).replace(tzinfo=timezone.utc).timestamp()
+            gaps_min.append((tb - ta) / 60)
+        slot_minutes = min(gaps_min)
+    floor_hours = (len(floor_slots) * slot_minutes / 60) if (floor_slots and slot_minutes) else None
+    floor_rate_per_hour = (base_usd / floor_hours) if floor_hours else None
+
+    return {
+        "window_start_at": window_start,
+        "active_hours": active_hours,
+        "active_usd": real_usd,
+        "active_jobs": real_jobs,
+        "active_rate_per_hour_usd": active_rate_per_hour,
+        "floor_slots": len(floor_slots),
+        "floor_slot_minutes": slot_minutes,
+        "floor_hours": floor_hours,
+        "floor_usd": base_usd,
+        "floor_rate_per_hour_usd": floor_rate_per_hour,
+        "ratio_active_to_floor": (
+            active_rate_per_hour / floor_rate_per_hour
+            if active_rate_per_hour is not None and floor_rate_per_hour
+            else None
+        ),
+    }
+
+
 def _build_account_view(raw, age_sec):
     """Aggregates the raw earnings list per model and computes the same
     'local estimate vs. real payout' comparison as before. base_reward-style
@@ -598,6 +726,7 @@ def _build_account_view(raw, age_sec):
             "total_real_usd": total_real,
             "cut_pct": ((total_local_est - total_real) / total_local_est * 100) if total_local_est > 0 else None,
         },
+        "hourly_rate_comparison": _compute_hourly_rate_comparison(raw, get_inference_duration_stats()),
     }
 
 
@@ -701,12 +830,12 @@ def get_disk_usage():
     except Exception:
         return None
 
-    active_model = get_active_model()
+    active_models = get_configured_models()
     models = []
     unused_total_bytes = 0
     for m in data.get("models", []):
         size_bytes = m.get("size_bytes", 0) or 0
-        is_active = m.get("id") == active_model
+        is_active = m.get("id") in active_models
         if not is_active:
             unused_total_bytes += size_bytes
         models.append({
@@ -717,7 +846,7 @@ def get_disk_usage():
     models.sort(key=lambda m: (not m["active"], -m["size_gb"]))
     return {
         "models": models,
-        "active_model": active_model,
+        "active_models": active_models,
         "unused_total_gb": round(unused_total_bytes / 1e9, 1),
     }
 
@@ -747,6 +876,200 @@ def _bucket_downsample(rows, max_points):
         peak_total_power_w.append(max(float(r.get("total_power_w", 0) or 0) for r in bucket))
         out_rows.append(last)
     return out_rows, peak_total_power_w
+
+
+ELPRIS_ZONE_CONFIG = HOME / ".darkbloom" / "elpris-zone.json"
+ELPRIS_VALID_ZONES = ["SE1", "SE2", "SE3", "SE4"]
+ELPRIS_DEFAULT_ZONE = "SE3"
+ELPRIS_POLL_INTERVAL_SEC = 900  # matches energy-monitor.sh's own elpris cache cadence
+_elpris_cache = {"data": None, "fetched_at": 0.0, "zone": None}
+_elpris_cache_lock = threading.Lock()
+
+
+def get_elpris_zone():
+    try:
+        zone = json.loads(ELPRIS_ZONE_CONFIG.read_text()).get("zone")
+        if zone in ELPRIS_VALID_ZONES:
+            return zone
+    except Exception:
+        pass
+    return ELPRIS_DEFAULT_ZONE
+
+
+def set_elpris_zone(zone):
+    if zone not in ELPRIS_VALID_ZONES:
+        return False
+    ELPRIS_ZONE_CONFIG.write_text(json.dumps({"zone": zone}))
+    with _elpris_cache_lock:
+        _elpris_cache["fetched_at"] = 0.0  # force a refetch under the new zone next poll
+    return True
+
+
+ELPRIS_SURCHARGE_CONFIG = HOME / ".darkbloom" / "elpris-surcharge.json"
+# Swedish VAT on electricity is a fixed nationwide rate (25%) - a real fact,
+# not a guess, unlike grid fee/energy tax below which genuinely vary per
+# household (grid operator, subscription size, region) and can't be known
+# without the user entering their own numbers.
+ELPRIS_VAT_PCT = 25
+
+
+def get_elpris_surcharge():
+    """Grid fee (nätavgift) and energy tax (energiskatt), both öre/kWh,
+    entered by the user via the dashboard - defaults to 0/0 (i.e. the
+    'incl. fees & tax' chart line starts out identical to the raw spot
+    price) rather than guessing at a 'typical' Swedish rate, since actual
+    grid fees vary enormously by grid operator and subscription size, and
+    the energy tax rate itself changes with the annual government budget."""
+    try:
+        data = json.loads(ELPRIS_SURCHARGE_CONFIG.read_text())
+        return {
+            "grid_fee_ore_per_kwh": float(data.get("grid_fee_ore_per_kwh", 0) or 0),
+            "energy_tax_ore_per_kwh": float(data.get("energy_tax_ore_per_kwh", 0) or 0),
+        }
+    except Exception:
+        return {"grid_fee_ore_per_kwh": 0.0, "energy_tax_ore_per_kwh": 0.0}
+
+
+def set_elpris_surcharge(grid_fee_ore, energy_tax_ore):
+    ELPRIS_SURCHARGE_CONFIG.write_text(json.dumps({
+        "grid_fee_ore_per_kwh": grid_fee_ore,
+        "energy_tax_ore_per_kwh": energy_tax_ore,
+    }))
+
+
+def _fetch_elpris_day(date_obj, zone):
+    """One calendar day's hourly day-ahead prices for a Swedish Nord Pool
+    bidding zone, straight from elprisetjustnu.se (free, no API key). Returns
+    [] if that day's file isn't published yet (tomorrow's prices clear the
+    day-ahead auction and go live daily around 13:00 CET) or on any fetch
+    error - never raises, so a slow/offline API just means a shorter chart,
+    not a broken page.
+
+    NOT PORTABLE OUTSIDE SWEDEN - if you're adapting this dashboard for a
+    different country, this is the one function to replace: elprisetjustnu.se
+    only covers Sweden's four Nord Pool zones (SE1-SE4). Swap in your own
+    market's day-ahead price API instead - e.g. ENTSO-E Transparency Platform
+    (covers most of the EU, needs a free API token), aWATTar (DE/AT), Elexon/
+    N2EX (UK), or your local utility/exchange's published day-ahead API.
+    Whatever you use, keep returning this same shape - a list of
+    {"time_start": ISO8601, "time_end": ISO8601, "sek_per_kwh": float} dicts
+    (rename the price key to your own currency/unit) - so nothing downstream
+    (get_elpris_48h, the /api/elpris_48h response, the frontend chart) needs
+    to change. Also update ELPRIS_VALID_ZONES/ELPRIS_DEFAULT_ZONE above to
+    your market's own zone codes, and the currency conversion in
+    get_elpris_48h if your source isn't already in USD."""
+    url = f"https://www.elprisetjustnu.se/api/v1/prices/{date_obj.year}/{date_obj.month:02d}-{date_obj.day:02d}_{zone}.json"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "darkbloom-live-stats/1"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for e in data:
+        try:
+            out.append({
+                "time_start": e["time_start"],
+                "time_end": e["time_end"],
+                "sek_per_kwh": float(e["SEK_per_kWh"]),
+            })
+        except Exception:
+            continue
+    return out
+
+
+def _latest_usd_sek_rate():
+    """The most recently logged USD/SEK rate (energy-monitor.sh refreshes it
+    hourly and writes it into every CSV row) - reused here instead of a
+    separate fetch, so the 48h price chart's USD conversion always matches
+    what the rest of the dashboard is already using."""
+    if not CSV_PATH.exists():
+        return 9.5
+    try:
+        with open(CSV_PATH, newline="") as f:
+            rows = list(csv.DictReader(f))
+        return float(rows[-1].get("usd_sek", 0) or 0) or 9.5 if rows else 9.5
+    except Exception:
+        return 9.5
+
+
+def _earnings_by_bucket(all_prices):
+    """Real total earnings (incl. base_reward) landed in each 15-min price
+    bucket, aligned to the same time grid as the forecast - a rough visual
+    read on when earnings actually happened relative to price, not precise
+    accounting (a bucket straddling 'now' will look partial, and a bucket
+    with mixed real+base_reward jobs is just summed together). Only ever
+    non-zero for buckets that have already elapsed. Reuses whatever the
+    account panel's own ledger cache already holds instead of a separate
+    fetch - if that hasn't loaded yet, every bucket is just 0."""
+    with _account_cache_lock:
+        raw = _account_cache["data"]
+    if not raw:
+        return [0.0] * len(all_prices)
+    parsed = []
+    for e in raw.get("earnings", []):
+        try:
+            parsed.append((_parse_iso_ts(e["created_at"]), (e.get("amount_micro_usd", 0) or 0) / 1e6))
+        except Exception:
+            continue
+    out = []
+    for p in all_prices:
+        try:
+            t_start = _parse_iso_ts(p["time_start"])
+            t_end = _parse_iso_ts(p["time_end"])
+        except Exception:
+            out.append(0.0)
+            continue
+        out.append(sum(amt for t, amt in parsed if t_start <= t < t_end))
+    return out
+
+
+def get_elpris_48h():
+    """Today + tomorrow's published day-ahead electricity prices for the
+    configured zone - a forecast/schedule, not a history of what was
+    measured. Cached for ELPRIS_POLL_INTERVAL_SEC per zone; tomorrow_available
+    flips to true the moment elprisetjustnu.se publishes the next day's
+    prices (usually early-to-mid afternoon local time), which is what makes
+    this chart update itself as soon as a new day's prices are released."""
+    zone = get_elpris_zone()
+    now = time.time()
+    with _elpris_cache_lock:
+        cached, fetched_at, cached_zone = _elpris_cache["data"], _elpris_cache["fetched_at"], _elpris_cache["zone"]
+        if cached is not None and cached_zone == zone and (now - fetched_at) < ELPRIS_POLL_INTERVAL_SEC:
+            # Surcharge is user-editable and cheap to read - always attach the
+            # current value rather than baking it into the 15-min price cache,
+            # so changing it reflects immediately instead of waiting on a refetch.
+            result = dict(cached)
+            result["surcharge"] = {**get_elpris_surcharge(), "vat_pct": ELPRIS_VAT_PCT}
+            return result
+
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    usd_rate = _latest_usd_sek_rate()
+
+    today_prices = _fetch_elpris_day(today, zone)
+    tomorrow_prices = _fetch_elpris_day(tomorrow, zone)
+    all_prices = today_prices + tomorrow_prices
+    for p in all_prices:
+        p["usd_per_kwh"] = (p["sek_per_kwh"] / usd_rate) if usd_rate else None
+    for p, earnings_usd in zip(all_prices, _earnings_by_bucket(all_prices)):
+        p["earnings_usd"] = earnings_usd
+
+    result = {
+        "zone": zone,
+        "valid_zones": ELPRIS_VALID_ZONES,
+        "prices": all_prices,
+        "tomorrow_available": len(tomorrow_prices) > 0,
+        "usd_sek_rate": usd_rate,
+        "surcharge": {**get_elpris_surcharge(), "vat_pct": ELPRIS_VAT_PCT},
+    }
+    with _elpris_cache_lock:
+        _elpris_cache["data"] = result
+        _elpris_cache["fetched_at"] = now
+        _elpris_cache["zone"] = zone
+    return result
 
 
 def get_energy_series():
@@ -824,6 +1147,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "daemon_state": get_daemon_state(),
                 "doctor": get_doctor_report(),
                 "inference_durations": get_inference_duration_stats(),
+                "elpris_48h": get_elpris_48h(),
             }
             self._send_json(data)
         elif self.path == "/api/power":
@@ -866,6 +1190,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cfg["interval_min"] = max(1, int(body["interval_min"]))
             write_warmup_config(cfg)
             self._send_json(cfg)
+        elif self.path == "/api/elpris_zone":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            zone = (body.get("zone") or "").upper()
+            if set_elpris_zone(zone):
+                self._send_json(get_elpris_48h())
+            else:
+                self.send_response(400)
+                self.end_headers()
+        elif self.path == "/api/elpris_surcharge":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            try:
+                grid_fee = float(body.get("grid_fee_ore_per_kwh", 0) or 0)
+                energy_tax = float(body.get("energy_tax_ore_per_kwh", 0) or 0)
+            except (TypeError, ValueError):
+                self.send_response(400)
+                self.end_headers()
+            else:
+                set_elpris_surcharge(grid_fee, energy_tax)
+                self._send_json(get_elpris_48h())
         else:
             self.send_response(404)
             self.end_headers()

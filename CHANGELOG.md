@@ -1,5 +1,21 @@
 # Changelog
 
+## v3
+
+**Multi-model warmup fix**: the warmup loop only ever kept the *first* configured model warm. Now pings every model the provider is configured to serve (read straight from the launchd plist's `--model` flags, not from `darkbloom status`'s "Warm models" line, which only lists what's already loaded). The disk-usage panel's active/unused split was fixed the same way.
+
+**Recalibrated the "estimated revenue" rate** from a never-measured $0.125/M-token guess (based on Darkbloom's quoted alpha pricing) to $0.044/M, computed straight from this account's own real ledger. The old guess turned out to be ~2.8x too high even after correcting for the real prompt:completion token mix — collapsed the "Darkbloom gap" comparison from ~65% down to ~0%, confirming that number was entirely measuring our own guess's error, never anything about Darkbloom's actual pricing.
+
+**New: Active vs. floor pay rate.** A genuinely local, non-advertised $/hour comparison — real earnings during actual active-serving time (tracked via our own `inference_active`-flag watcher) vs. base-reward floor earnings during idle time (floor-slot width derived from the `floor:<minute>Z:...` timestamp Darkbloom itself embeds in every base-reward `job_id`, not assumed). Shown in Nerdy Stats with a full "how is this computed?" hover breakdown.
+
+**New: Electricity Price Forecast (48h) panel.** Today's (and tomorrow's, once published) day-ahead spot prices at Sweden's real 15-minute settlement granularity, with a zone picker (SE1-SE4) that also drives the header's "$/kWh right now" figure. Auto-extends to 48h the moment the next day's prices are published (usually early afternoon) — no restart needed. Includes:
+- A "now" marker on the chart.
+- A second line for price *including* grid fee + energy tax + 25% VAT, both fields user-editable (öre/kWh) and defaulting to 0 rather than a guessed "typical" Swedish rate, since actual grid fees vary enormously by operator/subscription.
+- A dual right-axis overlay showing real earnings per matching 15-minute slot, for a rough visual read on price vs. earnings correlation.
+- A prominent code comment (and matching UI note) on exactly what to swap for adapting this dashboard to a non-Swedish electricity market.
+
+**Extended `renderLineChart`** (the hand-rolled SVG chart function) to support an optional secondary right-hand y-axis and a "now" time marker, both opt-in via `opts` so the existing power/cost/net charts are unaffected.
+
 ## v2
 
 **Renamed** from `darkbloom-monitor` to `darkbloom-live-stats` — a different, unrelated tool (justin-schroeder/darkbloom-monitor) shares the old name, and the new one better reflects what this tool actually does versus other community dashboards: tracks real electricity cost against real earnings, not just live status.

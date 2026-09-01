@@ -15,6 +15,8 @@
     --text-muted:     #85837c;
     --series-cost:    #2a78d6;
     --series-revenue: #1baf7a;
+    --series-elpris:  #8a4fd6;
+    --series-elpris-total: #d6874f;
     --gauge-cpu:      #2a78d6;
     --gauge-gpu:      #eb6834;
     --gauge-total:    #1baf7a;
@@ -35,6 +37,8 @@
       --text-muted:     #8c8b83;
       --series-cost:    #3987e5;
       --series-revenue: #199e70;
+      --series-elpris:  #a67ae8;
+      --series-elpris-total: #e29a63;
       --gauge-cpu:      #3987e5;
       --gauge-gpu:      #d95926;
       --gauge-total:    #199e70;
@@ -51,6 +55,8 @@
     --text-muted:     #8c8b83;
     --series-cost:    #3987e5;
     --series-revenue: #199e70;
+    --series-elpris:  #a67ae8;
+    --series-elpris-total: #e29a63;
     --gauge-cpu:      #3987e5;
     --gauge-gpu:      #d95926;
     --gauge-total:    #199e70;
@@ -133,7 +139,12 @@
   .line-power { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
   .line-power-peak { fill: none; stroke: var(--series-cost); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
   .line-net { fill: none; stroke: var(--gauge-total); stroke-width: 2; stroke-linecap: round; }
+  .line-elpris { fill: none; stroke: var(--series-elpris); stroke-width: 2; stroke-linecap: round; }
+  .line-elpris-total { fill: none; stroke: var(--series-elpris-total); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 5 3; }
+  .line-earnings { fill: none; stroke: var(--series-revenue); stroke-width: 1.5; stroke-linecap: round; opacity: 0.85; }
   .zero-line { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 2; }
+  .now-line { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.7; }
+  .now-label { fill: var(--text-muted); }
   .pulse { animation: db-pulse 1.2s ease-in-out infinite; }
   @keyframes db-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
   .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 2; }
@@ -323,7 +334,7 @@
       <summary>How is the kWh price and Net figure calculated?</summary>
       <p><strong>Electricity price:</strong> fetched live from <a href="https://www.elprisetjustnu.se" target="_blank" rel="noopener">elprisetjustnu.se</a> (Sweden, zone SE3), re-checked every 15 minutes - it's the actual spot price for the current hour, not an estimate. The source is Swedish SEK; this dashboard converts to USD (checked hourly) so everything on the page shares one currency.</p>
       <p><strong>Cost so far:</strong> every 5 minutes, measured power draw (CPU+GPU from powermetrics, plus a fixed 7W baseline guess for RAM/disk/fans/PSU loss that powermetrics doesn't see) is converted to the energy used in that 5-minute slice, then priced at that slice's own USD/kWh rate. Those slices add up into the running "Accumulated electricity cost" card and the cost line on this chart.</p>
-      <p><strong>Estimated revenue:</strong> Darkbloom's alpha pricing is roughly $0.05/M input tokens + $0.20/M output tokens; since <code>darkbloom status</code> only reports a combined token count (not split input/output), this uses a blended midpoint of $0.125/M tokens as a rough stand-in - already USD-native, no conversion needed.</p>
+      <p><strong>Estimated revenue:</strong> uses a flat $0.044/M-token rate, recalibrated 2026-09-02 straight from this account's own real ledger (not from Darkbloom's advertised alpha pricing, which didn't match real payouts even correcting for real prompt/completion token mix). Since <code>darkbloom status</code> only reports a combined token count (not split input/output), this stays a single blended rate rather than separate input/output prices - already USD-native, no conversion needed.</p>
       <p><strong>Net (estimated) = Estimated revenue − Accumulated electricity cost.</strong> This is our own guess built from local numbers, not what Darkbloom actually paid - once the account is synced (see the Darkbloom Account panel above), "Net (real balance)" replaces it with your real ledger balance instead.</p>
     </details>
     <h2 style="margin-top:16px" title="Net = estimated revenue minus electricity cost, over time. Uses the same net_usd figures as the Net card above.">Net (Revenue − Cost) Over Time <span id="net-chart-stats" class="gauge-time"></span></h2>
@@ -331,6 +342,31 @@
       <svg class="chart" id="chart-net"></svg>
       <div class="tooltip" id="tooltip-net"></div>
     </div>
+  </div>
+
+  <div class="panel">
+    <h2 title="Published day-ahead electricity prices (Nord Pool auction results) for today + tomorrow - a schedule of what's already been decided, not a history of what was measured. Refreshes itself as soon as a new day's prices are released, usually early-to-mid afternoon local time.">
+      Electricity Price Forecast (48h)
+      <span class="gauge-time" id="elpris-chart-stats"></span>
+    </h2>
+    <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)">
+      Zone: <select id="elpris-zone-select" style="font-size:13px;padding:2px 6px"></select>
+      <span style="color:var(--text-muted)"> — changes what this chart and the "$/kWh right now" figure above show. The Accumulated electricity cost card and its chart keep tracking this Mac's own real zone regardless, since that's the actual cost incurred here.</span>
+    </div>
+    <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)" title="Spot price is only part of what Swedish households actually pay - grid fee and energy tax are added, then 25% VAT on top of all three. Both fields default to 0 (so the 'incl. fees & tax' line starts out identical to the spot line) since actual rates depend entirely on your own grid operator and subscription - fill in your own contract's numbers to make it accurate.">
+      Grid fee: <input type="number" id="elpris-grid-fee-input" step="0.1" min="0" style="width:64px;font-size:13px;padding:2px 4px"> öre/kWh ·
+      Energy tax: <input type="number" id="elpris-energy-tax-input" step="0.1" min="0" style="width:64px;font-size:13px;padding:2px 4px"> öre/kWh
+      <span style="color:var(--text-muted)"> (+ 25% VAT applied on top of spot+fee+tax) — adds the "incl. fees &amp; tax" line below.</span>
+    </div>
+    <div class="legend" id="elpris-legend"></div>
+    <div class="chart-wrap">
+      <svg class="chart" id="chart-elpris"></svg>
+      <div class="tooltip" id="tooltip-elpris"></div>
+    </div>
+    <p style="font-size:11px;color:var(--text-muted);margin-top:8px">
+      Sweden-only data source (<a href="https://www.elprisetjustnu.se" target="_blank" rel="noopener">elprisetjustnu.se</a>, Nord Pool zones SE1-SE4).
+      <strong>Adapting this dashboard for a different country?</strong> This chart and its zone picker are the Sweden-specific part - see the docstring on <code>_fetch_elpris_day()</code> in <code>server.py</code> for exactly what to replace it with for your own market's day-ahead price API (it spells out the required return shape and a few starting-point APIs for the EU/DE/AT/UK).
+    </p>
   </div>
 
   <footer id="footnote"></footer>
@@ -496,6 +532,7 @@ function fmtUsd(v) {
 }
 function fmtW(v) { return (v ?? 0).toLocaleString('en-US', {maximumFractionDigits: 1}) + ' W'; }
 function fmtNum(v) { return (v ?? 0).toLocaleString('en-US'); }
+function fmtUsdPerKwh(v) { return v == null ? '–' : fmtUsd(v) + '/kWh'; }
 function fmtTime(iso) {
   const d = new Date(iso);
   return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
@@ -711,7 +748,7 @@ function renderAccount(account) {
       · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here
     </div>
     <table class="rotation-table">
-      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.125/M-token guess would have estimated for these same tokens.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means our guess ran low.">Darkbloom gap</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
+      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.044/M-token guess would have estimated for these same tokens - that rate is recalibrated from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means our guess ran low.">Darkbloom gap</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <div class="rotation-summary" style="margin-top:10px">
@@ -737,6 +774,16 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
     ? `Observed request duration: avg <strong>${idur.avg_sec.toFixed(1)}s</strong> · min ${idur.min_sec.toFixed(1)}s · max ${idur.max_sec.toFixed(1)}s, from ${fmtNum(idur.count)} request${idur.count === 1 ? '' : 's'} <span title="Darkbloom exposes no duration/latency data anywhere - this is tracked locally by watching the daemon's inference_active flag twice a second since this dashboard started. May undercount requests shorter than that.">(tracked locally, not from Darkbloom)</span>`
     : 'No request durations observed yet - builds up over time as real requests come in (Darkbloom itself exposes no timing data, so this is tracked locally).';
 
+  const hr = (account && account.connected) ? account.hourly_rate_comparison : null;
+  const hourlyTooltip = hr ? `How this is computed, entirely from real local/ledger data - no advertised pricing anywhere in it:
+Active $/hr = real earnings (excl. base_reward) ÷ real active-serving seconds, both counted only from ${new Date(hr.window_start_at * 1000).toLocaleString('en-US')} onward - the exact moment this dashboard's local duration tracker started watching the daemon's inference_active flag.
+Floor $/hr = base_reward earnings in that same window ÷ elapsed floor-slot time. The slot width (${hr.floor_slot_minutes.toFixed(1)} min) isn't assumed - it's the smallest real gap between two back-to-back "floor:<minute>Z:..." timestamps Darkbloom itself embeds in every base_reward job_id.
+Window so far: ${hr.active_hours.toFixed(2)}h active (${fmtNum(hr.active_jobs)} jobs, ${fmtUsd(hr.active_usd)}) vs ${hr.floor_hours.toFixed(2)}h floor (${fmtNum(hr.floor_slots)} slots, ${fmtUsd(hr.floor_usd)}).
+Grows more reliable the longer the dashboard keeps running - resets to empty on every restart.` : '';
+  const hourlyLine = hr
+    ? `Real pay rate: <strong>${fmtUsd(hr.active_rate_per_hour_usd)}/hr</strong> actively serving vs <strong>${fmtUsd(hr.floor_rate_per_hour_usd)}/hr</strong> on the base-reward floor ${hr.ratio_active_to_floor != null ? `(active is ${(hr.ratio_active_to_floor * 100).toFixed(0)}% of floor)` : ''} <span title="${hourlyTooltip.replace(/"/g, '&quot;')}" style="cursor:help;text-decoration:underline dotted;">(how is this computed?)</span>`
+    : 'Not enough local data yet to compare active vs. floor pay rates — builds up as real requests come in.';
+
   const ds = daemonState || {};
   const capLine = ds.total_memory_gb != null
     ? `GPU memory: <strong>${(ds.gpu_memory_active_gb ?? 0).toFixed(2)} GB active</strong> + <strong>${(ds.gpu_memory_cache_gb ?? 0).toFixed(2)} GB cached</strong> of ${ds.total_memory_gb} GB unified memory · usage gaps: <strong>${fmtNum(ds.usage_gaps ?? 0)}</strong>`
@@ -753,12 +800,88 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
   el.innerHTML = `
     <div class="rotation-summary">${tokenLine}</div>
     <div class="rotation-summary">${durLine}</div>
+    <div class="rotation-summary">${hourlyLine}</div>
     <div class="rotation-summary">${capLine}</div>
     ${slotsLine ? `<div class="rotation-summary">${slotsLine}</div>` : ''}
     <div class="rotation-summary" style="margin-top:6px"><strong>Health checks (\`darkbloom doctor\`, refreshed every 5 min)</strong></div>
     ${warnLines}
     <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Actual prompt/response text isn't available anywhere - not in the API, not locally. Only token counts exist, which is what's shown above.</p>
   `;
+}
+
+function renderElpris(elpris48h) {
+  const sel = document.getElementById('elpris-zone-select');
+  if (sel && elpris48h && elpris48h.valid_zones) {
+    sel.innerHTML = elpris48h.valid_zones.map(z =>
+      `<option value="${z}" ${z === elpris48h.zone ? 'selected' : ''}>${z}</option>`
+    ).join('');
+    // Reassigned (not addEventListener) every render since these input nodes
+    // persist across refreshes - addEventListener would stack a new duplicate
+    // handler on every 10s poll instead of replacing it.
+    sel.onchange = async () => {
+      await fetch('/api/elpris_zone', { method: 'POST', body: JSON.stringify({ zone: sel.value }) });
+      refresh();
+    };
+  }
+
+  const surcharge = (elpris48h && elpris48h.surcharge) || { grid_fee_ore_per_kwh: 0, energy_tax_ore_per_kwh: 0, vat_pct: 25 };
+  const gridFeeInput = document.getElementById('elpris-grid-fee-input');
+  const energyTaxInput = document.getElementById('elpris-energy-tax-input');
+  const postSurcharge = async () => {
+    await fetch('/api/elpris_surcharge', { method: 'POST', body: JSON.stringify({
+      grid_fee_ore_per_kwh: parseFloat(gridFeeInput.value) || 0,
+      energy_tax_ore_per_kwh: parseFloat(energyTaxInput.value) || 0,
+    }) });
+    refresh();
+  };
+  if (gridFeeInput && document.activeElement !== gridFeeInput) gridFeeInput.value = surcharge.grid_fee_ore_per_kwh;
+  if (energyTaxInput && document.activeElement !== energyTaxInput) energyTaxInput.value = surcharge.energy_tax_ore_per_kwh;
+  if (gridFeeInput) gridFeeInput.onchange = postSurcharge;
+  if (energyTaxInput) energyTaxInput.onchange = postSurcharge;
+
+  const prices = (elpris48h && elpris48h.prices) || [];
+  const timestamps = prices.map(p => p.time_start);
+  const values = prices.map(p => p.usd_per_kwh);
+  const usdSekRate = (elpris48h && elpris48h.usd_sek_rate) || 9.5;
+  const totalValues = prices.map(p => {
+    const oreAllIn = (p.sek_per_kwh * 100 + surcharge.grid_fee_ore_per_kwh + surcharge.energy_tax_ore_per_kwh) * (1 + surcharge.vat_pct / 100);
+    return (oreAllIn / 100) / usdSekRate;
+  });
+  const earningsValues = prices.map(p => p.earnings_usd || 0);
+  const hasSurcharge = surcharge.grid_fee_ore_per_kwh > 0 || surcharge.energy_tax_ore_per_kwh > 0;
+
+  const leftSeries = [{ name: 'Spot price', values }];
+  const leftColors = ['line-elpris'];
+  if (hasSurcharge) { leftSeries.push({ name: 'Incl. fees & tax', values: totalValues }); leftColors.push('line-elpris-total'); }
+
+  renderLineChart('chart-elpris', 'tooltip-elpris', timestamps, leftSeries, leftColors, fmtUsdPerKwh, {
+    allowNegative: true,
+    nowLine: true,
+    rightSeries: [{ name: 'Earnings (15-min)', values: earningsValues, colorClass: 'line-earnings' }],
+    rightValueFmt: fmtUsd,
+  });
+
+  const legendEl = document.getElementById('elpris-legend');
+  if (legendEl) {
+    legendEl.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Spot price</span>` +
+      (hasSurcharge ? `<span><i style="background:var(--series-elpris-total)"></i>Incl. fees & tax</span>` : '') +
+      `<span><i style="background:var(--series-revenue)"></i>Earnings per 15-min (right axis)</span>`;
+  }
+
+  let nowVal = null;
+  const statsEl = document.getElementById('elpris-chart-stats');
+  if (values.length) {
+    const nowMs = Date.now();
+    const nowIdx = prices.findIndex(p => new Date(p.time_end).getTime() > nowMs);
+    nowVal = nowIdx >= 0 ? values[nowIdx] : values.at(-1);
+    if (statsEl) {
+      const tomorrowNote = elpris48h.tomorrow_available ? 'tomorrow published' : "tomorrow not published yet (usually appears mid-afternoon)";
+      statsEl.textContent = `now: ${fmtUsdPerKwh(nowVal)} · min: ${fmtUsdPerKwh(Math.min(...values))} · max: ${fmtUsdPerKwh(Math.max(...values))} · ${tomorrowNote}`;
+    }
+  } else if (statsEl) {
+    statsEl.textContent = '';
+  }
+  return { nowVal, zone: elpris48h && elpris48h.zone };
 }
 
 function renderBanners(status, energy, doctor) {
@@ -795,7 +918,8 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const tooltip = document.getElementById(tooltipId);
   const w = svg.clientWidth || 900;
   const h = 180;
-  const padL = 46, padR = 4, padT = 8, padB = 22;
+  const hasRight = !!(opts.rightSeries && opts.rightSeries.length);
+  const padL = 46, padR = hasRight ? 46 : 4, padT = 8, padB = 22;
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
   svg.innerHTML = '';
 
@@ -811,6 +935,18 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const innerW = w - padL - padR;
   const innerH = h - padT - padB;
   const yToPixel = (v) => padT + innerH - ((v - yMin) / yRange) * innerH;
+
+  // Right axis gets its own independent domain (assumed non-negative, e.g.
+  // earnings) - it shares the same 3 gridline y-positions as the left axis
+  // (standard dual-axis convention) but labels them with its own values.
+  let yMinR, yRangeR, yToPixelR;
+  if (hasRight) {
+    const allValuesR = opts.rightSeries.flatMap(s => s.values);
+    const yMaxR = Math.max(...allValuesR, 0.0001);
+    yMinR = 0;
+    yRangeR = (yMaxR - yMinR) || 0.0001;
+    yToPixelR = (v) => padT + innerH - ((v - yMinR) / yRangeR) * innerH;
+  }
 
   // gridlines (min, mid, max), labeled with valueFmt
   [0, 0.5, 1].forEach(frac => {
@@ -828,6 +964,19 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     label.textContent = valueFmt(val);
     svg.appendChild(label);
   });
+
+  if (hasRight) {
+    [0, 0.5, 1].forEach(frac => {
+      const val = yMinR + frac * yRangeR;
+      const y = yToPixelR(val);
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', w - padR + 6); label.setAttribute('y', y + 3);
+      label.setAttribute('text-anchor', 'start');
+      label.setAttribute('class', 'axis-label');
+      label.textContent = opts.rightValueFmt(val);
+      svg.appendChild(label);
+    });
+  }
 
   // zero-line reference, only meaningful when the domain actually crosses zero
   if (yMin < 0 && yMax > 0) {
@@ -870,6 +1019,58 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     pathEls.push(pathEl);
   });
 
+  const rightPoints = [];
+  const rightPathEls = [];
+  if (hasRight) {
+    opts.rightSeries.forEach((s) => {
+      const n = s.values.length;
+      const points = s.values.map((v, i) => {
+        const x = padL + (n === 1 ? 0 : (i / (n - 1)) * innerW);
+        const y = yToPixelR(v);
+        return [x, y];
+      });
+      rightPoints.push(points);
+      const path = points.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2)).join(' ');
+      const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      pathEl.setAttribute('d', path);
+      pathEl.setAttribute('class', s.colorClass);
+      svg.appendChild(pathEl);
+      rightPathEls.push(pathEl);
+    });
+  }
+
+  // "now" marker - only meaningful when the visible range actually spans it
+  if (opts.nowLine) {
+    const nowMs = Date.now();
+    const n0b = timestamps.length;
+    const idx = timestamps.findIndex(ts => new Date(ts).getTime() > nowMs);
+    let nx = null;
+    if (idx === 0) {
+      nx = padL;
+    } else if (idx > 0) {
+      const tPrev = new Date(timestamps[idx - 1]).getTime();
+      const tNext = new Date(timestamps[idx]).getTime();
+      const frac = tNext > tPrev ? (nowMs - tPrev) / (tNext - tPrev) : 0;
+      const xPrev = padL + ((idx - 1) / (n0b - 1)) * innerW;
+      const xNext = padL + (idx / (n0b - 1)) * innerW;
+      nx = xPrev + frac * (xNext - xPrev);
+    } // idx === -1 (now is after every point) - nothing to mark
+    if (nx != null) {
+      const nowLineEl = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      nowLineEl.setAttribute('x1', nx); nowLineEl.setAttribute('x2', nx);
+      nowLineEl.setAttribute('y1', padT); nowLineEl.setAttribute('y2', h - padB);
+      nowLineEl.setAttribute('class', 'now-line');
+      svg.appendChild(nowLineEl);
+      const nowLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      nowLabel.setAttribute('x', Math.min(w - padR - 2, Math.max(padL + 2, nx)));
+      nowLabel.setAttribute('y', padT + 9);
+      nowLabel.setAttribute('text-anchor', nx > w - padR - 24 ? 'end' : (nx < padL + 24 ? 'start' : 'middle'));
+      nowLabel.setAttribute('class', 'axis-label now-label');
+      nowLabel.textContent = 'now';
+      svg.appendChild(nowLabel);
+    }
+  }
+
   // hover overlay
   const hoverLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
   hoverLine.setAttribute('class', 'crosshair');
@@ -886,6 +1087,14 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     svg.appendChild(dot);
     return dot;
   });
+  const rightDots = hasRight ? opts.rightSeries.map((s, si) => {
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('class', 'hover-dot');
+    dot.setAttribute('fill', getComputedStyle(rightPathEls[si]).stroke);
+    dot.style.display = 'none';
+    svg.appendChild(dot);
+    return dot;
+  }) : [];
 
   const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   overlay.setAttribute('x', 0); overlay.setAttribute('y', 0);
@@ -908,15 +1117,27 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
       dot.setAttribute('cx', px); dot.setAttribute('cy', py);
       dot.style.display = 'block';
     });
+    if (hasRight) {
+      rightDots.forEach((dot, si) => {
+        const [px, py] = rightPoints[si][idx];
+        dot.setAttribute('cx', px); dot.setAttribute('cy', py);
+        dot.style.display = 'block';
+      });
+    }
     tooltip.style.display = 'block';
     tooltip.style.left = Math.min(rect.width - 160, Math.max(0, (x / scaleX) + 10)) + 'px';
     tooltip.style.top = '0px';
+    const rightRows = hasRight
+      ? opts.rightSeries.map(s => `<div class="t-row"><span>${s.name}</span><strong>${opts.rightValueFmt(s.values[idx])}</strong></div>`).join('')
+      : '';
     tooltip.innerHTML = `<div class="t-time">${fmtTime(timestamps[idx])}</div>` +
-      series.map(s => `<div class="t-row"><span>${s.name}</span><strong>${valueFmt(s.values[idx])}</strong></div>`).join('');
+      series.map(s => `<div class="t-row"><span>${s.name}</span><strong>${valueFmt(s.values[idx])}</strong></div>`).join('') +
+      rightRows;
   });
   overlay.addEventListener('mouseleave', () => {
     hoverLine.style.display = 'none';
     dots.forEach(d => d.style.display = 'none');
+    rightDots.forEach(d => d.style.display = 'none');
     tooltip.style.display = 'none';
   });
 }
@@ -950,7 +1171,7 @@ async function refresh() {
   try {
     const res = await fetch('/api/data');
     const data = await res.json();
-    const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations } = data;
+    const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations, elpris_48h } = data;
     lastUtilization = utilization || null;
 
     renderCards(status, energy, account, daemon_state);
@@ -958,6 +1179,7 @@ async function refresh() {
     renderAccount(account);
     renderDisk(disk);
     renderNerdyStats(daemon_state, account, doctor, inference_durations);
+    const elprisNow = renderElpris(elpris_48h);
     updateFavicon(status);
 
     const rows = energy.rows || {};
@@ -990,11 +1212,11 @@ async function refresh() {
       : '';
 
     document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
-    const kwhPrice = (rows.elpris_usd_kwh || [])[rows.elpris_usd_kwh?.length - 1];
-    document.getElementById('kwh-price').textContent = kwhPrice != null ? `⚡ $${kwhPrice.toFixed(4)}/kWh right now (SE3)` : '';
+    document.getElementById('kwh-price').textContent = elprisNow && elprisNow.nowVal != null
+      ? `⚡ $${elprisNow.nowVal.toFixed(4)}/kWh right now (${elprisNow.zone})` : '';
     document.getElementById('footnote').innerHTML =
       `Power/cost includes an estimated baseline (7W) on top of measured CPU+GPU, since powermetrics only measures SoC power rails, not the whole machine's wall power ·
-       Revenue is a rough approximation (blended flat rate $0.125/M tokens, not split by input/output) ·
+       Revenue is a rough approximation (blended flat rate $0.044/M tokens, recalibrated from this account's real ledger, not split by input/output) ·
        ${energy.total_rows ?? 0} data points logged · updates every 10s (power gauges ~5Hz, RAM/Ollama every 2s)`;
   } catch (e) {
     document.getElementById('updated').textContent = 'could not fetch data: ' + e;

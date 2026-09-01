@@ -27,11 +27,16 @@ DARKBLOOM="$HOME/.darkbloom/bin/darkbloom"
 # to your own measurement if you have a smart plug, otherwise a reasonable
 # guess for a Mac mini/Studio at idle-ish load.
 BASELINE_W=7
-# Rough revenue estimate: Darkbloom's alpha pricing is $0.05/M input + $0.20/M
-# output tokens. `darkbloom status` only gives the combined token count (not
-# split by input/output), so we use a blended midpoint as an approximation.
-BLENDED_USD_PER_TOKEN=$(echo "scale=12; 0.125/1000000" | bc 2>/dev/null)
-[ -z "$BLENDED_USD_PER_TOKEN" ] && BLENDED_USD_PER_TOKEN=0.000000125
+# Rough revenue estimate. Originally a 50/50 blend of quoted alpha pricing
+# ($0.05/M input + $0.20/M output = $0.125/M), but that never matched real
+# ledger data even after correcting for the real ~2:1 prompt:completion mix
+# (which alone would predict ~$0.097/M, not the ~$0.044/M actually paid) -
+# either that pricing is stale or it's the customer-facing rate, not the
+# per-token payout providers see. Recalibrated 2026-09-02 straight from real
+# ledger data instead (dashboard's server.py LOCAL_BLENDED_USD_PER_TOKEN -
+# keep these two in sync manually).
+BLENDED_USD_PER_TOKEN=$(echo "scale=12; 0.044/1000000" | bc 2>/dev/null)
+[ -z "$BLENDED_USD_PER_TOKEN" ] && BLENDED_USD_PER_TOKEN=0.000000044
 
 mkdir -p "$DIR"
 [ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w" > "$CSV"
