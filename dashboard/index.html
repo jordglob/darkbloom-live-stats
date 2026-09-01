@@ -345,8 +345,8 @@
   </div>
 
   <div class="panel">
-    <h2 title="Published day-ahead electricity prices (Nord Pool auction results) for today + tomorrow - a schedule of what's already been decided, not a history of what was measured. Refreshes itself as soon as a new day's prices are released, usually early-to-mid afternoon local time.">
-      Electricity Price Forecast (48h)
+    <h2 title="Published day-ahead electricity prices (Nord Pool auction results): yesterday and today are always real, tomorrow becomes real the moment it's published (usually early-to-mid afternoon) - until then it's left blank rather than guessed. The right axis shows real Net (earnings minus this Mac's own real electricity cost) per matching 15-min slot, so you can see at a glance whether a given stretch was actually profitable.">
+      Electricity Price & Profitability
       <span class="gauge-time" id="elpris-chart-stats"></span>
     </h2>
     <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)">
@@ -844,10 +844,11 @@ function renderElpris(elpris48h) {
   const values = prices.map(p => p.usd_per_kwh);
   const usdSekRate = (elpris48h && elpris48h.usd_sek_rate) || 9.5;
   const totalValues = prices.map(p => {
+    if (p.sek_per_kwh == null) return null;
     const oreAllIn = (p.sek_per_kwh * 100 + surcharge.grid_fee_ore_per_kwh + surcharge.energy_tax_ore_per_kwh) * (1 + surcharge.vat_pct / 100);
     return (oreAllIn / 100) / usdSekRate;
   });
-  const earningsValues = prices.map(p => p.earnings_usd || 0);
+  const netValues = prices.map(p => p.net_usd ?? ((p.earnings_usd || 0) - (p.cost_usd || 0)));
   const hasSurcharge = surcharge.grid_fee_ore_per_kwh > 0 || surcharge.energy_tax_ore_per_kwh > 0;
 
   const leftSeries = [{ name: 'Spot price', values }];
@@ -857,26 +858,28 @@ function renderElpris(elpris48h) {
   renderLineChart('chart-elpris', 'tooltip-elpris', timestamps, leftSeries, leftColors, fmtUsdPerKwh, {
     allowNegative: true,
     nowLine: true,
-    rightSeries: [{ name: 'Earnings (15-min)', values: earningsValues, colorClass: 'line-earnings' }],
+    rightSeries: [{ name: 'Net (earnings − cost, 15-min)', values: netValues, colorClass: 'line-earnings' }],
     rightValueFmt: fmtUsd,
+    allowNegativeRight: true,
   });
 
   const legendEl = document.getElementById('elpris-legend');
   if (legendEl) {
     legendEl.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Spot price</span>` +
       (hasSurcharge ? `<span><i style="background:var(--series-elpris-total)"></i>Incl. fees & tax</span>` : '') +
-      `<span><i style="background:var(--series-revenue)"></i>Earnings per 15-min (right axis)</span>`;
+      `<span><i style="background:var(--series-revenue)"></i>Net = earnings − cost, per 15-min (right axis, indicative)</span>`;
   }
 
   let nowVal = null;
   const statsEl = document.getElementById('elpris-chart-stats');
-  if (values.length) {
+  const realValues = values.filter(v => v != null);
+  if (realValues.length) {
     const nowMs = Date.now();
     const nowIdx = prices.findIndex(p => new Date(p.time_end).getTime() > nowMs);
-    nowVal = nowIdx >= 0 ? values[nowIdx] : values.at(-1);
+    nowVal = (nowIdx >= 0 && values[nowIdx] != null) ? values[nowIdx] : realValues.at(-1);
     if (statsEl) {
       const tomorrowNote = elpris48h.tomorrow_available ? 'tomorrow published' : "tomorrow not published yet (usually appears mid-afternoon)";
-      statsEl.textContent = `now: ${fmtUsdPerKwh(nowVal)} · min: ${fmtUsdPerKwh(Math.min(...values))} · max: ${fmtUsdPerKwh(Math.max(...values))} · ${tomorrowNote}`;
+      statsEl.textContent = `now: ${fmtUsdPerKwh(nowVal)} · min: ${fmtUsdPerKwh(Math.min(...realValues))} · max: ${fmtUsdPerKwh(Math.max(...realValues))} · ${tomorrowNote}`;
     }
   } else if (statsEl) {
     statsEl.textContent = '';
@@ -928,7 +931,7 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     return;
   }
 
-  const allValues = series.flatMap(s => s.values);
+  const allValues = series.flatMap(s => s.values).filter(v => v != null);
   const yMax = Math.max(opts.allowNegative ? 0 : -Infinity, ...allValues, 0.0001);
   const yMin = opts.allowNegative ? Math.min(0, ...allValues) : 0;
   const yRange = (yMax - yMin) || 0.0001;
@@ -936,14 +939,14 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const innerH = h - padT - padB;
   const yToPixel = (v) => padT + innerH - ((v - yMin) / yRange) * innerH;
 
-  // Right axis gets its own independent domain (assumed non-negative, e.g.
-  // earnings) - it shares the same 3 gridline y-positions as the left axis
-  // (standard dual-axis convention) but labels them with its own values.
-  let yMinR, yRangeR, yToPixelR;
+  // Right axis gets its own independent domain - it shares the same 3
+  // gridline y-positions as the left axis (standard dual-axis convention)
+  // but labels them with its own values.
+  let yMinR, yMaxR, yRangeR, yToPixelR;
   if (hasRight) {
-    const allValuesR = opts.rightSeries.flatMap(s => s.values);
-    const yMaxR = Math.max(...allValuesR, 0.0001);
-    yMinR = 0;
+    const allValuesR = opts.rightSeries.flatMap(s => s.values).filter(v => v != null);
+    yMaxR = Math.max(opts.allowNegativeRight ? 0 : -Infinity, ...allValuesR, 0.0001);
+    yMinR = opts.allowNegativeRight ? Math.min(0, ...allValuesR) : 0;
     yRangeR = (yMaxR - yMinR) || 0.0001;
     yToPixelR = (v) => padT + innerH - ((v - yMinR) / yRangeR) * innerH;
   }
@@ -987,6 +990,19 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     zl.setAttribute('class', 'zero-line');
     svg.appendChild(zl);
   }
+  // right axis can cross zero independently of the left axis (e.g. Net can
+  // go negative while price never does) - only draw a second line if it's
+  // not already sitting on top of the left axis's zero-line.
+  if (hasRight && yMinR < 0 && yMaxR > 0) {
+    const zyR = yToPixelR(0);
+    if (!(yMin < 0 && yMax > 0 && Math.abs(zyR - yToPixel(0)) < 1)) {
+      const zlR = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      zlR.setAttribute('x1', padL); zlR.setAttribute('x2', w - padR);
+      zlR.setAttribute('y1', zyR); zlR.setAttribute('y2', zyR);
+      zlR.setAttribute('class', 'zero-line');
+      svg.appendChild(zlR);
+    }
+  }
 
   // x-axis time labels: first / middle / last
   const n0 = timestamps.length;
@@ -1005,13 +1021,22 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const pathEls = [];
   series.forEach((s, si) => {
     const n = s.values.length;
+    // null/undefined values (e.g. tomorrow's not-yet-published price) are
+    // kept as null in allPoints (so hover/index alignment stays correct)
+    // but break the drawn line into a gap instead of plotting a bogus point.
     const points = s.values.map((v, i) => {
+      if (v == null) return null;
       const x = padL + (n === 1 ? 0 : (i / (n - 1)) * innerW);
-      const y = yToPixel(v);
-      return [x, y];
+      return [x, yToPixel(v)];
     });
     allPoints.push(points);
-    const path = points.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2)).join(' ');
+    let path = '';
+    let segStarted = false;
+    points.forEach((p) => {
+      if (p == null) { segStarted = false; return; }
+      path += (segStarted ? 'L' : 'M') + p[0].toFixed(2) + ',' + p[1].toFixed(2) + ' ';
+      segStarted = true;
+    });
     const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     pathEl.setAttribute('d', path);
     pathEl.setAttribute('class', colorClasses[si]);
@@ -1109,19 +1134,22 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     const mx = (e.clientX - rect.left) * scaleX;
     let idx = Math.round(((mx - padL) / innerW) * (n - 1));
     idx = Math.max(0, Math.min(n - 1, idx));
-    const x = allPoints[0][idx][0];
+    // x from the timestamp grid directly, not any one series' point - a
+    // series can be null at this index (e.g. tomorrow's unpublished price)
+    // while the crosshair itself should still track the mouse normally.
+    const x = padL + (n === 1 ? 0 : (idx / (n - 1)) * innerW);
     hoverLine.setAttribute('x1', x); hoverLine.setAttribute('x2', x);
     hoverLine.style.display = 'block';
     dots.forEach((dot, si) => {
-      const [px, py] = allPoints[si][idx];
-      dot.setAttribute('cx', px); dot.setAttribute('cy', py);
-      dot.style.display = 'block';
+      const p = allPoints[si][idx];
+      if (p) { dot.setAttribute('cx', p[0]); dot.setAttribute('cy', p[1]); dot.style.display = 'block'; }
+      else { dot.style.display = 'none'; }
     });
     if (hasRight) {
       rightDots.forEach((dot, si) => {
-        const [px, py] = rightPoints[si][idx];
-        dot.setAttribute('cx', px); dot.setAttribute('cy', py);
-        dot.style.display = 'block';
+        const p = rightPoints[si][idx];
+        if (p) { dot.setAttribute('cx', p[0]); dot.setAttribute('cy', p[1]); dot.style.display = 'block'; }
+        else { dot.style.display = 'none'; }
       });
     }
     tooltip.style.display = 'block';

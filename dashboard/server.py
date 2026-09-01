@@ -882,6 +882,7 @@ ELPRIS_ZONE_CONFIG = HOME / ".darkbloom" / "elpris-zone.json"
 ELPRIS_VALID_ZONES = ["SE1", "SE2", "SE3", "SE4"]
 ELPRIS_DEFAULT_ZONE = "SE3"
 ELPRIS_POLL_INTERVAL_SEC = 900  # matches energy-monitor.sh's own elpris cache cadence
+ELPRIS_PAST_DAYS = 1  # how many real (always-published) days to show before today
 _elpris_cache = {"data": None, "fetched_at": 0.0, "zone": None}
 _elpris_cache_lock = threading.Lock()
 
@@ -1026,13 +1027,76 @@ def _earnings_by_bucket(all_prices):
     return out
 
 
+def _cost_by_bucket(all_prices):
+    """Real measured electricity cost (converted to USD using each CSV row's
+    own logged exchange rate) landed in each 15-min price bucket, from the
+    same energy-log.csv the Power/Cost charts already use - not re-derived
+    from the forecast price, since that's this Mac's own real zone (SE3)
+    regardless of whichever zone is selected for the forecast display above.
+    Combined with _earnings_by_bucket's real payout, this is what lets the
+    chart show whether a given period was actually profitable, not just
+    what it earned in isolation."""
+    if not CSV_PATH.exists():
+        return [0.0] * len(all_prices)
+    try:
+        with open(CSV_PATH, newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return [0.0] * len(all_prices)
+    parsed = []
+    for r in rows:
+        try:
+            t = _parse_iso_ts(r["timestamp"])
+            rate = float(r.get("usd_sek", 0) or 0) or 9.5
+            cost_usd = float(r.get("interval_cost_sek", 0) or 0) / rate
+            parsed.append((t, cost_usd))
+        except Exception:
+            continue
+    out = []
+    for p in all_prices:
+        try:
+            t_start = _parse_iso_ts(p["time_start"])
+            t_end = _parse_iso_ts(p["time_end"])
+        except Exception:
+            out.append(0.0)
+            continue
+        out.append(sum(cost for t, cost in parsed if t_start <= t < t_end))
+    return out
+
+
+def _placeholder_day_prices(date_obj):
+    """96 empty 15-min buckets (sek_per_kwh: None) for a day whose prices
+    haven't been published yet. Keeps the chart's time axis a stable 48h
+    even before tomorrow's day-ahead auction clears, instead of the whole
+    chart shrinking to 24h and re-expanding once prices land - the frontend
+    just draws a gap where the price is still None. Timezone offset is
+    taken from the system's local time (this dashboard already assumes
+    Europe/Stockholm for the today/tomorrow date split itself); if a DST
+    transition falls exactly between today and tomorrow, these placeholder
+    labels can be off by an hour for the few hours before real data
+    (correct labels either way) replaces them - not worth the complexity
+    to handle since it only affects two days a year and self-corrects fast."""
+    tz = datetime.now().astimezone().tzinfo
+    start = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=tz)
+    out = []
+    for i in range(96):
+        t0 = start + timedelta(minutes=15 * i)
+        t1 = t0 + timedelta(minutes=15)
+        out.append({"time_start": t0.isoformat(), "time_end": t1.isoformat(), "sek_per_kwh": None})
+    return out
+
+
 def get_elpris_48h():
-    """Today + tomorrow's published day-ahead electricity prices for the
-    configured zone - a forecast/schedule, not a history of what was
-    measured. Cached for ELPRIS_POLL_INTERVAL_SEC per zone; tomorrow_available
-    flips to true the moment elprisetjustnu.se publishes the next day's
-    prices (usually early-to-mid afternoon local time), which is what makes
-    this chart update itself as soon as a new day's prices are released."""
+    """Real past days (ELPRIS_PAST_DAYS back) + today + tomorrow's published
+    day-ahead electricity prices for the configured zone - a continuous real
+    history running into a forecast, not just a forward-looking schedule.
+    Past days and today are always real (elprisetjustnu.se keeps every past
+    day's file permanently); only tomorrow can still be a placeholder if the
+    next day's auction hasn't cleared yet. Cached for ELPRIS_POLL_INTERVAL_SEC
+    per zone; tomorrow_available flips to true the moment elprisetjustnu.se
+    publishes the next day's prices (usually early-to-mid afternoon local
+    time), which is what makes this chart update itself as soon as a new
+    day's prices are released."""
     zone = get_elpris_zone()
     now = time.time()
     with _elpris_cache_lock:
@@ -1049,19 +1113,27 @@ def get_elpris_48h():
     tomorrow = today + timedelta(days=1)
     usd_rate = _latest_usd_sek_rate()
 
-    today_prices = _fetch_elpris_day(today, zone)
+    all_prices = []
+    for offset in range(-ELPRIS_PAST_DAYS, 0):
+        all_prices += _fetch_elpris_day(today + timedelta(days=offset), zone)
+    all_prices += _fetch_elpris_day(today, zone)
     tomorrow_prices = _fetch_elpris_day(tomorrow, zone)
-    all_prices = today_prices + tomorrow_prices
+    tomorrow_available = len(tomorrow_prices) > 0
+    all_prices += tomorrow_prices if tomorrow_available else _placeholder_day_prices(tomorrow)
+
     for p in all_prices:
-        p["usd_per_kwh"] = (p["sek_per_kwh"] / usd_rate) if usd_rate else None
+        p["usd_per_kwh"] = (p["sek_per_kwh"] / usd_rate) if (usd_rate and p["sek_per_kwh"] is not None) else None
     for p, earnings_usd in zip(all_prices, _earnings_by_bucket(all_prices)):
         p["earnings_usd"] = earnings_usd
+    for p, cost_usd in zip(all_prices, _cost_by_bucket(all_prices)):
+        p["cost_usd"] = cost_usd
+        p["net_usd"] = p["earnings_usd"] - cost_usd
 
     result = {
         "zone": zone,
         "valid_zones": ELPRIS_VALID_ZONES,
         "prices": all_prices,
-        "tomorrow_available": len(tomorrow_prices) > 0,
+        "tomorrow_available": tomorrow_available,
         "usd_sek_rate": usd_rate,
         "surcharge": {**get_elpris_surcharge(), "vat_pct": ELPRIS_VAT_PCT},
     }

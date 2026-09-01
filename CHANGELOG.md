@@ -1,5 +1,13 @@
 # Changelog
 
+## v4
+
+**Renamed to "Electricity Price & Profitability"** and reworked to always show real data looking both backward and forward in time, instead of a forecast-only chart that shrank to ~24h whenever tomorrow's prices weren't published yet. Now shows yesterday (always real) + today (always real) + tomorrow (real once published, otherwise left as a clean gap rather than guessed) - elprisetjustnu.se keeps every past day's file permanently, so the backward-looking side never has to be empty.
+
+**The right-axis overlay now shows Net (real earnings minus this Mac's own real electricity cost) per matching 15-minute slot**, not just raw earnings - answers "was this actually profitable" directly in the same graph, including negative stretches, with its own zero-line reference when it crosses zero independently of the price axis. Electricity cost is read from the same energy-log.csv the Power/Cost charts already use (this Mac's real zone), kept separate from whatever zone is selected for the price display above.
+
+`renderLineChart` gained proper null-value handling (breaks the drawn line into segments at gaps instead of plotting bogus points, excludes nulls from axis domain/min/max, keeps hover/crosshair working across a gap) and an optional right-hand axis that can independently allow negative values - both opt-in via `opts`, so the existing power/cost/net charts are unaffected.
+
 ## v3
 
 **Multi-model warmup fix**: the warmup loop only ever kept the *first* configured model warm. Now pings every model the provider is configured to serve (read straight from the launchd plist's `--model` flags, not from `darkbloom status`'s "Warm models" line, which only lists what's already loaded). The disk-usage panel's active/unused split was fixed the same way.
