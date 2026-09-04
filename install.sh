@@ -90,4 +90,4 @@ echo "One more step for electricity-cost tracking (needs your password once, eve
 echo "  1. Run:  bash $TARGET/setup-powermetrics-sudoers.sh"
 echo "  2. Then: launchctl bootstrap gui/\$(id -u) $LAUNCH_AGENTS/io.darkbloom.powermetrics.plist"
 echo ""
-echo "See README.md for the model list, the account-sync bookmarklet, and how each piece works."
+echo "See README.md for how each piece works. Account data syncs live automatically if darkbloom login has already run on this Mac."

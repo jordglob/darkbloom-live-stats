@@ -1,5 +1,17 @@
 # Changelog
 
+## v5
+
+**New: GPU Headroom gauge**, replacing an earlier attempt that showed free system RAM. Now sourced directly from `powermetrics`' own "GPU HW active residency" line (already being logged every ~200ms, just never parsed before) — a real 0-100% GPU busy-ness measurement, not derived/estimated from power draw. Reads ~75-85% at idle (background OS activity keeps GPU residency nonzero even at rest) and drops toward 0% under real inference load, directly answering "how far from full hardware operation" the Mac is.
+
+**Selective warmup targeting**: the warmup loop can now be told to keep only specific model(s) warm instead of every configured model. Needed because some model combinations can't actually stay resident together on this hardware (loading a second model evicts the first even when the combined catalog size looks like it should fit the RAM budget - real overhead runs higher than the static per-model estimate) - warming all of them on a fixed interval was otherwise just thrashing between evictions, paying a real cold-load cost each swap for no benefit.
+
+**Load-error banner now shows real age** instead of looking like an active emergency indefinitely. `darkbloom status`'s own "Last model-load error" text has no expiry - a failure from hours ago read exactly like one happening right now. Now sourced from `daemon-state.json`'s timestamped version instead, shows "(Xm ago)", and only stays red if genuinely recent (under 2 minutes); older, it downgrades to a calm warning, matching the same reconciliation-over-raw-alarm treatment already given to the `darkbloom doctor` FAIL banner.
+
+**Warmup log now shows the newest entry first** instead of requiring a scroll to find it.
+
+**README/install.sh cleanup**: removed a stale "timed model rotation" mention (dropped from the tool ages ago, still lingering in the GitHub repo description and docs) and rewrote the entire account-sync section, which still described the old browser bookmarklet workaround replaced back in v2 - now documents the real live API integration. Fixed a few other stale references along the way (old "DB cut" label, an uninstall file list missing newer config files).
+
 ## v4
 
 **Renamed to "Electricity Price & Profitability"** and reworked to always show real data looking both backward and forward in time, instead of a forecast-only chart that shrank to ~24h whenever tomorrow's prices weren't published yet. Now shows yesterday (always real) + today (always real) + tomorrow (real once published, otherwise left as a clean gap rather than guessed) - elprisetjustnu.se keeps every past day's file permanently, so the backward-looking side never has to be empty.

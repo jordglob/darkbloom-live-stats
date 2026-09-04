@@ -381,6 +381,8 @@ const GAUGES = [
   { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
   { id: 'total', label: 'Total (incl. baseline)', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total' },
   { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
+  { id: 'headroom', label: 'GPU Headroom', source: 'power', key: 'headroom_pct', max: 100, unit: '%', color: '--gauge-total',
+    tooltip: 'Sourced directly from the GPU active-residency figure powermetrics itself reports every sample (100% minus GPU busy-ness) - a real-time measurement, not a synthetic/computed estimate. Idle baseline is not literally 0% GPU activity: background OS/WindowServer load alone typically keeps it around 15-25% active even at rest, so this gauge normally reads roughly 75-85% at idle, dropping toward 0% under real MLX/Ollama inference load.' },
   { id: 'fan', label: 'Fan Speed', source: 'fan_temp', key: 'fan_rpm', max: 4900, unit: 'RPM', color: '--gauge-cpu',
     tooltip: 'Fan RPM, read via `darkbloom fan status` (read-only - does not enable fan control). Apple Silicon does not expose this via powermetrics at all.' },
   { id: 'temp', label: 'GPU Temp', source: 'fan_temp', key: 'gpu_temp_c', max: 100, unit: '°C', color: '--gauge-gpu',
@@ -464,10 +466,14 @@ function updateGauges(data) {
     // RAM specifically gets a color warning as it approaches full - this is the
     // exact condition that caused real model-load failures earlier this session,
     // so flag it before a request fails, not just after.
-    if (g.source === 'ram') {
+    if (g.id === 'ram') {
       arcEl.setAttribute('stroke', frac > 0.93 ? 'var(--status-critical)' : frac > 0.85 ? 'var(--status-warning)' : `var(${g.color})`);
     }
-    const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : g.id === 'temp' ? 1 : 2;
+    // Headroom is the inverse read - low is the bad direction here.
+    if (g.id === 'headroom') {
+      arcEl.setAttribute('stroke', frac < 0.07 ? 'var(--status-critical)' : frac < 0.15 ? 'var(--status-warning)' : `var(${g.color})`);
+    }
+    const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : g.id === 'temp' ? 1 : g.id === 'headroom' ? 1 : 2;
     numEl.textContent = val.toFixed(decimals);
     if (g.source === 'utilization' && detailEl) {
       const reqH = utilization.requests_per_hour;
@@ -635,7 +641,7 @@ function renderWarmup(warmup) {
       </span>
       <span class="warmup-status">last: ${lastRun} ${lastOkBadge}</span>
     </div>
-    ${warmup.log_tail && warmup.log_tail.length ? `<div class="warmup-log">${warmup.log_tail.join('<br>')}</div>` : ''}
+    ${warmup.log_tail && warmup.log_tail.length ? `<div class="warmup-log">${[...warmup.log_tail].reverse().join('<br>')}</div>` : ''}
   `;
 
   document.getElementById('warmup-checkbox').addEventListener('change', (e) => {
@@ -887,10 +893,31 @@ function renderElpris(elpris48h) {
   return { nowVal, zone: elpris48h && elpris48h.zone };
 }
 
-function renderBanners(status, energy, doctor) {
+function fmtAgeShort(sec) {
+  if (sec == null) return null;
+  if (sec < 60) return `${Math.round(sec)}s ago`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+  return `${Math.round(sec / 3600)}h ago`;
+}
+
+function renderBanners(status, energy, doctor, daemonState) {
   const banners = [];
-  if (status.last_error) {
-    banners.push(`<div class="banner critical"><span class="dot"></span>${status.last_error}</div>`);
+  const loadErr = daemonState && daemonState.last_model_load_error;
+  if (loadErr) {
+    // darkbloom status's own "Last model-load error" text never expires or
+    // shows an age - a real failure from hours ago reads exactly like one
+    // happening right now. daemon-state.json's timestamped version fixes
+    // that: show how old it actually is, and don't paint it red once it's
+    // clearly old news (same reasoning as the doctor banner below).
+    const age = fmtAgeShort(loadErr.age_sec);
+    const isRecent = loadErr.age_sec != null && loadErr.age_sec < 120;
+    const reqNote = status.requests_served
+      ? ` ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} served fine since the daemon last started.`
+      : '';
+    banners.push(`<div class="banner ${isRecent ? 'critical' : 'warning'}"><span class="dot"></span>${loadErr.model ? loadErr.model + ': ' : ''}${loadErr.message}${age ? ` (${age})` : ''}${reqNote}</div>`);
+  } else if (status.last_error) {
+    // Fallback for when daemon-state.json isn't available - no age info here.
+    banners.push(`<div class="banner warning"><span class="dot"></span>${status.last_error}</div>`);
   }
   if (!energy.power_monitoring_active) {
     banners.push(`<div class="banner warning"><span class="dot"></span>Power monitoring inactive — pm-start.sh (sudo) is not running, electricity cost is not being counted right now.</div>`);
@@ -1203,7 +1230,7 @@ async function refresh() {
     lastUtilization = utilization || null;
 
     renderCards(status, energy, account, daemon_state);
-    renderBanners(status, energy, doctor);
+    renderBanners(status, energy, doctor, daemon_state);
     renderAccount(account);
     renderDisk(disk);
     renderNerdyStats(daemon_state, account, doctor, inference_durations);

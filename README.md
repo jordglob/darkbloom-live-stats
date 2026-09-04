@@ -1,10 +1,13 @@
 # Darkbloom Live & Stats
 
 A local dashboard + background services for a [Darkbloom](https://darkbloom.dev)
-provider Mac: live CPU/GPU/RAM gauges, a recent-utilization gauge, disk usage
-for downloaded models, electricity-cost vs. revenue tracking, automatic model
-warmup, trust-drop alerts, and a real-vs-estimated payout comparison pulled
-from your actual Darkbloom account.
+provider Mac: live CPU/GPU/RAM/fan/temp gauges, disk usage for downloaded
+models, electricity-cost vs. revenue tracking (including a real-time
+electricity price forecast with a profitability overlay), automatic
+multi-model warmup, trust-drop alerts, and a real-vs-estimated payout
+comparison pulled directly from Darkbloom's own account API - no browser
+step, no bookmarklet, just the same local device token `darkbloom login`
+already stores on this Mac.
 
 **Not affiliated with or endorsed by Darkbloom, Eigen Labs, or EigenLayer.**
 Community tool, use at your own risk. It only reads local system state and
@@ -17,20 +20,27 @@ your own Darkbloom account data - it does not modify your provider's behavior.
 A single-page dashboard at `http://127.0.0.1:8787`, only reachable from the
 machine it runs on:
 
-- **Status cards** - trust level, daemon state, requests served, warm models,
-  accumulated electricity cost, net (real balance or estimate)
-- **Darkbloom account** - real jobs/tokens/payout per model from your account
-  ledger, compared against what a naive flat per-token estimate would guess
-  (labeled "DB cut" - **not** an official platform fee, just the gap between
-  guess and reality)
+- **Status cards** - trust level, daemon state (idle vs. actively serving),
+  requests served, warm models, accumulated electricity cost, net (real
+  balance or estimate)
+- **Darkbloom account** - real jobs/tokens/payout per model, polled directly
+  from Darkbloom's own earnings API every 30s using the local device token
+  `darkbloom login` already stores (`~/.darkbloom/auth_token`) - no browser
+  step. Compared against a naive flat per-token estimate, recalibrated from
+  your own real ledger data, labeled "Darkbloom gap" (**not** an official
+  platform fee - just the gap between that local guess and reality)
+- **Nerdy Stats** - average prompt/completion token length, GPU memory
+  active/cached, per-slot KV-backend state, `darkbloom doctor` health checks,
+  and a genuinely local "active vs. floor pay rate" comparison ($/hour while
+  actively serving vs. $/hour on the base-reward floor, both derived from
+  real local tracking, no advertised pricing involved)
+- **Multi-model warmup** - keeps *every* model your provider is configured to
+  serve warm (not just the first one), pinging each on an interval you set
 - **Disk usage** - downloaded models and their sizes, with a one-click "copy
   remove command" for anything not currently active (never deletes for you)
-- **Warmup** - periodically pings the provider's local endpoint so the active
-  model stays loaded instead of unloading between requests
-- **Live power gauges** - CPU / GPU / Total watts (with an estimated non-SoC
-  baseline added in) / RAM used, updating at ~5Hz (matching powermetrics'
-  own sampling rate) / recent utilization (% of the last hour's 5-min windows
-  that actually saw new requests arrive)
+- **Live gauges** - CPU / GPU / Total watts (with an estimated non-SoC
+  baseline added in) / RAM used / Fan speed / GPU temp / recent utilization,
+  updating at ~5Hz (matching powermetrics' own sampling rate)
 - **Trust-drop alerts** - a native macOS notification plus an in-page banner
   the moment trust drops below hardware-level, even if the tab isn't open
 - **Ollama indicator** - flags when Ollama has a model loaded, since that's a
@@ -39,6 +49,13 @@ machine it runs on:
 - **History charts** - power over time, cumulative electricity cost vs.
   estimated revenue, with an expandable explainer for exactly how the kWh
   price and net figure are calculated
+- **Electricity Price & Profitability** - Sweden's real day-ahead spot prices
+  (Nord Pool, zone picker for SE1-SE4) shown both backward (yesterday, always
+  real) and forward (today + tomorrow once published, never guessed), with an
+  optional grid-fee/energy-tax/VAT line and a real Net (earnings minus this
+  Mac's own electricity cost) overlay per 15-minute slot - see at a glance
+  whether a given stretch was actually profitable, all currency-converted to
+  USD throughout
 
 ## Prerequisites
 
@@ -94,24 +111,30 @@ its target file on start.
 
 ## Electricity price
 
-Defaults to Sweden's free spot-price API (`elprisetjustnu.se`, zone SE3). If
-you're elsewhere, open `~/.darkbloom/energy-monitor.sh` and set
+The real cost-tracking (Accumulated electricity cost card, its chart)
+defaults to Sweden's free spot-price API (`elprisetjustnu.se`, zone SE3) -
+this Mac's actual location, hardcoded on purpose since it's real incurred
+cost. If you're elsewhere, open `~/.darkbloom/energy-monitor.sh` and set
 `FIXED_PRICE_PER_KWH` to a flat rate in your own currency - the rest of the
 math doesn't care what currency it is, it just needs a number per kWh.
 
-## Syncing real account data (the bookmarklet)
+Separately, the **Electricity Price & Profitability** panel is a Sweden-only
+day-ahead forecast/history view with its own zone picker (SE1-SE4) in the UI
+- switching it only changes that chart and the header's "$/kWh right now"
+figure, never the real cost accounting above. If you're adapting this
+dashboard for a non-Swedish market, `server.py`'s `_fetch_elpris_day()` has a
+docstring spelling out exactly what to replace and a few starting-point APIs
+(ENTSO-E, aWATTar, Elexon/N2EX).
 
-The "Darkbloom Account" panel shows real payout data, but it isn't a live
-connection - an HTTPS page (`console.darkbloom.dev`) fetching data and posting
-it to a plain HTTP local server is blocked by the browser as mixed content, no
-matter how you slice it (tried `fetch()`, tried `<img>` - Chrome blocks both).
-The workaround that actually works: a **bookmarklet** that opens a very brief
-tab which posts the data and closes itself immediately (~0.5s) - top-level
-navigation isn't subject to the same restriction.
+## Live account data (Darkbloom's own API)
 
-On the dashboard page, drag the **"↻ Sync Darkbloom Account"** button in the
-Darkbloom Account panel to your bookmarks bar. Whenever you want fresh
-numbers, open `console.darkbloom.dev` (logged in) and click it.
+The "Darkbloom Account" panel is a real live connection - no browser step, no
+bookmarklet, nothing to click. The dashboard server polls Darkbloom's real
+earnings API (`https://api.darkbloom.dev/v1/provider/account-earnings`)
+directly every 30 seconds, authenticating with the same local device token
+`darkbloom login` already wrote to `~/.darkbloom/auth_token` on this machine.
+If that file exists (it does on any Mac that's already run `darkbloom login`),
+this just works out of the box - nothing to configure.
 
 ## Security notes
 
@@ -120,10 +143,11 @@ numbers, open `console.darkbloom.dev` (logged in) and click it.
 - The sudoers rule installed by `setup-powermetrics-sudoers.sh` is scoped to
   `/usr/bin/powermetrics` **only**. It cannot be used to run any other command
   as root.
-- No credentials are ever stored by this tool. The account-sync bookmarklet
-  runs in your own already-authenticated browser tab and never touches your
-  session cookie - it reads data via Darkbloom's own API (same-origin fetch)
-  and hands it to the local server as a one-shot query string.
+- No credentials are ever created or duplicated by this tool. It only *reads*
+  the device token `darkbloom login` already wrote to
+  `~/.darkbloom/auth_token` (server-side, never sent to the browser or logged)
+  to authenticate against Darkbloom's earnings API - the same token the
+  `darkbloom` CLI itself already uses.
 - Revenue/cost numbers are estimates in several places (clearly labeled in the
   UI) - not audited, not financial advice.
 
@@ -147,8 +171,9 @@ for svc in dashboard powermetrics energy-monitor; do
 done
 sudo rm -f /etc/sudoers.d/darkbloom-powermetrics
 rm -rf ~/.darkbloom/dashboard ~/.darkbloom/*.sh ~/.darkbloom/energy-log.csv \
-       ~/.darkbloom/warmup.json ~/.darkbloom/warmup.log ~/.darkbloom/account-data.json \
-       ~/.darkbloom/trust-changes.log
+       ~/.darkbloom/warmup.json ~/.darkbloom/warmup.log ~/.darkbloom/trust-changes.log \
+       ~/.darkbloom/inference-durations.csv ~/.darkbloom/elpris-zone.json \
+       ~/.darkbloom/elpris-surcharge.json
 ```
 
 (This leaves your actual Darkbloom install - `~/.darkbloom/bin`,

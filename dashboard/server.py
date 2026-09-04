@@ -57,6 +57,7 @@ ACCOUNT_API_LIMIT = 1000  # the API's practical max per request; plenty for per-
 ACCOUNT_POLL_INTERVAL_SEC = 30  # how often we actually hit Darkbloom's API
 
 SAMPLE_HEADER_RE = re.compile(r"\*\*\* Sampled system activity \((.+?)\) \((.+?)\) \*\*\*")
+GPU_ACTIVE_RESIDENCY_RE = re.compile(r"^GPU HW active residency:\s*([\d.]+)%")
 
 
 def get_live_power():
@@ -73,6 +74,7 @@ def get_live_power():
 
     cpu_mw = None
     gpu_mw = None
+    gpu_active_pct = None
     sample_time = None
     for line in chunk.splitlines():
         m = SAMPLE_HEADER_RE.search(line)
@@ -89,6 +91,13 @@ def get_live_power():
                 gpu_mw = float(line.split()[2])
             except (IndexError, ValueError):
                 pass
+        elif line.startswith("GPU HW active residency:"):
+            m2 = GPU_ACTIVE_RESIDENCY_RE.match(line)
+            if m2:
+                try:
+                    gpu_active_pct = float(m2.group(1))
+                except ValueError:
+                    pass
 
     if cpu_mw is None or gpu_mw is None:
         return None
@@ -99,6 +108,14 @@ def get_live_power():
         "total_w": round(soc_w + BASELINE_W, 3),  # incl. estimated system baseline
         "baseline_w": BASELINE_W,
         "sample_time": sample_time,
+        # GPU busy-ness (0-100%), read directly from powermetrics' own "GPU HW
+        # active residency" line - a real measurement, not derived/estimated
+        # from power draw. Optional/non-fatal unlike cpu_mw/gpu_mw above: a
+        # missing residency line just leaves these None instead of failing
+        # the whole function, since callers that only need cpu_w/gpu_w/total_w
+        # shouldn't break if this section is ever absent.
+        "gpu_active_pct": round(gpu_active_pct, 1) if gpu_active_pct is not None else None,
+        "headroom_pct": round(100 - gpu_active_pct, 1) if gpu_active_pct is not None else None,
     }
 
 UTIL_WINDOW_MIN = 60  # how far back "recent" looks
@@ -250,6 +267,7 @@ def get_daemon_state():
     capacity = data.get("capacity") or {}
     slots = data.get("slots") or []
     written_at = data.get("written_at")
+    load_err = data.get("last_model_load_error")
     return {
         "inference_active": data.get("inference_active"),
         "requests_served": stats.get("requests_served"),
@@ -263,6 +281,11 @@ def get_daemon_state():
             for s in slots
         ],
         "age_sec": round(time.time() - written_at, 1) if written_at else None,
+        "last_model_load_error": {
+            "model": load_err.get("model"),
+            "message": load_err.get("message"),
+            "age_sec": round(time.time() - load_err["at"], 1) if load_err.get("at") else None,
+        } if load_err else None,
     }
 
 
@@ -401,7 +424,15 @@ def get_darkbloom_status():
 
 
 def read_warmup_config():
-    default = {"enabled": False, "interval_min": WARMUP_DEFAULT_INTERVAL_MIN, "last_run": None, "last_ok": None}
+    # "models": null means "every configured model" (original behavior). Set
+    # to a specific list to warm only a subset - needed on this hardware
+    # since some model combinations can't stay resident together (loading a
+    # second one evicts the first even though the combined catalog size
+    # looks like it should fit in the 44GB budget - real overhead is higher
+    # than the static estimate), so warming every configured model on a
+    # fixed interval would otherwise just thrash between evicting one to
+    # load the other, paying a real cold-load cost each swap for nothing.
+    default = {"enabled": False, "interval_min": WARMUP_DEFAULT_INTERVAL_MIN, "last_run": None, "last_ok": None, "models": None}
     if not WARMUP_CONFIG.exists():
         return default
     try:
@@ -457,7 +488,8 @@ def send_warmup_ping():
         log_warmup(f"ERROR: could not read local.json: {e}")
         return False
 
-    models = get_configured_models()
+    cfg = read_warmup_config()
+    models = cfg.get("models") or get_configured_models()
     if not models:
         log_warmup("ERROR: no configured models found to warm up")
         return False
@@ -1260,6 +1292,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log_warmup(f"{'enabled' if cfg['enabled'] else 'disabled'} via dashboard")
             if "interval_min" in body:
                 cfg["interval_min"] = max(1, int(body["interval_min"]))
+            if "models" in body:
+                cfg["models"] = body["models"] or None  # empty list/[] -> back to "all configured"
+                log_warmup(f"warmup target set to: {cfg['models'] or 'all configured models'}")
             write_warmup_config(cfg)
             self._send_json(cfg)
         elif self.path == "/api/elpris_zone":
