@@ -37,7 +37,15 @@ BASELINE_W = 7
 # network rate, not noise). Previous guess of $0.125/M was never measured
 # and was off by ~2.8x, which is what most of the old "gap" number turned
 # out to be.
-LOCAL_BLENDED_USD_PER_TOKEN = 0.044 / 1_000_000
+# LAST CALIBRATED 2026-09-10: $0.048/M, computed the same way but excluding
+# jobs matching the exact-25-prompt-token spam signature Darkbloom's team
+# confirmed and began rate-limiting that day (see nerdy_stats.spam_jobs) -
+# spam jobs pay real (near-$0) money for real tokens, so leaving them in
+# would have dragged this constant down again. A real-world number like this
+# will drift as network pricing/mix shifts - recalibrate periodically rather
+# than trusting it indefinitely, the same way the $0.125 guess quietly went
+# 2.8x stale before anyone checked it against reality.
+LOCAL_BLENDED_USD_PER_TOKEN = 0.048 / 1_000_000
 LIVE_POWER_TAIL_BYTES = 40000  # a few complete samples of lookback at ~5Hz (~5-8KB/sample)
 LOCAL_JSON = HOME / ".darkbloom" / "local.json"
 WARMUP_CONFIG = HOME / ".darkbloom" / "warmup.json"
@@ -122,15 +130,23 @@ UTIL_WINDOW_MIN = 60  # how far back "recent" looks
 
 
 def get_utilization():
-    """Answers 'is the fan silent because nothing is coming in, or is
-    something broken': real request/token throughput over the last ~60 min,
-    plus what fraction of the 5-min energy-log slices in that window actually
-    saw new requests arrive (duty cycle). Tied directly to the same
-    requests_served counter shown elsewhere on the dashboard - NOT a SoC
-    power-draw threshold, which turned out to be unreliable: idle power on
-    this Mac floats around 2W just from background OS/dashboard load, so a
-    naive wattage cutoff read as "100% active" even during genuinely quiet
-    stretches with zero new requests."""
+    """Real request/token throughput over the last ~60 min, plus real
+    hardware utilization over the same window - the actual average of
+    energy-monitor.sh's own per-5-min "GPU HW active residency" logging
+    (same real powermetrics figure the live GPU Headroom gauge reads, just
+    averaged across many samples instead of one snapshot). Replaced an
+    earlier version of this gauge that used a request-arrival duty cycle (%
+    of 5-min slices that saw a new request) as a utilization proxy - real
+    measured GPU load is what was actually asked for, and duty cycle can't
+    tell a Mac serving one tiny request per slice from one pegged at 100%
+    for the whole slice. That duty-cycle number was itself a deliberate
+    replacement for an even earlier SoC power-draw threshold, which was
+    unreliable for the same reason get_live_power()'s gpu_active_pct exists
+    at all: idle background power floats non-zero and isn't a clean signal.
+    gpu_util_avg_pct is None until energy-monitor.sh has logged at least one
+    row with real residency data - the column didn't exist before this was
+    added, so historical coverage starts from whenever this shipped, not
+    retroactively."""
     if not CSV_PATH.exists():
         return None
     try:
@@ -145,7 +161,13 @@ def get_utilization():
                 continue
             try:
                 ts = time.mktime(time.strptime(parts[0][:19], "%Y-%m-%dT%H:%M:%S"))
-                rows.append((ts, int(parts[8]), int(parts[9])))
+                gpu_pct = None
+                if len(parts) > 14 and parts[14].strip():
+                    try:
+                        gpu_pct = float(parts[14])
+                    except ValueError:
+                        gpu_pct = None
+                rows.append((ts, int(parts[8]), int(parts[9]), gpu_pct))
             except Exception:
                 continue
         rows = [r for r in rows if now - r[0] <= UTIL_WINDOW_MIN * 60]
@@ -155,17 +177,17 @@ def get_utilization():
     if len(rows) < 2:
         return None
 
-    intervals = len(rows) - 1
-    active_intervals = sum(1 for i in range(1, len(rows)) if rows[i][1] > rows[i - 1][1])
-    active_pct = (active_intervals / intervals * 100) if intervals > 0 else None
-
     span_hr = (rows[-1][0] - rows[0][0]) / 3600
     req_per_hour = (rows[-1][1] - rows[0][1]) / span_hr if span_hr > 0 else None
     tok_per_hour = (rows[-1][2] - rows[0][2]) / span_hr if span_hr > 0 else None
 
+    gpu_samples = [r[3] for r in rows if r[3] is not None]
+    gpu_util_avg_pct = (sum(gpu_samples) / len(gpu_samples)) if gpu_samples else None
+
     return {
-        "active_pct": round(active_pct, 1) if active_pct is not None else None,
+        "gpu_util_avg_pct": round(gpu_util_avg_pct, 1) if gpu_util_avg_pct is not None else None,
         "sample_count": len(rows),
+        "gpu_sample_count": len(gpu_samples),
         "requests_per_hour": round(req_per_hour, 1) if req_per_hour is not None else None,
         "tokens_per_hour": round(tok_per_hour) if tok_per_hour is not None else None,
     }
@@ -736,12 +758,49 @@ def _build_account_view(raw, age_sec):
     real_jobs = sum(d["jobs"] for d in real_models.values())
     real_prompt_tokens = sum(d["prompt_tokens"] for d in real_models.values())
     real_completion_tokens = sum(d["completion_tokens"] for d in real_models.values())
+
+    # Observed 2026-09-10: a big chunk of "real" jobs are a uniform 25-prompt-
+    # token size, paying near-$0 each - matches a network-wide Gemma spam
+    # flood Darkbloom's own team confirmed and started rate-limiting that same
+    # day ("a spammer on Gemma side - we have rate limited them", their Slack
+    # #providers channel), and other providers independently reported the
+    # same signature. Not an official Darkbloom spam flag - just this
+    # account's own repeated-exact-size pattern - so this is a heuristic, not
+    # a certainty, and shown as a second (not replacement) figure so the raw
+    # number above stays honest about what actually happened.
+    SPAM_PROMPT_TOKENS = 25
+    real_entries = [e for e in raw.get("earnings", []) if (e.get("model") or "unknown") != "base_reward"]
+    clean_entries = [e for e in real_entries if (e.get("prompt_tokens") or 0) != SPAM_PROMPT_TOKENS]
+    spam_jobs = len(real_entries) - len(clean_entries)
+    clean_jobs = len(clean_entries)
+    clean_prompt_tokens = sum(e.get("prompt_tokens", 0) or 0 for e in clean_entries)
+    clean_completion_tokens = sum(e.get("completion_tokens", 0) or 0 for e in clean_entries)
+
     nerdy_stats = {
         "real_jobs": real_jobs,
         "base_reward_jobs": per_model.get("base_reward", {}).get("jobs", 0),
         "avg_prompt_tokens": (real_prompt_tokens / real_jobs) if real_jobs else None,
         "avg_completion_tokens": (real_completion_tokens / real_jobs) if real_jobs else None,
+        "spam_jobs": spam_jobs,
+        "avg_prompt_tokens_excl_spam": (clean_prompt_tokens / clean_jobs) if clean_jobs else None,
+        "avg_completion_tokens_excl_spam": (clean_completion_tokens / clean_jobs) if clean_jobs else None,
     }
+
+    # The earnings API only ever returns the most recent ACCOUNT_API_LIMIT
+    # entries, not a real date range - on a busy day (real jobs + base_reward
+    # + spam all counted) that can be a window of just a few hours, not the
+    # stable "recent history" the sample count alone implies. Surfaced here
+    # so nerdy_stats/spam_jobs/per-model figures aren't read as more
+    # representative than they actually are.
+    entry_times = [e["created_at"] for e in raw.get("earnings", []) if e.get("created_at")]
+    window_start_at = min(entry_times) if entry_times else None
+    window_end_at = max(entry_times) if entry_times else None
+    window_hours = None
+    if window_start_at and window_end_at:
+        try:
+            window_hours = (_parse_iso_ts(window_end_at) - _parse_iso_ts(window_start_at)) / 3600
+        except Exception:
+            window_hours = None
 
     return {
         "connected": True,
@@ -751,6 +810,9 @@ def _build_account_view(raw, age_sec):
         "lifetime_usd": raw.get("total_usd"),
         "total_jobs": raw.get("count"),
         "sample_size": len(raw.get("earnings", [])),
+        "sample_window_start_at": window_start_at,
+        "sample_window_end_at": window_end_at,
+        "sample_window_hours": round(window_hours, 1) if window_hours is not None else None,
         "per_model": per_model,
         "nerdy_stats": nerdy_stats,
         "cut_summary": {
@@ -1269,6 +1331,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/api/warmup":
             cfg = read_warmup_config()
             cfg["log_tail"] = WARMUP_LOG.read_text().splitlines()[-10:] if WARMUP_LOG.exists() else []
+            cfg["configured_models"] = get_configured_models()
             self._send_json(cfg)
         elif self.path in ("/", "/index.html"):
             html_path = Path(__file__).parent / "index.html"

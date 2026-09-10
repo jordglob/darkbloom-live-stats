@@ -35,11 +35,15 @@ BASELINE_W=7
 # per-token payout providers see. Recalibrated 2026-09-02 straight from real
 # ledger data instead (dashboard's server.py LOCAL_BLENDED_USD_PER_TOKEN -
 # keep these two in sync manually).
-BLENDED_USD_PER_TOKEN=$(echo "scale=12; 0.044/1000000" | bc 2>/dev/null)
-[ -z "$BLENDED_USD_PER_TOKEN" ] && BLENDED_USD_PER_TOKEN=0.000000044
+# LAST CALIBRATED 2026-09-10: $0.048/M, same method but excluding jobs
+# matching the exact-25-prompt-token spam signature Darkbloom's team
+# confirmed and began rate-limiting that day - recalibrate periodically,
+# don't trust indefinitely (the $0.125 guess drifted 2.8x stale unnoticed).
+BLENDED_USD_PER_TOKEN=$(echo "scale=12; 0.048/1000000" | bc 2>/dev/null)
+[ -z "$BLENDED_USD_PER_TOKEN" ] && BLENDED_USD_PER_TOKEN=0.000000048
 
 mkdir -p "$DIR"
-[ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w" > "$CSV"
+[ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w,avg_gpu_active_pct" > "$CSV"
 
 LAST_OFFSET=0
 CUM_WH=0
@@ -122,6 +126,7 @@ while true; do
 
   # --- parse new power data since last run ---
   AVG_W=0
+  AVG_GPU_ACTIVE_PCT=""
   if [ -f "$RAW_LOG" ]; then
     SIZE=$(stat -f%z "$RAW_LOG" 2>/dev/null || echo 0)
     # Self-heal: if the raw log got recreated/truncated (e.g. powermetrics
@@ -131,10 +136,18 @@ while true; do
       LAST_OFFSET=0
     fi
     if [ "$SIZE" -gt "$LAST_OFFSET" ]; then
-      AVG_MW=$(tail -c +$((LAST_OFFSET + 1)) "$RAW_LOG" | awk '
+      CHUNK=$(tail -c +$((LAST_OFFSET + 1)) "$RAW_LOG")
+      AVG_MW=$(printf '%s\n' "$CHUNK" | awk '
         /^CPU Power:/ { cpu=$3 }
         /^GPU Power:/ { gpu=$3; print cpu+gpu; cpu=0; gpu=0 }
       ' | awk '{s+=$1; n++} END{ if (n>0) print s/n; else print 0 }')
+      # Real GPU busy-ness (0-100%), averaged over every sample in this
+      # 5-minute window - same "GPU HW active residency" line the dashboard's
+      # live gauge reads, just averaged here instead of a single snapshot.
+      # Feeds the Utilization (last hour) gauge in the dashboard.
+      AVG_GPU_ACTIVE_PCT=$(printf '%s\n' "$CHUNK" | awk '
+        /^GPU HW active residency:/ { gsub("%", "", $5); print $5 }
+      ' | awk '{s+=$1; n++} END{ if (n>0) printf "%.1f", s/n; else print "" }')
       LAST_OFFSET=$SIZE
       AVG_W=$(calc "scale=3; ${AVG_MW:-0} / 1000")
     fi
@@ -156,7 +169,7 @@ while true; do
   EST_REV_SEK=$(calc "scale=6; $EST_REV_USD * $USDSEK_VAL")
   NET_SEK=$(calc "scale=6; $EST_REV_SEK - $CUM_COST")
 
-  echo "$NOW_ISO,$AVG_W,$INTERVAL_WH,$CUM_WH,$ELPRIS_VAL,$INTERVAL_COST,$CUM_COST,$USDSEK_VAL,$REQS,$TOKENS,$EST_REV_USD,$EST_REV_SEK,$NET_SEK,$TOTAL_W" >> "$CSV"
+  echo "$NOW_ISO,$AVG_W,$INTERVAL_WH,$CUM_WH,$ELPRIS_VAL,$INTERVAL_COST,$CUM_COST,$USDSEK_VAL,$REQS,$TOKENS,$EST_REV_USD,$EST_REV_SEK,$NET_SEK,$TOTAL_W,$AVG_GPU_ACTIVE_PCT" >> "$CSV"
 
   {
     echo "LAST_OFFSET=$LAST_OFFSET"

@@ -1,5 +1,21 @@
 # Changelog
 
+## v6
+
+**Utilization (last hour) now measures real GPU load**, not request-arrival frequency. Previously it showed the % of 5-min windows that saw any request arrive - a duty cycle that couldn't tell one tiny request from the GPU pegged at 100% the whole time. Now `energy-monitor.sh` logs the real "GPU HW active residency" figure every 5 minutes (the same one the Headroom gauge reads live), and this gauge shows the genuine average over the last hour of real logged samples.
+
+**Spam detection in Nerdy Stats.** A network-wide spam flood against Gemma, confirmed and rate-limited by Darkbloom's own team on 2026-09-10, was found to be silently skewing the average prompt/completion length stat by ~35% (uniform 25-token spam requests diluting the real average). Now flagged directly: shows both the raw average and a spam-excluded one, plus a note that the "active $/hr" pay-rate figure is affected by the same dilution.
+
+**Revenue-estimate rate recalibrated** from $0.044/M to $0.048/M tokens, this time explicitly excluding spam-signature jobs from the calculation. Documented as needing periodic recalibration rather than being trusted indefinitely - the previous $0.125/M guess had quietly drifted 2.8x stale before anyone checked it.
+
+**Doctor's persistent "model doesn't fit in RAM" false positive gets an explanation, not just a workaround.** Found the likely mechanism: the check appears to compare a model's requirement against *currently-free* RAM rather than the total budget, so whichever model is already loaded (and using its own share) looks like it can't fit itself - consistent with this FAIL always landing on the currently-active model and rotating whenever that changes. Surfaced as a working theory in the banner, not asserted as fact.
+
+**Account panel now shows its real data window.** The earnings API only ever returns the most recent 1000 entries, not a fixed time range - on a busy day that's under 4 hours of history, not the stable "recent activity" the sample count alone implied. Now shown explicitly (e.g. "covers ~3.8h").
+
+**Warmup model-targeting now has a UI control** instead of requiring a manual API call - checkboxes per configured model, with "all checked" correctly falling back to "every configured model" rather than a stale hardcoded list.
+
+**Clarified two different "Net" figures that share a label.** The original chart (renamed "Net (Estimated) Over Time") is a full-history estimate from a flat $/token rate; the newer Electricity Price & Profitability panel's Net is real earnings minus real cost per 15-minute slot, only over its own recent window. Cross-referenced in both places so they're not mistaken for the same number.
+
 ## v5
 
 **New: GPU Headroom gauge**, replacing an earlier attempt that showed free system RAM. Now sourced directly from `powermetrics`' own "GPU HW active residency" line (already being logged every ~200ms, just never parsed before) — a real 0-100% GPU busy-ness measurement, not derived/estimated from power draw. Reads ~75-85% at idle (background OS activity keeps GPU residency nonzero even at rest) and drops toward 0% under real inference load, directly answering "how far from full hardware operation" the Mac is.

@@ -275,7 +275,7 @@
         <h4>Charts</h4>
         <p><strong>Power history</strong> — the same wattage as the live gauges, logged every 5 minutes so you can see trends over hours/days. Once there's enough history to need downsampling, a faint dashed "peak" line appears alongside the average — the highest single reading inside each plotted bucket, so brief spikes stay visible even when hundreds of raw samples are compressed into one line.</p>
         <p><strong>Electricity cost vs. estimated revenue</strong> — running totals over time; see its own "How is this calculated?" details below the chart for the exact formula.</p>
-        <p><strong>Net (Revenue − Cost) Over Time</strong> — the same figure as the Net summary card, plotted over time instead of just showing the current number, so you can see whether it's trending up or down.</p>
+        <p><strong>Net (Estimated) Over Time</strong> — the same figure as the Net summary card, plotted over time instead of just showing the current number, so you can see whether it's trending up or down. This is our own running estimate over the full logged history (revenue from the flat blended $/token rate above, cost from real measured power) - not the same thing as the "Net" line in the Electricity Price & Profitability panel further down, which is real earnings minus real cost per 15-minute slot, only over that panel's own recent window.</p>
       </div>
 
       <div class="explainer-section">
@@ -334,10 +334,10 @@
       <summary>How is the kWh price and Net figure calculated?</summary>
       <p><strong>Electricity price:</strong> fetched live from <a href="https://www.elprisetjustnu.se" target="_blank" rel="noopener">elprisetjustnu.se</a> (Sweden, zone SE3), re-checked every 15 minutes - it's the actual spot price for the current hour, not an estimate. The source is Swedish SEK; this dashboard converts to USD (checked hourly) so everything on the page shares one currency.</p>
       <p><strong>Cost so far:</strong> every 5 minutes, measured power draw (CPU+GPU from powermetrics, plus a fixed 7W baseline guess for RAM/disk/fans/PSU loss that powermetrics doesn't see) is converted to the energy used in that 5-minute slice, then priced at that slice's own USD/kWh rate. Those slices add up into the running "Accumulated electricity cost" card and the cost line on this chart.</p>
-      <p><strong>Estimated revenue:</strong> uses a flat $0.044/M-token rate, recalibrated 2026-09-02 straight from this account's own real ledger (not from Darkbloom's advertised alpha pricing, which didn't match real payouts even correcting for real prompt/completion token mix). Since <code>darkbloom status</code> only reports a combined token count (not split input/output), this stays a single blended rate rather than separate input/output prices - already USD-native, no conversion needed.</p>
+      <p><strong>Estimated revenue:</strong> uses a flat $0.048/M-token rate, last recalibrated 2026-09-10 straight from this account's own real ledger, excluding jobs matching a known spam signature (not from Darkbloom's advertised alpha pricing, which didn't match real payouts even correcting for real prompt/completion token mix). Since <code>darkbloom status</code> only reports a combined token count (not split input/output), this stays a single blended rate rather than separate input/output prices - already USD-native, no conversion needed. Real network pricing/mix shifts over time, so this is recalibrated periodically rather than trusted indefinitely.</p>
       <p><strong>Net (estimated) = Estimated revenue − Accumulated electricity cost.</strong> This is our own guess built from local numbers, not what Darkbloom actually paid - once the account is synced (see the Darkbloom Account panel above), "Net (real balance)" replaces it with your real ledger balance instead.</p>
     </details>
-    <h2 style="margin-top:16px" title="Net = estimated revenue minus electricity cost, over time. Uses the same net_usd figures as the Net card above.">Net (Revenue − Cost) Over Time <span id="net-chart-stats" class="gauge-time"></span></h2>
+    <h2 style="margin-top:16px" title="Net = estimated revenue minus electricity cost, over the full logged history. Uses the same net_usd figures as the Net card above. Not the same as the real per-15-min Net further down in the Electricity Price & Profitability panel.">Net (Estimated) Over Time <span id="net-chart-stats" class="gauge-time"></span></h2>
     <div class="chart-wrap">
       <svg class="chart" id="chart-net"></svg>
       <div class="tooltip" id="tooltip-net"></div>
@@ -387,8 +387,8 @@ const GAUGES = [
     tooltip: 'Fan RPM, read via `darkbloom fan status` (read-only - does not enable fan control). Apple Silicon does not expose this via powermetrics at all.' },
   { id: 'temp', label: 'GPU Temp', source: 'fan_temp', key: 'gpu_temp_c', max: 100, unit: '°C', color: '--gauge-gpu',
     tooltip: 'Average across all reported GPU thermal sensors, via `darkbloom fan status`.' },
-  { id: 'util', label: 'Utilization (last hour)', source: 'utilization', key: 'active_pct', max: 100, unit: '%', color: '--gauge-total',
-    tooltip: 'Percent of the 5-minute windows in the last hour that actually saw new requests arrive (based on the real requests_served counter, not a power-draw guess). 0% with normal trust/daemon status just means no traffic is coming in right now, not a fault.' },
+  { id: 'util', label: 'Utilization (last hour)', source: 'utilization', key: 'gpu_util_avg_pct', max: 100, unit: '%', color: '--gauge-total',
+    tooltip: 'Real average GPU busy-ness over the last hour - the same powermetrics "GPU HW active residency" figure the live GPU Headroom gauge reads, averaged across every 5-min sample energy-monitor.sh has logged in that window. Replaced an earlier version that just measured how often any request arrived (a duty cycle), which could not tell one tiny request per 5-min slice from the GPU pegged at 100% the whole time. Shows "not enough data yet" until real logged samples exist for this window - the underlying column only started being recorded once this changed, nothing retroactive.' },
 ];
 let lastUtilization = null;
 let lastRam = null;
@@ -629,6 +629,23 @@ function renderWarmup(warmup) {
   const lastOkBadge = warmup.last_ok == null ? '' :
     warmup.last_ok ? `<span style="color:var(--status-good)">✓ ok</span>` : `<span style="color:var(--status-critical)">✗ error</span>`;
 
+  // null/empty "models" means "every configured model" - render that as
+  // implicitly-all-checked rather than none-checked, matching the backend's
+  // own interpretation (read_warmup_config's models: null fallback).
+  const configuredModels = warmup.configured_models || [];
+  const targetModels = warmup.models && warmup.models.length ? warmup.models : configuredModels;
+  const modelChecks = configuredModels.length > 1
+    ? `<div class="warmup-row" style="margin-top:4px" title="Which configured model(s) warmup keeps loaded. Some model combinations can't stay resident together on this hardware (loading a second one can evict the first even when the combined catalog size looks like it should fit) - if you see repeated cold-load thrashing in the log below, try warming just one model instead of all of them.">
+        <span style="font-size:12px;color:var(--text-muted)">Keep warm:</span>
+        ${configuredModels.map(m => `
+          <label style="font-size:12px;margin-right:10px">
+            <input type="checkbox" class="warmup-model-checkbox" value="${m}" ${targetModels.includes(m) ? 'checked' : ''}>
+            ${m}
+          </label>
+        `).join('')}
+      </div>`
+    : '';
+
   el.innerHTML = `
     <div class="warmup-row">
       <label class="warmup-toggle">
@@ -641,6 +658,7 @@ function renderWarmup(warmup) {
       </span>
       <span class="warmup-status">last: ${lastRun} ${lastOkBadge}</span>
     </div>
+    ${modelChecks}
     ${warmup.log_tail && warmup.log_tail.length ? `<div class="warmup-log">${[...warmup.log_tail].reverse().join('<br>')}</div>` : ''}
   `;
 
@@ -649,6 +667,17 @@ function renderWarmup(warmup) {
   });
   document.getElementById('warmup-interval-input').addEventListener('change', (e) => {
     postWarmupConfig({ interval_min: parseInt(e.target.value, 10) || 20 });
+  });
+  document.querySelectorAll('.warmup-model-checkbox').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const checked = [...document.querySelectorAll('.warmup-model-checkbox:checked')].map(c => c.value);
+      // All boxes checked (or none, to avoid a dead "warm nothing" state) ->
+      // send [] so the backend falls back to "every configured model" rather
+      // than a hardcoded literal list that'd go stale if models are ever
+      // reconfigured.
+      const models = (checked.length === 0 || checked.length === configuredModels.length) ? [] : checked;
+      postWarmupConfig({ models });
+    });
   });
 }
 
@@ -751,10 +780,10 @@ function renderAccount(account) {
     <div class="pill"><span class="dot" style="background:var(--status-good)"></span>Connected (refreshed ${Math.round(account.age_sec)}s ago)</div>
     <div class="rotation-summary" title="Withdrawable can be lower than available if part of the balance is pending; lifetime is total earned all-time, never decreases.">
       Available: <strong>$${account.balance_usd}</strong> · Withdrawable: <strong>$${account.withdrawable_balance_usd}</strong> · Lifetime: <strong>$${account.lifetime_usd}</strong>
-      · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here
+      · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here${account.sample_window_hours != null ? ` <span title="The earnings API only ever returns the most recent batch of entries, not a fixed time range - on a busy day (real traffic + spam + base_reward all counted) that can be just a few hours. The stats below only reflect this window, not a stable long-term average.">(covers ~${account.sample_window_hours < 1 ? '<1' : account.sample_window_hours.toFixed(1)}h: ${fmtTime(account.sample_window_start_at)} → ${fmtTime(account.sample_window_end_at)})</span>` : ''}
     </div>
     <table class="rotation-table">
-      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.044/M-token guess would have estimated for these same tokens - that rate is recalibrated from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means our guess ran low.">Darkbloom gap</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
+      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.048/M-token guess would have estimated for these same tokens - that rate is recalibrated periodically from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means our guess ran low.">Darkbloom gap</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <div class="rotation-summary" style="margin-top:10px">
@@ -774,10 +803,13 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
   const tokenLine = ns && ns.real_jobs
     ? `Avg prompt length: <strong>${fmtNum(Math.round(ns.avg_prompt_tokens))} tokens</strong> · Avg completion length: <strong>${fmtNum(Math.round(ns.avg_completion_tokens))} tokens</strong> · from ${fmtNum(ns.real_jobs)} real job${ns.real_jobs === 1 ? '' : 's'} (excludes ${fmtNum(ns.base_reward_jobs)} base-reward floor payments, which carry no token counts)`
     : 'Not enough real (non-base-reward) job data yet to compute token averages.';
+  const spamLine = (ns && ns.spam_jobs > 0)
+    ? `<span title="Heuristic: exact 25-prompt-token jobs, this account's own observed signature - not an official Darkbloom spam flag. Matches a network-wide Gemma spam flood Darkbloom's own team confirmed and began rate-limiting on 2026-09-10 (#providers: &quot;a spammer on Gemma side - we have rate limited them&quot;); other providers independently reported the identical pattern the same week.">⚠ ${fmtNum(ns.spam_jobs)} of those (${(ns.spam_jobs / ns.real_jobs * 100).toFixed(0)}%) look like spam</span> - excluding them: avg prompt <strong>${fmtNum(Math.round(ns.avg_prompt_tokens_excl_spam))} tokens</strong>, avg completion <strong>${fmtNum(Math.round(ns.avg_completion_tokens_excl_spam))} tokens</strong>`
+    : '';
 
   const idur = inferenceDurations || {};
   const durLine = idur.count > 0
-    ? `Observed request duration: avg <strong>${idur.avg_sec.toFixed(1)}s</strong> · min ${idur.min_sec.toFixed(1)}s · max ${idur.max_sec.toFixed(1)}s, from ${fmtNum(idur.count)} request${idur.count === 1 ? '' : 's'} <span title="Darkbloom exposes no duration/latency data anywhere - this is tracked locally by watching the daemon's inference_active flag twice a second since this dashboard started. May undercount requests shorter than that.">(tracked locally, not from Darkbloom)</span>`
+    ? `Observed request duration: avg <strong>${idur.avg_sec.toFixed(1)}s</strong> · min ${idur.min_sec.toFixed(1)}s · max ${idur.max_sec.toFixed(1)}s, from ${fmtNum(idur.count)} request${idur.count === 1 ? '' : 's'} <span title="Darkbloom exposes no duration/latency data anywhere - this is tracked locally by watching the daemon's inference_active flag twice a second since this dashboard started. May undercount requests shorter than that. It can also OVERcount in the other direction: if several real requests land back-to-back with no idle gap between them, the flag never drops to false in between, so they get measured as one long continuous stretch rather than separate requests - the largest values (multiple whole minutes) are almost certainly this, not one single slow request.">(tracked locally, not from Darkbloom)</span>`
     : 'No request durations observed yet - builds up over time as real requests come in (Darkbloom itself exposes no timing data, so this is tracked locally).';
 
   const hr = (account && account.connected) ? account.hourly_rate_comparison : null;
@@ -785,14 +817,15 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
 Active $/hr = real earnings (excl. base_reward) ÷ real active-serving seconds, both counted only from ${new Date(hr.window_start_at * 1000).toLocaleString('en-US')} onward - the exact moment this dashboard's local duration tracker started watching the daemon's inference_active flag.
 Floor $/hr = base_reward earnings in that same window ÷ elapsed floor-slot time. The slot width (${hr.floor_slot_minutes.toFixed(1)} min) isn't assumed - it's the smallest real gap between two back-to-back "floor:<minute>Z:..." timestamps Darkbloom itself embeds in every base_reward job_id.
 Window so far: ${hr.active_hours.toFixed(2)}h active (${fmtNum(hr.active_jobs)} jobs, ${fmtUsd(hr.active_usd)}) vs ${hr.floor_hours.toFixed(2)}h floor (${fmtNum(hr.floor_slots)} slots, ${fmtUsd(hr.floor_usd)}).
-Grows more reliable the longer the dashboard keeps running - resets to empty on every restart.` : '';
+Grows more reliable the longer the dashboard keeps running - resets to empty on every restart.
+Note: active $/hr counts every real job including likely spam (see the token-length line above) - real spam traffic really did occupy real active-serving time for near-$0 pay, so a low reading here can reflect that dilution rather than the network paying less for genuine work.` : '';
   const hourlyLine = hr
     ? `Real pay rate: <strong>${fmtUsd(hr.active_rate_per_hour_usd)}/hr</strong> actively serving vs <strong>${fmtUsd(hr.floor_rate_per_hour_usd)}/hr</strong> on the base-reward floor ${hr.ratio_active_to_floor != null ? `(active is ${(hr.ratio_active_to_floor * 100).toFixed(0)}% of floor)` : ''} <span title="${hourlyTooltip.replace(/"/g, '&quot;')}" style="cursor:help;text-decoration:underline dotted;">(how is this computed?)</span>`
     : 'Not enough local data yet to compare active vs. floor pay rates — builds up as real requests come in.';
 
   const ds = daemonState || {};
   const capLine = ds.total_memory_gb != null
-    ? `GPU memory: <strong>${(ds.gpu_memory_active_gb ?? 0).toFixed(2)} GB active</strong> + <strong>${(ds.gpu_memory_cache_gb ?? 0).toFixed(2)} GB cached</strong> of ${ds.total_memory_gb} GB unified memory · usage gaps: <strong>${fmtNum(ds.usage_gaps ?? 0)}</strong>`
+    ? `GPU memory: <strong>${(ds.gpu_memory_active_gb ?? 0).toFixed(2)} GB active</strong> + <strong>${(ds.gpu_memory_cache_gb ?? 0).toFixed(2)} GB cached</strong> of ${ds.total_memory_gb} GB unified memory`
     : 'Daemon state file not available.';
   const slotsLine = (ds.slots || []).map(s =>
     `<span class="pill" style="margin-right:12px"><span class="dot" style="background:var(--status-good)"></span>${s.model}: ${s.kv_backend || '?'} KV${s.mtp_enabled ? ', MTP on' : ''}</span>`
@@ -805,6 +838,7 @@ Grows more reliable the longer the dashboard keeps running - resets to empty on 
 
   el.innerHTML = `
     <div class="rotation-summary">${tokenLine}</div>
+    ${spamLine ? `<div class="rotation-summary" style="color:var(--status-warning)">${spamLine}</div>` : ''}
     <div class="rotation-summary">${durLine}</div>
     <div class="rotation-summary">${hourlyLine}</div>
     <div class="rotation-summary">${capLine}</div>
@@ -873,7 +907,7 @@ function renderElpris(elpris48h) {
   if (legendEl) {
     legendEl.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Spot price</span>` +
       (hasSurcharge ? `<span><i style="background:var(--series-elpris-total)"></i>Incl. fees & tax</span>` : '') +
-      `<span><i style="background:var(--series-revenue)"></i>Net = earnings − cost, per 15-min (right axis, indicative)</span>`;
+      `<span><i style="background:var(--series-revenue)"></i>Net (real, per 15-min) = earnings − cost, right axis, indicative - not the same as the "Net (Estimated) Over Time" chart above</span>`;
   }
 
   let nowVal = null;
@@ -937,7 +971,17 @@ function renderBanners(status, energy, doctor, daemonState) {
       const reqNote = status.requests_served
         ? ` In practice, ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} already succeeded since the daemon last started, so treat this as worth a look, not a confirmed outage.`
         : '';
-      banners.push(`<div class="banner warning"><span class="dot"></span>Darkbloom's own health check ("darkbloom doctor") flags: ${label}${f.detail}${reqNote}${f.fix ? ` Suggested fix: ${f.fix}` : ''}</div>`);
+      // Working theory, not confirmed: this FAIL always lands on whichever
+      // model happens to be currently loaded, never one that's actually cold
+      // - consistent with doctor comparing a model's RAM requirement against
+      // CURRENTLY-free memory rather than the total budget, so a model
+      // already using its own share of RAM doesn't get that credited back.
+      // That would explain why it's never the same model twice and never
+      // fires on a model that isn't loaded.
+      const theoryNote = (f.check || '').toLowerCase().includes('fits in ram')
+        ? ` <span title="Working theory, not confirmed by Darkbloom: this check seems to compare against currently-free RAM rather than the full budget, so whichever model is already loaded (and using its own share) looks like it doesn't fit its own footprint - would explain why this always lands on the currently-active model and rotates whenever that changes.">(likely a known quirk in this specific check, not a real fit problem)</span>`
+        : '';
+      banners.push(`<div class="banner warning"><span class="dot"></span>Darkbloom's own health check ("darkbloom doctor") flags: ${label}${f.detail}${theoryNote}${reqNote}${f.fix ? ` Suggested fix: ${f.fix}` : ''}</div>`);
     });
   }
   document.getElementById('banners').innerHTML = banners.join('');
@@ -1271,7 +1315,7 @@ async function refresh() {
       ? `⚡ $${elprisNow.nowVal.toFixed(4)}/kWh right now (${elprisNow.zone})` : '';
     document.getElementById('footnote').innerHTML =
       `Power/cost includes an estimated baseline (7W) on top of measured CPU+GPU, since powermetrics only measures SoC power rails, not the whole machine's wall power ·
-       Revenue is a rough approximation (blended flat rate $0.044/M tokens, recalibrated from this account's real ledger, not split by input/output) ·
+       Revenue is a rough approximation (blended flat rate $0.048/M tokens, last recalibrated 2026-09-10 from this account's real ledger, not split by input/output) ·
        ${energy.total_rows ?? 0} data points logged · updates every 10s (power gauges ~5Hz, RAM/Ollama every 2s)`;
   } catch (e) {
     document.getElementById('updated').textContent = 'could not fetch data: ' + e;
