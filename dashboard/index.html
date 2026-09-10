@@ -945,10 +945,13 @@ function renderBanners(status, energy, doctor, daemonState) {
     // clearly old news (same reasoning as the doctor banner below).
     const age = fmtAgeShort(loadErr.age_sec);
     const isRecent = loadErr.age_sec != null && loadErr.age_sec < 120;
-    const reqNote = status.requests_served
-      ? ` ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} served fine since the daemon last started.`
+    // Reassurance leads, technical detail follows - a first-time visitor
+    // scanning this page shouldn't have to read past "insufficient memory"
+    // before finding out real requests are succeeding fine.
+    const reqLead = status.requests_served
+      ? `✓ ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} served fine since the daemon last started. `
       : '';
-    banners.push(`<div class="banner ${isRecent ? 'critical' : 'warning'}"><span class="dot"></span>${loadErr.model ? loadErr.model + ': ' : ''}${loadErr.message}${age ? ` (${age})` : ''}${reqNote}</div>`);
+    banners.push(`<div class="banner ${isRecent ? 'critical' : 'warning'}"><span class="dot"></span>${reqLead}Logged load error${age ? ` (${age})` : ''}: ${loadErr.model ? loadErr.model + ': ' : ''}${loadErr.message}</div>`);
   } else if (status.last_error) {
     // Fallback for when daemon-state.json isn't available - no age info here.
     banners.push(`<div class="banner warning"><span class="dot"></span>${status.last_error}</div>`);
@@ -968,8 +971,11 @@ function renderBanners(status, energy, doctor, daemonState) {
       // into, not a confirmed outage, and reconcile it against what's actually
       // happening right on this same page instead of leaving that contradiction
       // for the reader to spot themselves.
-      const reqNote = status.requests_served
-        ? ` In practice, ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} already succeeded since the daemon last started, so treat this as worth a look, not a confirmed outage.`
+      // Reassurance leads, technical detail follows - same reasoning as the
+      // load-error banner above: don't make a visitor read past "every
+      // request fails to load" before learning requests are succeeding fine.
+      const reqLead = status.requests_served
+        ? `✓ ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} already succeeded since the daemon last started - worth a look, not a confirmed outage. `
         : '';
       // Working theory, not confirmed: this FAIL always lands on whichever
       // model happens to be currently loaded, never one that's actually cold
@@ -981,7 +987,7 @@ function renderBanners(status, energy, doctor, daemonState) {
       const theoryNote = (f.check || '').toLowerCase().includes('fits in ram')
         ? ` <span title="Working theory, not confirmed by Darkbloom: this check seems to compare against currently-free RAM rather than the full budget, so whichever model is already loaded (and using its own share) looks like it doesn't fit its own footprint - would explain why this always lands on the currently-active model and rotates whenever that changes.">(likely a known quirk in this specific check, not a real fit problem)</span>`
         : '';
-      banners.push(`<div class="banner warning"><span class="dot"></span>Darkbloom's own health check ("darkbloom doctor") flags: ${label}${f.detail}${theoryNote}${reqNote}${f.fix ? ` Suggested fix: ${f.fix}` : ''}</div>`);
+      banners.push(`<div class="banner warning"><span class="dot"></span>${reqLead}darkbloom doctor flags: ${label}${f.detail}${theoryNote}${f.fix ? ` Suggested fix: ${f.fix}` : ''}</div>`);
     });
   }
   document.getElementById('banners').innerHTML = banners.join('');
