@@ -1,5 +1,11 @@
 # Changelog
 
+## v7
+
+**New: local earnings-history accumulation, extending real coverage from ~4h toward 36-48h.** Confirmed empirically that Darkbloom's earnings API is hard-capped at 1000 entries per call, with no working pagination (`limit=5000` still returns exactly 1000; `offset`/`before_id`/`cursor`/`page` params are all silently ignored). On a busy day that single-call window can be under 4 hours - visible as the real Net line on the Electricity Price & Profitability chart only ever showing a short stretch of real shape against an otherwise-flat 72h span. Now every 30-second account poll appends newly-seen entries (deduped by ID) to a local log, pruned to a 48-hour rolling window, which the Account panel's stats and the chart's Net line both read from instead of the API's own narrow single-call response. Starts from zero on first run - real 36-48h coverage builds up over that many hours of actual uptime, nothing can backfill history that was never locally recorded before now.
+
+**Warmup 429s no longer log as errors.** A 429 from the local endpoint during a warmup ping specifically means the model was already busy serving real paid traffic - i.e. already warm, which is exactly why there was nothing to warm up. Now logs "already busy with real traffic, no warmup needed" instead of "ERROR: ... failed", and no longer flips the warmup status badge to a red ✗ for what was never really a failure.
+
 ## v6
 
 **Utilization (last hour) now measures real GPU load**, not request-arrival frequency. Previously it showed the % of 5-min windows that saw any request arrive - a duty cycle that couldn't tell one tiny request from the GPU pegged at 100% the whole time. Now `energy-monitor.sh` logs the real "GPU HW active residency" figure every 5 minutes (the same one the Headroom gauge reads live), and this gauge shows the genuine average over the last hour of real logged samples.

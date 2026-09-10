@@ -61,8 +61,16 @@ PROVIDER_PLIST = HOME / "Library" / "LaunchAgents" / "io.darkbloom.provider.plis
 # same file the CLI reads. No browser step needed.
 AUTH_TOKEN_PATH = HOME / ".darkbloom" / "auth_token"
 ACCOUNT_API_URL = "https://api.darkbloom.dev/v1/provider/account-earnings"
-ACCOUNT_API_LIMIT = 1000  # the API's practical max per request; plenty for per-model stats
+# 1000 is a real server-side cap, not a choice we made - confirmed empirically
+# (limit=5000 still returns exactly 1000) and there's no working pagination
+# either (offset/before_id/cursor/page params are all silently ignored,
+# every one returns the identical most-recent-1000 regardless). On a busy
+# day that single-call window can be under 4 hours - see EARNINGS_HISTORY_*
+# below for how we get further back than that.
+ACCOUNT_API_LIMIT = 1000
 ACCOUNT_POLL_INTERVAL_SEC = 30  # how often we actually hit Darkbloom's API
+EARNINGS_HISTORY_PATH = HOME / ".darkbloom" / "earnings-history.jsonl"
+EARNINGS_HISTORY_MAX_AGE_SEC = 48 * 3600  # keep 2 days locally, margin over the ~36h target
 
 SAMPLE_HEADER_RE = re.compile(r"\*\*\* Sampled system activity \((.+?)\) \((.+?)\) \*\*\*")
 GPU_ACTIVE_RESIDENCY_RE = re.compile(r"^GPU HW active residency:\s*([\d.]+)%")
@@ -536,6 +544,16 @@ def send_warmup_ping():
             with urllib.request.urlopen(req, timeout=90) as resp:
                 resp.read()
             log_warmup(f"OK: warmed up {model}")
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Not a real failure - the local endpoint only ever returns
+                # 429 when it's already busy serving real paid requests for
+                # this exact model, which means it was already warm anyway
+                # and never needed this ping to begin with.
+                log_warmup(f"OK: {model} already busy with real traffic, no warmup needed")
+            else:
+                log_warmup(f"ERROR: warmup against {model} failed: HTTP {e.code} {e.reason}")
+                all_ok = False
         except Exception as e:
             log_warmup(f"ERROR: warmup against {model} failed: {e}")
             all_ok = False
@@ -724,7 +742,17 @@ def _build_account_view(raw, age_sec):
     """Aggregates the raw earnings list per model and computes the same
     'local estimate vs. real payout' comparison as before. base_reward-style
     entries (no model tag) naturally fall into their own 'unknown' bucket and
-    are excluded from the aggregate cut, since they aren't token-based."""
+    are excluded from the aggregate cut, since they aren't token-based.
+
+    Uses the locally-accumulated earnings history (see
+    _update_earnings_history) instead of raw's own single-call "earnings"
+    list wherever possible - the API itself never returns more than its most
+    recent 1000 entries, which can be under 4 hours on a busy day. Account-
+    level totals (balance, lifetime, count) still come straight from raw,
+    since those are the real account-wide figures the API already computes
+    server-side."""
+    raw = dict(raw)
+    raw["earnings"] = _load_earnings_history() or raw.get("earnings", [])
     per_model = {}
     for e in raw.get("earnings", []):
         model = e.get("model") or "unknown"
@@ -786,12 +814,12 @@ def _build_account_view(raw, age_sec):
         "avg_completion_tokens_excl_spam": (clean_completion_tokens / clean_jobs) if clean_jobs else None,
     }
 
-    # The earnings API only ever returns the most recent ACCOUNT_API_LIMIT
-    # entries, not a real date range - on a busy day (real jobs + base_reward
-    # + spam all counted) that can be a window of just a few hours, not the
-    # stable "recent history" the sample count alone implies. Surfaced here
-    # so nerdy_stats/spam_jobs/per-model figures aren't read as more
-    # representative than they actually are.
+    # This is now the locally-accumulated window (see _load_earnings_history
+    # above), which grows toward EARNINGS_HISTORY_MAX_AGE_SEC the longer this
+    # dashboard keeps running - not the raw single API call's own window
+    # (hard-capped at 1000 most recent, under 4h on a busy day). Right after
+    # this feature first ships the two are the same; surfaced here so the
+    # real coverage is always visible either way, not assumed.
     entry_times = [e["created_at"] for e in raw.get("earnings", []) if e.get("created_at")]
     window_start_at = min(entry_times) if entry_times else None
     window_end_at = max(entry_times) if entry_times else None
@@ -824,6 +852,75 @@ def _build_account_view(raw, age_sec):
     }
 
 
+_earnings_history_lock = threading.Lock()
+
+
+def _update_earnings_history(fresh_entries):
+    """Merges newly-fetched earnings entries into a local, deduped,
+    age-pruned log on disk - the API can never return more than its most
+    recent 1000 entries per call (see ACCOUNT_API_LIMIT), but by
+    accumulating what each poll DOES return, real local coverage grows the
+    longer this dashboard keeps running - same pattern as the
+    inference-duration tracker. Starts from zero whenever this first ships;
+    reaching the full EARNINGS_HISTORY_MAX_AGE_SEC window takes that many
+    hours of actual uptime, nothing can backfill history that was never
+    locally recorded before now."""
+    if not fresh_entries:
+        return
+    with _earnings_history_lock:
+        existing = {}
+        try:
+            if EARNINGS_HISTORY_PATH.exists():
+                with open(EARNINGS_HISTORY_PATH) as f:
+                    for line in f:
+                        try:
+                            e = json.loads(line)
+                            existing[e["id"]] = e
+                        except Exception:
+                            continue
+        except Exception:
+            existing = {}
+        for e in fresh_entries:
+            if e.get("id") is not None:
+                existing[e["id"]] = e
+        cutoff = time.time() - EARNINGS_HISTORY_MAX_AGE_SEC
+        kept = []
+        for e in existing.values():
+            try:
+                if _parse_iso_ts(e["created_at"]) >= cutoff:
+                    kept.append(e)
+            except Exception:
+                continue
+        try:
+            EARNINGS_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(EARNINGS_HISTORY_PATH, "w") as f:
+                for e in kept:
+                    f.write(json.dumps(e) + "\n")
+        except Exception:
+            pass
+
+
+def _load_earnings_history():
+    """Reads back the locally accumulated earnings log - real entries this
+    dashboard has actually observed over time via repeated polling, covering
+    further back than any single API call can (hard-capped at 1000 most
+    recent, no working pagination). Empty until _update_earnings_history has
+    run at least once."""
+    if not EARNINGS_HISTORY_PATH.exists():
+        return []
+    out = []
+    try:
+        with open(EARNINGS_HISTORY_PATH) as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return out
+
+
 def get_account_data():
     """Real account data, polled directly from Darkbloom's API on its own
     cadence (ACCOUNT_POLL_INTERVAL_SEC), independent of how often the
@@ -849,6 +946,7 @@ def get_account_data():
     with _account_cache_lock:
         _account_cache["data"] = raw
         _account_cache["fetched_at"] = now
+    _update_earnings_history(raw.get("earnings", []))
     return _build_account_view(raw, 0)
 
 
@@ -1096,15 +1194,21 @@ def _earnings_by_bucket(all_prices):
     read on when earnings actually happened relative to price, not precise
     accounting (a bucket straddling 'now' will look partial, and a bucket
     with mixed real+base_reward jobs is just summed together). Only ever
-    non-zero for buckets that have already elapsed. Reuses whatever the
-    account panel's own ledger cache already holds instead of a separate
-    fetch - if that hasn't loaded yet, every bucket is just 0."""
-    with _account_cache_lock:
-        raw = _account_cache["data"]
-    if not raw:
+    non-zero for buckets that have already elapsed. Uses the locally-
+    accumulated earnings history (see _load_earnings_history) so the visible
+    Net line can cover as much of the chart's 72h span as real local uptime
+    has built up, not just the API's own single-call window (hard-capped at
+    1000 most recent entries, under 4h on a busy day) - falls back to
+    whatever the account cache holds if history isn't available yet."""
+    history = _load_earnings_history()
+    if not history:
+        with _account_cache_lock:
+            cached_raw = _account_cache["data"]
+        history = cached_raw.get("earnings", []) if cached_raw else []
+    if not history:
         return [0.0] * len(all_prices)
     parsed = []
-    for e in raw.get("earnings", []):
+    for e in history:
         try:
             parsed.append((_parse_iso_ts(e["created_at"]), (e.get("amount_micro_usd", 0) or 0) / 1e6))
         except Exception:
