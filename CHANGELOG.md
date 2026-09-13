@@ -1,5 +1,9 @@
 # Changelog
 
+## v10
+
+**Fixed: "Utilization (last hour)" could show negative requests/tokens per hour.** Same root cause as v9's revenue bug, different code path: `get_utilization()` computed throughput as (last row - first row) over a lookback window, using the daemon's own `requests_served`/`tokens` counters directly. Those counters reset to 0 on every daemon restart, so a restart landing inside the lookback window produced a negative delta (observed live: -4500.8 req/hr, -2,025,516 tok/hr, right after restarting the daemon to verify the v9 fix). Now sums consecutive deltas across the window instead of a single first-to-last subtraction, treating any decrease as a reset (the whole new value counts as newly earned, same logic as the bash-side fix).
+
 ## v9
 
 **Fixed: "Estimated revenue" wasn't actually cumulative.** Found via another fresh-eyes pass over the dashboard: the green revenue line on the Cumulative Electricity Cost vs. Estimated Revenue chart kept sawtoothing back to near-$0 instead of climbing like the cost line next to it. Root cause: it was computed as `darkbloom status`'s own `tokens` counter × rate, logged directly every poll - and that counter resets to 0 every time the darkbloom daemon itself restarts, unrelated to this dashboard's own uptime. Electricity cost, by contrast, was already a real persisted running total. Now token counts are accumulated into a real lifetime total the same way the cost side already was (detects a daemon-restart reset and adds the new value instead of losing the running total), so the two lines are finally comparing the same kind of number. This also means "Net (Estimated) Over Time" was understating losses/overstating them incorrectly after every daemon restart - now corrected going forward (pre-fix history in the chart is not retroactively corrected, only new data).

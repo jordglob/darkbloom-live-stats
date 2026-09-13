@@ -186,8 +186,22 @@ def get_utilization():
         return None
 
     span_hr = (rows[-1][0] - rows[0][0]) / 3600
-    req_per_hour = (rows[-1][1] - rows[0][1]) / span_hr if span_hr > 0 else None
-    tok_per_hour = (rows[-1][2] - rows[0][2]) / span_hr if span_hr > 0 else None
+    # requests_served/tokens are the darkbloom daemon's own lifetime counters,
+    # which reset to 0 whenever the daemon restarts - a plain last-minus-first
+    # over the window goes negative right after a restart (same bug class as
+    # the energy-monitor.sh revenue fix). Sum consecutive deltas instead, and
+    # treat any decrease as a reset where the whole new value was newly
+    # earned, rather than losing it or going negative.
+    def _sum_counter_deltas(values):
+        total = 0
+        for prev, cur in zip(values, values[1:]):
+            total += (cur - prev) if cur >= prev else cur
+        return total
+
+    req_total = _sum_counter_deltas([r[1] for r in rows])
+    tok_total = _sum_counter_deltas([r[2] for r in rows])
+    req_per_hour = req_total / span_hr if span_hr > 0 else None
+    tok_per_hour = tok_total / span_hr if span_hr > 0 else None
 
     gpu_samples = [r[3] for r in rows if r[3] is not None]
     gpu_util_avg_pct = (sum(gpu_samples) / len(gpu_samples)) if gpu_samples else None
