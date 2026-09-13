@@ -307,6 +307,11 @@
   </div>
 
   <div class="panel">
+    <h2 title="Compares today's real electricity price against this account's own measured $/hr active pay rate, converted to a break-even SEK/kWh price. Auto mode calls the real darkbloom start/stop CLI commands - Manual mode just shows the numbers and lets you trigger start/stop yourself.">Price Guard</h2>
+    <div id="price-guard"></div>
+  </div>
+
+  <div class="panel">
     <h2 title="Downloaded MLX models and how much disk they use. Models left over from stopped rotation experiments are safe to remove if you need the space back.">Disk Usage</h2>
     <div id="disk"></div>
   </div>
@@ -394,6 +399,7 @@ let lastUtilization = null;
 let lastRam = null;
 let lastOllama = null;
 let lastFanTemp = null;
+let lastPriceGuard = null;
 const GAUGE_R = 80;
 const GAUGE_ARC_LEN = Math.PI * GAUGE_R; // half-circle arc length
 
@@ -695,6 +701,90 @@ async function refreshWarmup() {
   } catch (e) { /* silent */ }
 }
 
+function renderPriceGuard(pg) {
+  const el = document.getElementById('price-guard');
+  if (!pg) { el.innerHTML = ''; return; }
+
+  const live = pg.live;
+  const daemonRunning = pg.daemon_running;
+  const lastActionAge = pg.last_action_at ? fmtAgeShort(Date.now() / 1000 - pg.last_action_at) : null;
+
+  const priceLine = live
+    ? `Now: <strong>${live.price_sek_per_kwh.toFixed(3)} SEK/kWh</strong> vs break-even <strong>${live.break_even_sek_per_kwh.toFixed(3)} SEK/kWh</strong> (from $${live.active_rate_per_hour_usd.toFixed(4)}/hr measured active rate) — ${live.reason}`
+    : 'Not enough data yet - needs at least one real served request and a live electricity price reading.';
+
+  const lastActionLine = pg.last_action
+    ? `Last action: <strong>${pg.last_action}</strong>${lastActionAge ? ' ' + lastActionAge : ''} — ${pg.last_reason || ''}`
+    : 'No action taken yet.';
+
+  el.innerHTML = `
+    <div class="warmup-row">
+      <label class="warmup-toggle" style="font-weight:400">
+        <input type="radio" name="price-guard-mode" value="manual" ${pg.mode === 'manual' ? 'checked' : ''}> Manual
+      </label>
+      <label class="warmup-toggle" style="font-weight:400">
+        <input type="radio" name="price-guard-mode" value="auto" ${pg.mode === 'auto' ? 'checked' : ''}> Auto
+      </label>
+      <span class="warmup-status" style="margin:0">Daemon: ${daemonRunning ? '<span style="color:var(--status-good)">running</span>' : '<span style="color:var(--status-warning)">stopped</span>'}</span>
+    </div>
+    <div class="warmup-row">
+      <span class="warmup-interval" title="Only stop when price is this far above break-even, and only resume when this far below - prevents flapping right at the edge">Margin <input type="number" id="pg-margin-input" min="0" step="1" value="${pg.margin_pct}"> %</span>
+      <span class="warmup-interval" title="Minimum time the daemon must have been running before Auto is allowed to stop it again">Min running <input type="number" id="pg-min-running-input" min="0" step="5" value="${pg.min_running_min}"> min</span>
+      <span class="warmup-interval" title="Minimum time the daemon must have been stopped before Auto is allowed to start it again">Min stopped <input type="number" id="pg-min-stopped-input" min="0" step="5" value="${pg.min_stopped_min}"> min</span>
+    </div>
+    <div class="warmup-status">${priceLine}</div>
+    <div class="warmup-status">${lastActionLine}</div>
+    ${pg.mode === 'manual' ? `
+    <div class="warmup-row">
+      <button class="copy-cmd-btn" id="pg-start-btn" ${daemonRunning ? 'disabled' : ''}>Start now</button>
+      <button class="copy-cmd-btn" id="pg-stop-btn" ${!daemonRunning ? 'disabled' : ''}>Stop now</button>
+    </div>` : ''}
+    ${pg.log_tail && pg.log_tail.length ? `<div class="warmup-log">${[...pg.log_tail].reverse().join('<br>')}</div>` : ''}
+  `;
+
+  document.querySelectorAll('input[name="price-guard-mode"]').forEach(r => {
+    r.addEventListener('change', (e) => {
+      if (e.target.checked) postPriceGuardConfig({ mode: e.target.value });
+    });
+  });
+  document.getElementById('pg-margin-input').addEventListener('change', (e) => {
+    postPriceGuardConfig({ margin_pct: parseFloat(e.target.value) || 0 });
+  });
+  document.getElementById('pg-min-running-input').addEventListener('change', (e) => {
+    postPriceGuardConfig({ min_running_min: parseFloat(e.target.value) || 0 });
+  });
+  document.getElementById('pg-min-stopped-input').addEventListener('change', (e) => {
+    postPriceGuardConfig({ min_stopped_min: parseFloat(e.target.value) || 0 });
+  });
+  const startBtn = document.getElementById('pg-start-btn');
+  const stopBtn = document.getElementById('pg-stop-btn');
+  if (startBtn) startBtn.addEventListener('click', () => postPriceGuardAction('start'));
+  if (stopBtn) stopBtn.addEventListener('click', () => postPriceGuardAction('stop'));
+}
+
+async function postPriceGuardConfig(body) {
+  try {
+    await fetch('/api/price_guard/toggle', { method: 'POST', body: JSON.stringify(body) });
+    refreshPriceGuard();
+  } catch (e) { /* silent */ }
+}
+
+async function postPriceGuardAction(action) {
+  try {
+    await fetch('/api/price_guard/action', { method: 'POST', body: JSON.stringify({ action }) });
+    refreshPriceGuard();
+  } catch (e) { /* silent */ }
+}
+
+async function refreshPriceGuard() {
+  try {
+    const res = await fetch('/api/price_guard');
+    const pg = await res.json();
+    lastPriceGuard = pg;
+    renderPriceGuard(pg);
+  } catch (e) { /* silent */ }
+}
+
 function copyRemoveCmd(id, btn) {
   const cmd = `darkbloom models remove ${id}`;
   const orig = btn.textContent;
@@ -955,6 +1045,18 @@ function renderBanners(status, energy, doctor, daemonState) {
   } else if (status.last_error) {
     // Fallback for when daemon-state.json isn't available - no age info here.
     banners.push(`<div class="banner warning"><span class="dot"></span>${status.last_error}</div>`);
+  }
+  if (lastPriceGuard && lastPriceGuard.mode === 'auto' && !lastPriceGuard.daemon_running) {
+    // Auto mode having stopped the daemon looks identical to a real outage
+    // in every other banner/status on this page (same "Daemon: not running")
+    // - say why explicitly, same reasoning as the load-error/doctor banners
+    // above: don't make a visitor mistake an intentional, price-driven pause
+    // for something broken.
+    const live = lastPriceGuard.live;
+    const priceNote = live
+      ? ` (${live.price_sek_per_kwh.toFixed(3)} vs break-even ${live.break_even_sek_per_kwh.toFixed(3)} SEK/kWh)`
+      : '';
+    banners.push(`<div class="banner warning"><span class="dot"></span>Price Guard has paused serving — not profitable at the current electricity price${priceNote}. Re-evaluates every 5 min; will resume automatically once profitable again.</div>`);
   }
   if (!energy.power_monitoring_active) {
     banners.push(`<div class="banner warning"><span class="dot"></span>Power monitoring inactive — pm-start.sh (sudo) is not running, electricity cost is not being counted right now.</div>`);
@@ -1333,10 +1435,12 @@ refresh();
 refreshLivePower();
 refreshPowerFast();
 refreshWarmup();
+refreshPriceGuard();
 setInterval(refresh, REFRESH_MS);
 setInterval(refreshLivePower, LIVE_POWER_REFRESH_MS);
 setInterval(refreshPowerFast, POWER_FAST_REFRESH_MS);
 setInterval(refreshWarmup, 15000);
+setInterval(refreshPriceGuard, 15000);
 </script>
 </body>
 </html>

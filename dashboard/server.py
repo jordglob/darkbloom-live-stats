@@ -54,6 +54,9 @@ WARMUP_DEFAULT_INTERVAL_MIN = 20  # same cadence as SplittyDev/darkbloom-dashboa
 DAEMON_STATE_PATH = HOME / ".darkbloom" / "daemon-state.json"
 DOCTOR_POLL_INTERVAL_SEC = 300  # doctor makes a real network call + ~2 dozen checks - too heavy for the 10s cadence
 PROVIDER_PLIST = HOME / "Library" / "LaunchAgents" / "io.darkbloom.provider.plist"
+PRICE_GUARD_CONFIG = HOME / ".darkbloom" / "price-guard.json"
+PRICE_GUARD_LOG = HOME / ".darkbloom" / "price-guard.log"
+PRICE_GUARD_POLL_INTERVAL_SEC = 300  # matches the account/energy poll cadence elsewhere
 
 # Real account data pulled directly from Darkbloom's own API, using the same
 # device token the `darkbloom` CLI already stores locally after `darkbloom
@@ -572,6 +575,198 @@ def send_warmup_ping():
             log_warmup(f"ERROR: warmup against {model} failed: {e}")
             all_ok = False
     return all_ok
+
+
+def read_price_guard_config():
+    default = {
+        "mode": "manual",  # "manual" | "auto" - manual never calls start/stop on its own
+        "margin_pct": 15,
+        "min_running_min": 60,
+        "min_stopped_min": 30,
+        "last_action": None,
+        "last_action_at": None,
+        "last_reason": None,
+        "last_evaluated_at": None,
+        "last_price_sek_per_kwh": None,
+        "last_break_even_sek_per_kwh": None,
+    }
+    if not PRICE_GUARD_CONFIG.exists():
+        return default
+    try:
+        data = json.loads(PRICE_GUARD_CONFIG.read_text())
+        default.update(data)
+        return default
+    except Exception:
+        return default
+
+
+def write_price_guard_config(cfg):
+    PRICE_GUARD_CONFIG.write_text(json.dumps(cfg))
+
+
+def log_price_guard(line):
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with open(PRICE_GUARD_LOG, "a") as f:
+        f.write(f"[{ts}] {line}\n")
+
+
+def _get_provider_start_args():
+    """Reconstructs the args for a non-interactive `darkbloom start`,
+    read straight from the live plist's own ProgramArguments instead of
+    hardcoding them here - so this can never drift out of sync with however
+    the provider is actually configured (models, idle-timeout, port, etc.),
+    even if that's changed by hand later. Drops the binary path, the "start"
+    subcommand itself, and --foreground (that flag only makes sense when
+    launchd itself execs the binary directly - we want `start` to register
+    and load the service and return, the same as a first-time interactive
+    `darkbloom start --model ...` would)."""
+    try:
+        with open(PROVIDER_PLIST, "rb") as f:
+            plist = plistlib.load(f)
+        args = plist.get("ProgramArguments", [])
+        return [a for a in args[2:] if a != "--foreground"]
+    except Exception:
+        return []
+
+
+def _apply_price_guard_action(action, reason):
+    """Applies a real start/stop decision via darkbloom's own CLI (not raw
+    launchctl) so the coordinator sees a clean, intentional disconnect/
+    reconnect rather than something that could look like a crash to its
+    trust/continuity tracking. No-ops if the daemon is already in the target
+    state, so a repeated decision (or a manual action right before an auto
+    one) never sends a redundant command."""
+    daemon = get_darkbloom_status().get("daemon") or ""
+    running = daemon.startswith("running")
+    if action == "stop":
+        if not running:
+            return True
+        try:
+            r = subprocess.run([str(DARKBLOOM_BIN), "stop"], capture_output=True, text=True, timeout=30)
+            ok = r.returncode == 0
+        except Exception as e:
+            log_price_guard(f"ERROR: stop failed: {e}")
+            return False
+        log_price_guard(f"{'STOPPED' if ok else 'ERROR: stop returned nonzero'}: {reason}")
+        if ok:
+            notify_mac("Darkbloom Live & Stats", f"Stopped serving: {reason}")
+        return ok
+    elif action == "start":
+        if running:
+            return True
+        args = _get_provider_start_args()
+        if not args:
+            log_price_guard("ERROR: start skipped - could not read provider plist args")
+            return False
+        try:
+            r = subprocess.run([str(DARKBLOOM_BIN), "start"] + args, capture_output=True, text=True, timeout=60)
+            ok = r.returncode == 0
+        except Exception as e:
+            log_price_guard(f"ERROR: start failed: {e}")
+            return False
+        log_price_guard(f"{'STARTED' if ok else 'ERROR: start returned nonzero'}: {reason}")
+        if ok:
+            notify_mac("Darkbloom Live & Stats", f"Resumed serving: {reason}")
+        return ok
+    return False
+
+
+def _evaluate_price_guard(cfg):
+    """Pure decision function, no side effects - computes today's real
+    break-even price and returns an action recommendation (or None) plus the
+    numbers behind it, so the math can be sanity-checked independently of
+    whatever actually applies it (the loop below, or the manual buttons -
+    neither one hits this function's logic path). Compares the account's own
+    real 'active $/hr' rate (Nerdy Stats' 'Real pay rate') against what
+    running the Mac actually costs right now at the real current price -
+    both converted to the same SEK/kWh unit so they're directly comparable.
+    Returns None outright (no recommendation either way) whenever the real
+    inputs aren't available yet - never guesses a direction from partial
+    data."""
+    if not CSV_PATH.exists():
+        return None
+    try:
+        with open(CSV_PATH, newline="") as f:
+            rows = list(csv.DictReader(f))
+        if not rows:
+            return None
+        last = rows[-1]
+        price = float(last.get("elpris_sek_kwh", 0) or 0)
+        usd_sek = float(last.get("usd_sek", 0) or 0)
+        total_w = float(last.get("total_power_w", 0) or 0)
+    except Exception:
+        return None
+    if price <= 0 or usd_sek <= 0 or total_w <= 0:
+        return None
+
+    account = get_account_data()
+    rate_cmp = (account or {}).get("hourly_rate_comparison") or {}
+    active_rate = rate_cmp.get("active_rate_per_hour_usd")
+    if not active_rate or active_rate <= 0:
+        return None
+
+    total_kw = total_w / 1000
+    break_even_sek_per_kwh = (active_rate * usd_sek) / total_kw
+    margin = max(0, cfg.get("margin_pct", 15)) / 100
+
+    daemon_running = (get_darkbloom_status().get("daemon") or "").startswith("running")
+    now = time.time()
+    last_action = cfg.get("last_action")
+    last_action_at = cfg.get("last_action_at") or 0
+    min_running_sec = max(0, cfg.get("min_running_min", 60)) * 60
+    min_stopped_sec = max(0, cfg.get("min_stopped_min", 30)) * 60
+
+    action = None
+    reason = None
+    if price > break_even_sek_per_kwh * (1 + margin) and daemon_running:
+        if last_action == "stop" or (now - last_action_at) >= min_running_sec:
+            action = "stop"
+            reason = (f"price {price:.3f} SEK/kWh is above break-even {break_even_sek_per_kwh:.3f} "
+                       f"(+{cfg.get('margin_pct', 15)}% margin) for the measured ${active_rate:.4f}/hr active rate")
+        else:
+            reason = "would stop, but min_running_min not yet elapsed since last action"
+    elif price < break_even_sek_per_kwh * (1 - margin) and not daemon_running:
+        if last_action == "start" or (now - last_action_at) >= min_stopped_sec:
+            action = "start"
+            reason = (f"price {price:.3f} SEK/kWh is below break-even {break_even_sek_per_kwh:.3f} "
+                       f"(-{cfg.get('margin_pct', 15)}% margin) for the measured ${active_rate:.4f}/hr active rate")
+        else:
+            reason = "would start, but min_stopped_min not yet elapsed since last action"
+    elif daemon_running:
+        reason = f"running and profitable ({price:.3f} vs break-even {break_even_sek_per_kwh:.3f} SEK/kWh)"
+    else:
+        reason = f"stopped and still unprofitable to resume ({price:.3f} vs break-even {break_even_sek_per_kwh:.3f} SEK/kWh)"
+
+    return {
+        "price_sek_per_kwh": price,
+        "break_even_sek_per_kwh": break_even_sek_per_kwh,
+        "active_rate_per_hour_usd": active_rate,
+        "total_power_w": total_w,
+        "daemon_running": daemon_running,
+        "action": action,
+        "reason": reason,
+    }
+
+
+def price_guard_loop():
+    while True:
+        try:
+            cfg = read_price_guard_config()
+            decision = _evaluate_price_guard(cfg)
+            if decision:
+                cfg["last_evaluated_at"] = time.time()
+                cfg["last_price_sek_per_kwh"] = decision["price_sek_per_kwh"]
+                cfg["last_break_even_sek_per_kwh"] = decision["break_even_sek_per_kwh"]
+                if decision["action"] and cfg.get("mode") == "auto":
+                    ok = _apply_price_guard_action(decision["action"], decision["reason"])
+                    if ok:
+                        cfg["last_action"] = decision["action"]
+                        cfg["last_action_at"] = time.time()
+                        cfg["last_reason"] = decision["reason"]
+                write_price_guard_config(cfg)
+        except Exception as e:
+            log_price_guard(f"ERROR: evaluation loop failed: {e}")
+        time.sleep(PRICE_GUARD_POLL_INTERVAL_SEC)
 
 
 TRUST_LOG = HOME / ".darkbloom" / "trust-changes.log"
@@ -1451,6 +1646,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cfg["log_tail"] = WARMUP_LOG.read_text().splitlines()[-10:] if WARMUP_LOG.exists() else []
             cfg["configured_models"] = get_configured_models()
             self._send_json(cfg)
+        elif self.path == "/api/price_guard":
+            cfg = read_price_guard_config()
+            live = _evaluate_price_guard(cfg)
+            cfg["live"] = live
+            cfg["daemon_running"] = (get_darkbloom_status().get("daemon") or "").startswith("running")
+            cfg["log_tail"] = PRICE_GUARD_LOG.read_text().splitlines()[-10:] if PRICE_GUARD_LOG.exists() else []
+            self._send_json(cfg)
         elif self.path in ("/", "/index.html"):
             html_path = Path(__file__).parent / "index.html"
             body = html_path.read_bytes()
@@ -1478,6 +1680,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log_warmup(f"warmup target set to: {cfg['models'] or 'all configured models'}")
             write_warmup_config(cfg)
             self._send_json(cfg)
+        elif self.path == "/api/price_guard/toggle":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            cfg = read_price_guard_config()
+            if "mode" in body and body["mode"] in ("manual", "auto"):
+                cfg["mode"] = body["mode"]
+                log_price_guard(f"mode set to {cfg['mode']} via dashboard")
+            if "margin_pct" in body:
+                cfg["margin_pct"] = max(0, float(body["margin_pct"]))
+            if "min_running_min" in body:
+                cfg["min_running_min"] = max(0, float(body["min_running_min"]))
+            if "min_stopped_min" in body:
+                cfg["min_stopped_min"] = max(0, float(body["min_stopped_min"]))
+            write_price_guard_config(cfg)
+            self._send_json(cfg)
+        elif self.path == "/api/price_guard/action":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            action = body.get("action")
+            if action not in ("start", "stop"):
+                self.send_response(400)
+                self.end_headers()
+                return
+            cfg = read_price_guard_config()
+            reason = f"manual {action} via dashboard"
+            ok = _apply_price_guard_action(action, reason)
+            if ok:
+                cfg["last_action"] = action
+                cfg["last_action_at"] = time.time()
+                cfg["last_reason"] = reason
+                write_price_guard_config(cfg)
+            self._send_json({"ok": ok})
         elif self.path == "/api/elpris_zone":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -1518,6 +1752,7 @@ if __name__ == "__main__":
     threading.Thread(target=warmup_loop, daemon=True).start()
     threading.Thread(target=trust_monitor_loop, daemon=True).start()
     threading.Thread(target=inference_duration_tracker_loop, daemon=True).start()
+    threading.Thread(target=price_guard_loop, daemon=True).start()
     with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:
         print(f"Darkbloom Live & Stats running at http://127.0.0.1:{PORT}")
         httpd.serve_forever()

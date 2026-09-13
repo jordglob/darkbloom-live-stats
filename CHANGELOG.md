@@ -1,5 +1,13 @@
 # Changelog
 
+## v11
+
+**New: Price Guard** — stops serving when electricity price makes it unprofitable, resumes when it isn't. Compares today's real electricity price against this account's own measured "$/hr actively serving" rate (Nerdy Stats), converted to a break-even SEK/kWh price using the current real power draw. Two modes:
+- **Manual** (default): shows the live numbers and a recommendation, plus "Start now"/"Stop now" buttons that call the real `darkbloom start`/`stop` CLI directly - nothing happens automatically.
+- **Auto**: a background loop (5 min cadence) applies the recommendation itself once it's been true for long enough.
+
+Guard rails against flapping: an asymmetric margin (default 15%) so it only stops when price is meaningfully above break-even and only resumes when meaningfully below, plus minimum running/stopped durations (default 60/30 min) enforced regardless of mode - a manual action updates the same timer, so switching to Auto right after a manual start can't immediately undo it. `darkbloom start`'s args (models, idle-timeout, port, etc.) are read back from the live launchd plist each time rather than hardcoded, so this can never drift from however the provider is actually configured. Uses the real `darkbloom start`/`stop` CLI (not raw `launchctl`) so the coordinator sees an intentional disconnect, not something that could look like a crash. A dashboard banner explains it clearly if Auto has paused serving, so it doesn't read as an outage.
+
 ## v10
 
 **Fixed: "Utilization (last hour)" could show negative requests/tokens per hour.** Same root cause as v9's revenue bug, different code path: `get_utilization()` computed throughput as (last row - first row) over a lookback window, using the daemon's own `requests_served`/`tokens` counters directly. Those counters reset to 0 on every daemon restart, so a restart landing inside the lookback window produced a negative delta (observed live: -4500.8 req/hr, -2,025,516 tok/hr, right after restarting the daemon to verify the v9 fix). Now sums consecutive deltas across the window instead of a single first-to-last subtraction, treating any decrease as a reset (the whole new value counts as newly earned, same logic as the bash-side fix).
