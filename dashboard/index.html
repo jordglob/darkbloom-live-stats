@@ -185,6 +185,7 @@
   .gauge-detail { font-size: 10px; color: var(--text-muted); margin-top: 1px; min-height: 12px; }
   .gauge-scale { font-size: 10px; fill: var(--text-muted); }
 
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table.rotation-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   table.rotation-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border); cursor: default; }
   table.rotation-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
@@ -819,6 +820,7 @@ function renderDisk(disk) {
   const unused = disk.models.filter(m => !m.active);
   el.innerHTML = `
     ${unused.length ? `<div class="rotation-summary">${unused.length} model${unused.length === 1 ? '' : 's'} not currently in use — ${disk.unused_total_gb} GB reclaimable</div>` : `<div class="rotation-summary">Only the active model is downloaded — nothing to reclaim.</div>`}
+    <div class="table-scroll">
     <table class="rotation-table">
       <thead><tr><th>Model</th><th>Size</th><th>Status</th><th></th></tr></thead>
       <tbody>
@@ -832,6 +834,7 @@ function renderDisk(disk) {
         `).join('')}
       </tbody>
     </table>
+    </div>
   `;
 }
 
@@ -872,10 +875,12 @@ function renderAccount(account) {
       Available: <strong>$${account.balance_usd}</strong> · Withdrawable: <strong>$${account.withdrawable_balance_usd}</strong> · Lifetime: <strong>$${account.lifetime_usd}</strong>
       · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here${account.sample_window_hours != null ? ` <span title="The earnings API only ever returns the most recent batch of entries, not a fixed time range - on a busy day (real traffic + spam + base_reward all counted) that can be just a few hours. The stats below only reflect this window, not a stable long-term average.">(covers ~${account.sample_window_hours < 1 ? '<1' : account.sample_window_hours.toFixed(1)}h: ${fmtTime(account.sample_window_start_at)} → ${fmtTime(account.sample_window_end_at)})</span>` : ''}
     </div>
+    <div class="table-scroll">
     <table class="rotation-table">
       <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.048/M-token guess would have estimated for these same tokens - that rate is recalibrated periodically from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means our guess ran low.">Darkbloom gap</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
+    </div>
     <div class="rotation-summary" style="margin-top:10px">
       Totals — real payout: <strong>$${(cs.total_real_usd ?? 0).toFixed(6)}</strong> ·
       local estimate: <strong>$${(cs.total_local_estimate_usd ?? 0).toFixed(6)}</strong> ·
