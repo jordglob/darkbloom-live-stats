@@ -1,5 +1,13 @@
 # Changelog
 
+## v12
+
+**New: idle chat window.** A chat panel at the bottom of the dashboard talks directly to whichever model is currently loaded on this Mac - only enabled when the provider is running and not currently serving real paid traffic (`daemon-state.json`'s `inference_active` flag, the same signal the "running, idle" badge already uses; fails closed if that state can't be read at all). Proxies straight to the local endpoint the warmup pinger already uses, no new auth surface. Nothing is persisted - the conversation lives in the browser tab and resets on reload.
+
+Also fixes a real readability bug found while building this: gpt-oss-20b's local endpoint doesn't parse its own "harmony" response format, so every reply came back with raw `<|channel|>analysis<|message|>...` internal reasoning text glued in front of the actual answer. Now split apart server-side - the clean answer shows by default, with an optional "Show reasoning" toggle to see the model's internal reasoning pass if you want it. Other models (e.g. gemma) don't use this format and pass through unaffected.
+
+And a second fix caught immediately after shipping: the chat panel rebuilds its whole `innerHTML` on every periodic refresh (~10s), which was yanking keyboard focus and any in-progress typed text out of the input field mid-sentence. Now saves and restores the input's value, focus, and cursor position across every rebuild.
+
 ## v11
 
 **New: Price Guard** — stops serving when electricity price makes it unprofitable, resumes when it isn't. Compares today's real electricity price against this account's own measured "$/hr actively serving" rate (Nerdy Stats), converted to a break-even SEK/kWh price using the current real power draw. Two modes:

@@ -374,6 +374,11 @@
     </p>
   </div>
 
+  <div class="panel">
+    <h2 title="Direct chat with whichever model is currently loaded on this Mac. Only enabled when the provider is running and NOT currently serving a real paid request - this shares the exact same model/hardware as real traffic, so it steps aside the instant a real job needs it, same as running Ollama locally would.">Chat (idle only)</h2>
+    <div id="chat"></div>
+  </div>
+
   <footer id="footnote"></footer>
 
 <script>
@@ -400,6 +405,13 @@ let lastRam = null;
 let lastOllama = null;
 let lastFanTemp = null;
 let lastPriceGuard = null;
+let lastConfiguredModels = [];
+let chatMessages = [];
+let chatModel = null;
+let chatAvailable = false;
+let chatUnavailableReason = '';
+let chatBusy = false;
+let chatShowReasoning = false;
 const GAUGE_R = 80;
 const GAUGE_ARC_LEN = Math.PI * GAUGE_R; // half-circle arc length
 
@@ -697,7 +709,10 @@ async function postWarmupConfig(body) {
 async function refreshWarmup() {
   try {
     const res = await fetch('/api/warmup');
-    renderWarmup(await res.json());
+    const warmup = await res.json();
+    renderWarmup(warmup);
+    lastConfiguredModels = warmup.configured_models || [];
+    renderChat();
   } catch (e) { /* silent */ }
 }
 
@@ -783,6 +798,123 @@ async function refreshPriceGuard() {
     lastPriceGuard = pg;
     renderPriceGuard(pg);
   } catch (e) { /* silent */ }
+}
+
+function updateChatAvailability(status, daemonState) {
+  const daemonRunning = (status.daemon || '').startsWith('running');
+  if (!daemonRunning) {
+    chatAvailable = false;
+    chatUnavailableReason = 'the provider daemon is not running right now.';
+  } else if (!daemonState || daemonState.inference_active !== false) {
+    chatAvailable = false;
+    chatUnavailableReason = 'busy serving real paid traffic right now.';
+  } else {
+    chatAvailable = true;
+    chatUnavailableReason = '';
+  }
+  renderChat();
+}
+
+function escapeHtmlChat(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML.replace(/\n/g, '<br>');
+}
+
+function renderChat() {
+  const el = document.getElementById('chat');
+  if (!el) return;
+  // This whole panel gets rebuilt from scratch on every periodic refresh
+  // (availability/messages can change at any time), which would otherwise
+  // yank focus and any in-progress typed text out of the textarea every
+  // ~10s - save and restore across the rebuild so typing isn't interrupted.
+  const prevInput = document.getElementById('chat-input');
+  const hadFocus = document.activeElement === prevInput;
+  const prevValue = prevInput ? prevInput.value : '';
+  const prevSelStart = prevInput ? prevInput.selectionStart : null;
+  const prevSelEnd = prevInput ? prevInput.selectionEnd : null;
+
+  const models = lastConfiguredModels || [];
+  if (chatModel && !models.includes(chatModel)) chatModel = null;
+  if (!chatModel && models.length) chatModel = models[0];
+
+  const historyHtml = chatMessages.map(m => {
+    const reasoningHtml = (chatShowReasoning && m.reasoning)
+      ? `<div style="color:var(--text-muted);font-style:italic;margin:2px 0 4px 0">${escapeHtmlChat(m.reasoning)}</div>`
+      : '';
+    return `<div style="margin-bottom:6px">${reasoningHtml}<strong style="color:${m.role === 'user' ? 'var(--text-primary)' : 'var(--status-good)'}">${m.role === 'user' ? 'You' : 'Model'}:</strong> ${escapeHtmlChat(m.content)}</div>`;
+  }).join('');
+
+  const inputsDisabled = !chatAvailable || chatBusy || !chatModel;
+
+  el.innerHTML = `
+    <div class="warmup-row">
+      <span class="warmup-interval">Model:
+        <select id="chat-model-select" style="width:auto;padding:3px 6px" ${models.length <= 1 ? 'disabled' : ''}>
+          ${models.map(m => `<option value="${m}" ${m === chatModel ? 'selected' : ''}>${m}</option>`).join('')}
+        </select>
+      </span>
+      <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer" title="Some models (e.g. gpt-oss) expose an internal reasoning/analysis pass before their real answer - off by default since it's usually noise, but here if you want to see it">
+        <input type="checkbox" id="chat-reasoning-toggle" ${chatShowReasoning ? 'checked' : ''}> Show reasoning
+      </label>
+      <span class="warmup-status" style="margin:0">${chatAvailable ? '<span style="color:var(--status-good)">idle - available</span>' : `<span style="color:var(--status-warning)">unavailable - ${chatUnavailableReason}</span>`}</span>
+    </div>
+    <div id="chat-history" class="warmup-log" style="max-height:240px;">${historyHtml || '<span style="color:var(--text-muted)">No messages yet - this resets on page reload, nothing is saved.</span>'}</div>
+    <div class="warmup-row" style="margin-top:8px">
+      <textarea id="chat-input" rows="2" style="flex:1;min-width:200px;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);font-family:inherit" placeholder="Ask the loaded model something... (Enter to send, Shift+Enter for newline)" ${inputsDisabled ? 'disabled' : ''}></textarea>
+      <button class="copy-cmd-btn" id="chat-send-btn" ${inputsDisabled ? 'disabled' : ''}>${chatBusy ? 'Thinking…' : 'Send'}</button>
+      <button class="copy-cmd-btn" id="chat-clear-btn" ${chatMessages.length === 0 ? 'disabled' : ''}>Clear</button>
+    </div>
+  `;
+
+  const modelSelect = document.getElementById('chat-model-select');
+  if (modelSelect) modelSelect.addEventListener('change', (e) => { chatModel = e.target.value; });
+  const reasoningToggle = document.getElementById('chat-reasoning-toggle');
+  if (reasoningToggle) reasoningToggle.addEventListener('change', (e) => { chatShowReasoning = e.target.checked; renderChat(); });
+  const sendBtn = document.getElementById('chat-send-btn');
+  if (sendBtn) sendBtn.addEventListener('click', sendChatMessage);
+  const clearBtn = document.getElementById('chat-clear-btn');
+  if (clearBtn) clearBtn.addEventListener('click', () => { chatMessages = []; renderChat(); });
+  const chatInput = document.getElementById('chat-input');
+  if (chatInput) {
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); }
+    });
+    chatInput.value = prevValue;
+    if (hadFocus) {
+      chatInput.focus();
+      if (prevSelStart != null) chatInput.setSelectionRange(prevSelStart, prevSelEnd);
+    }
+  }
+
+  const hist = document.getElementById('chat-history');
+  if (hist) hist.scrollTop = hist.scrollHeight;
+}
+
+async function sendChatMessage() {
+  const input = document.getElementById('chat-input');
+  const text = input && input.value.trim();
+  if (!text || !chatModel || chatBusy || !chatAvailable) return;
+  chatMessages.push({ role: 'user', content: text });
+  input.value = '';
+  chatBusy = true;
+  renderChat();
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify({ model: chatModel, messages: chatMessages.map(m => ({ role: m.role, content: m.content })) }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      chatMessages.push({ role: 'assistant', content: `[${data.message || data.error}]` });
+    } else {
+      chatMessages.push({ role: 'assistant', content: data.content || '(empty response)', reasoning: data.reasoning || null });
+    }
+  } catch (e) {
+    chatMessages.push({ role: 'assistant', content: '[request failed - is the dashboard server running?]' });
+  }
+  chatBusy = false;
+  renderChat();
 }
 
 function copyRemoveCmd(id, btn) {
@@ -1383,6 +1515,7 @@ async function refresh() {
 
     renderCards(status, energy, account, daemon_state);
     renderBanners(status, energy, doctor, daemon_state);
+    updateChatAvailability(status, daemon_state);
     renderAccount(account);
     renderDisk(disk);
     renderNerdyStats(daemon_state, account, doctor, inference_durations);
@@ -1436,6 +1569,7 @@ refreshLivePower();
 refreshPowerFast();
 refreshWarmup();
 refreshPriceGuard();
+renderChat();
 setInterval(refresh, REFRESH_MS);
 setInterval(refreshLivePower, LIVE_POWER_REFRESH_MS);
 setInterval(refreshPowerFast, POWER_FAST_REFRESH_MS);

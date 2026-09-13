@@ -769,6 +769,89 @@ def price_guard_loop():
         time.sleep(PRICE_GUARD_POLL_INTERVAL_SEC)
 
 
+CHAT_MAX_TOKENS = 2048
+CHAT_FINAL_CHANNEL_RE = re.compile(r"<\|channel\|>final<\|message\|>(.*?)(?:<\|(?:end|return)\|>|$)", re.DOTALL)
+CHAT_ANALYSIS_CHANNEL_RE = re.compile(r"<\|channel\|>analysis<\|message\|>(.*?)(?:<\|end\|>|<\|start\|>|$)", re.DOTALL)
+
+
+def _split_chat_content(content):
+    """gpt-oss-20b's local endpoint doesn't parse its own 'harmony' response
+    format - it returns the raw generated text, internal <|channel|>analysis
+    reasoning included, with the actual reply buried after a
+    <|channel|>final<|message|> marker. Other models (e.g. gemma) don't use
+    this format at all and pass through untouched (reasoning stays None).
+    Returns (final_text, reasoning_or_none) so the frontend can offer a
+    "show reasoning" toggle instead of the backend deciding for it. If
+    generation got cut off by max_tokens before ever reaching the final
+    channel, final_text says so plainly rather than showing a page of raw
+    internal reasoning as if it were the answer - the cut-off reasoning
+    itself is still returned so the toggle can reveal it."""
+    final_m = CHAT_FINAL_CHANNEL_RE.search(content)
+    analysis_m = CHAT_ANALYSIS_CHANNEL_RE.search(content)
+    reasoning = analysis_m.group(1).strip() if analysis_m else None
+    if final_m:
+        return final_m.group(1).strip(), reasoning
+    if reasoning is not None:
+        return "[the model's reasoning ran long and got cut off before its final answer - try a shorter question or try again]", reasoning
+    return content.strip(), None
+
+
+def _proxy_local_chat(model, messages):
+    """Proxies a chat turn straight to this Mac's own local endpoint (the
+    same one warmup pings already use) - only when the daemon is running AND
+    not currently mid-request on real paid traffic (get_daemon_state()'s
+    inference_active flag, the same signal the "running, idle" badge already
+    uses). Fails closed: if that state can't be read at all, treated as
+    unavailable rather than risking a chat request competing with real work
+    we can't see. A 429 from the local endpoint means a real job started in
+    the gap between this check and the actual request - same benign meaning
+    already established for warmup pings, surfaced here as a clear retry
+    message instead of a generic error."""
+    if not model or not messages:
+        return {"error": "bad_request", "message": "model and messages are required"}
+    configured = get_configured_models()
+    if configured and model not in configured:
+        return {"error": "bad_model", "message": f"{model} is not a configured model"}
+    daemon = get_darkbloom_status().get("daemon") or ""
+    if not daemon.startswith("running"):
+        return {"error": "not_running", "message": "The provider daemon is not running right now."}
+    state = get_daemon_state()
+    if state is None or state.get("inference_active") is not False:
+        return {"error": "busy", "message": "Busy serving real paid traffic right now - try again in a moment."}
+    if not LOCAL_JSON.exists():
+        return {"error": "no_local_endpoint", "message": "local.json missing - provider not started with --local-endpoint"}
+    try:
+        conf = json.loads(LOCAL_JSON.read_text())
+    except Exception as e:
+        return {"error": "config_error", "message": str(e)}
+    body = json.dumps({
+        "model": model,
+        "messages": messages,
+        "max_tokens": CHAT_MAX_TOKENS,
+    }).encode()
+    req = urllib.request.Request(
+        conf["base_url"].rstrip("/") + "/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {conf['api_key']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+        content = data["choices"][0]["message"]["content"]
+        final_text, reasoning = _split_chat_content(content)
+        return {"content": final_text, "reasoning": reasoning}
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return {"error": "busy", "message": "Just got busy with real traffic - try again in a moment."}
+        return {"error": "http_error", "message": f"HTTP {e.code} {e.reason}"}
+    except Exception as e:
+        return {"error": "request_failed", "message": str(e)}
+
+
 TRUST_LOG = HOME / ".darkbloom" / "trust-changes.log"
 
 
@@ -1712,6 +1795,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cfg["last_reason"] = reason
                 write_price_guard_config(cfg)
             self._send_json({"ok": ok})
+        elif self.path == "/api/chat":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            result = _proxy_local_chat(body.get("model"), body.get("messages") or [])
+            self._send_json(result)
         elif self.path == "/api/elpris_zone":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
