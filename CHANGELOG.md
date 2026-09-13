@@ -1,5 +1,9 @@
 # Changelog
 
+## v9
+
+**Fixed: "Estimated revenue" wasn't actually cumulative.** Found via another fresh-eyes pass over the dashboard: the green revenue line on the Cumulative Electricity Cost vs. Estimated Revenue chart kept sawtoothing back to near-$0 instead of climbing like the cost line next to it. Root cause: it was computed as `darkbloom status`'s own `tokens` counter × rate, logged directly every poll - and that counter resets to 0 every time the darkbloom daemon itself restarts, unrelated to this dashboard's own uptime. Electricity cost, by contrast, was already a real persisted running total. Now token counts are accumulated into a real lifetime total the same way the cost side already was (detects a daemon-restart reset and adds the new value instead of losing the running total), so the two lines are finally comparing the same kind of number. This also means "Net (Estimated) Over Time" was understating losses/overstating them incorrectly after every daemon restart - now corrected going forward (pre-fix history in the chart is not retroactively corrected, only new data).
+
 ## v8
 
 **Warning banners now lead with reassurance, not alarm.** The load-error and `darkbloom doctor` banners both buried their "actually fine, N requests already succeeded" context at the end of a paragraph of alarming technical text (e.g. "insufficient memory", "doesn't fit in RAM"). A first-time visitor had to read past the scary part to learn nothing was actually broken. Now that context leads each banner instead of trailing it.

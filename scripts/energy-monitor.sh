@@ -52,6 +52,8 @@ ELPRIS_TS=0
 ELPRIS_VAL=0
 USDSEK_TS=0
 USDSEK_VAL=10
+LAST_TOKENS=0
+CUM_TOKENS=0
 
 if [ -f "$STATE" ]; then
   # shellcheck disable=SC1090
@@ -65,10 +67,14 @@ fi
 : "${ELPRIS_VAL:=0}"
 : "${USDSEK_TS:=0}"
 : "${USDSEK_VAL:=10}"
+: "${LAST_TOKENS:=0}"
+: "${CUM_TOKENS:=0}"
 [ -z "$CUM_WH" ] && CUM_WH=0
 [ -z "$CUM_COST" ] && CUM_COST=0
 [ -z "$ELPRIS_VAL" ] && ELPRIS_VAL=0
 [ -z "$USDSEK_VAL" ] && USDSEK_VAL=10
+[ -z "$LAST_TOKENS" ] && LAST_TOKENS=0
+[ -z "$CUM_TOKENS" ] && CUM_TOKENS=0
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 # bc wrapper: falls back to 0 if bc ever returns empty, so a single glitch
@@ -165,7 +171,24 @@ while true; do
   REQS=${REQS:-0}
   TOKENS=${TOKENS:-0}
 
-  EST_REV_USD=$(calc "scale=6; $TOKENS * $BLENDED_USD_PER_TOKEN")
+  # $TOKENS is the darkbloom daemon's own lifetime counter, which resets to 0
+  # every time the daemon itself restarts (independent of this script's own
+  # uptime) - multiplying it directly gave a revenue figure that silently
+  # dropped back near $0 on every daemon restart while CUM_COST above kept
+  # climbing, making "cumulative" cost vs. revenue compare two different time
+  # windows. CUM_TOKENS tracks the real lifetime total the same way CUM_WH
+  # does: add the delta each poll, and if TOKENS has gone backwards (daemon
+  # restarted since the last poll) treat the whole new value as newly earned
+  # rather than losing it.
+  if [ "$TOKENS" -lt "$LAST_TOKENS" ]; then
+    TOKEN_DELTA=$TOKENS
+  else
+    TOKEN_DELTA=$(calc "$TOKENS - $LAST_TOKENS")
+  fi
+  CUM_TOKENS=$(calc "scale=6; $CUM_TOKENS + $TOKEN_DELTA")
+  LAST_TOKENS=$TOKENS
+
+  EST_REV_USD=$(calc "scale=6; $CUM_TOKENS * $BLENDED_USD_PER_TOKEN")
   EST_REV_SEK=$(calc "scale=6; $EST_REV_USD * $USDSEK_VAL")
   NET_SEK=$(calc "scale=6; $EST_REV_SEK - $CUM_COST")
 
@@ -179,6 +202,8 @@ while true; do
     echo "ELPRIS_VAL=$ELPRIS_VAL"
     echo "USDSEK_TS=$USDSEK_TS"
     echo "USDSEK_VAL=$USDSEK_VAL"
+    echo "LAST_TOKENS=$LAST_TOKENS"
+    echo "CUM_TOKENS=$CUM_TOKENS"
   } > "$STATE"
 
   log "SoC=${AVG_W}W (+baseline ${BASELINE_W}W = ${TOTAL_W}W)  cumulative energy=${CUM_WH}Wh  electricity cost=${CUM_COST}  ~revenue=${EST_REV_SEK} SEK  net=${NET_SEK} SEK"
