@@ -1,5 +1,9 @@
 # Changelog
 
+## v17
+
+**Tokens shown as text.** Token counts now come with a rough "how much text is that" next to them - the Requests card ("254,557 tokens ≈ 191k words · 382 pages · 2.1 novels"), the per-model Tokens column in the Account table, the average prompt/reply lengths in Nerdy Stats, and the Utilization gauge's tokens/h (≈ pages/h). Rule of thumb ≈ 0.75 words per token, 500 words per page, 90,000 words per novel; the tooltip says so and that code/non-English text runs higher. Only counts exist anywhere - the actual prompt and reply text is never stored by Darkbloom or this Mac - so this is the closest the dashboard can get to "what did my Mac actually write".
+
 ## v16
 
 **"Expected vs. actual payout" meter is back**, as its own two-bar tile in the Darkbloom Account panel (it had been folded into the hidden estimate columns in v14). Expected = tokens × this dashboard's own calibrated flat rate; Actual = what Darkbloom's ledger paid for the same jobs; a one-line verdict says whether the estimate is within 10%, ran high, or ran low. The tooltip spells out that it measures the accuracy of our guess, not a fee (Darkbloom advertises 0%), that base reward is excluded on both sides, and that a drifting gap means the rate needs recalibrating. Per-model detail stays behind the "Show estimate columns" checkbox.

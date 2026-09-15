@@ -253,7 +253,7 @@
         <h4>Top summary cards</h4>
         <p><strong>Network trust</strong> — whether Darkbloom's coordinator (the server that hands out work) trusts this Mac enough to send it paid jobs. "Trusted — receiving jobs" (raw value <code>hardware</code>) is what you want. "Online, not trusted yet" (raw <code>self_signed</code>) means connected but receiving nothing - on this network it's usually a temporary flicker on Darkbloom's side that clears in minutes, and you get a macOS notification either way. The raw coordinator string is shown under the label for anyone debugging with Darkbloom support.</p>
         <p><strong>Provider</strong> — the `darkbloom` background program that actually serves requests. "Serving a request now" is read from its own live state file (pulsing dot). "Running, waiting for jobs" is the normal state most of the time - you still earn the base reward while trusted and idle.</p>
-        <p><strong>Requests</strong> — requests served and tokens processed since the provider last (re)started. This resets on every restart, so it's not a lifetime total; lifetime numbers are in the Darkbloom Account panel.</p>
+        <p><strong>Requests</strong> — requests served and tokens processed since the provider last (re)started. This resets on every restart, so it's not a lifetime total; lifetime numbers are in the Darkbloom Account panel. Token counts are also shown as roughly how much text that is (≈ 0.75 words per token, 500 words per page, 90,000 words per novel) - a scale aid, not accounting. Note: only the counts exist; neither Darkbloom's API nor this Mac keeps the actual prompt or reply text.</p>
         <p><strong>Warm models</strong> — how many models are currently loaded in memory (instant response) vs. how many are downloaded to disk in total.</p>
         <p><strong>Accumulated electricity cost</strong> and <strong>Net</strong> — see the calculation explainer under the cost/revenue chart further down for the exact formula.</p>
       </div>
@@ -549,7 +549,9 @@ function updateGauges(data) {
     if (g.source === 'utilization' && detailEl) {
       const reqH = utilization.requests_per_hour;
       const tokH = utilization.tokens_per_hour;
-      detailEl.textContent = (reqH != null) ? `${reqH} requests/h · ${(tokH ?? 0).toLocaleString('en-US')} tokens/h` : '';
+      const pagesH = (tokH ?? 0) * 0.75 / 500;
+      detailEl.textContent = (reqH != null) ? `${reqH} requests/h · ${fmtCompact(tokH ?? 0)} tokens/h${pagesH >= 1 ? ` (≈ ${Math.round(pagesH)} pages/h)` : ''}` : '';
+      detailEl.title = TOKENS_AS_TEXT_TIP;
     }
   });
 }
@@ -613,6 +615,24 @@ function fmtUsd(v) {
 }
 function fmtW(v) { return (v ?? 0).toLocaleString('en-US', {maximumFractionDigits: 1}) + ' W'; }
 function fmtNum(v) { return (v ?? 0).toLocaleString('en-US'); }
+// Tokens are abstract; words/pages/books are not. Rule of thumb for
+// English-ish text: ~0.75 words per token, ~500 words per page, ~90k
+// words per novel. Rough by design - it's for scale, not accounting.
+const TOKENS_AS_TEXT_TIP = 'Rough scale only: about 0.75 words per token, 500 words per page, 90,000 words per novel. Code, non-English text and long numbers use more tokens per word.';
+function fmtCompact(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k';
+  return Math.round(n).toString();
+}
+function tokensAsText(tokens) {
+  if (!tokens || tokens <= 0) return '';
+  const words = tokens * 0.75;
+  const pages = words / 500;
+  if (pages < 1) return `≈ ${fmtNum(Math.round(words))} words`;
+  if (pages < 300) return `≈ ${fmtCompact(words)} words · ${fmtNum(Math.round(pages))} page${Math.round(pages) === 1 ? '' : 's'}`;
+  const novels = words / 90000;
+  return `≈ ${fmtCompact(words)} words · ${fmtCompact(pages)} pages · ${novels < 10 ? novels.toFixed(1) : Math.round(novels)} novel${novels >= 1.95 ? 's' : ''}`;
+}
 function fmtUsdPerKwh(v) { return v == null ? '–' : fmtUsd(v) + '/kWh'; }
 function fmtTime(iso) {
   const d = new Date(iso);
@@ -666,7 +686,8 @@ function renderCards(status, energy, account, daemonState) {
       sub: uptime ? `up ${uptime}` : '',
       tip: status.daemon ? ` Raw: ${status.daemon}.` : ''
     },
-    { label: 'Requests', value: fmtNum(status.requests_served), sub: fmtNum(status.tokens) + ' tokens since restart' },
+    { label: 'Requests', value: fmtNum(status.requests_served),
+      sub: `${fmtNum(status.tokens)} tokens since restart${tokensAsText(status.tokens) ? `<br><span title="${TOKENS_AS_TEXT_TIP}">${tokensAsText(status.tokens)}</span>` : ''}` },
   ];
   const warmList = (status.warm_models || '').split(',').map(s => s.trim()).filter(Boolean);
   cards.push({
@@ -1099,7 +1120,7 @@ function renderAccount(account) {
       <tr>
         <td>${isFloor ? '<span title="Not a model: the base reward Darkbloom pays just for being online and hardware-trusted, per time slot. Usually the biggest line here.">base reward (being online)</span>' : model}</td>
         <td>${fmtNum(d.jobs)}</td>
-        <td>${isFloor ? '–' : fmtNum(d.prompt_tokens + d.completion_tokens)}</td>
+        <td title="${isFloor ? '' : `${tokensAsText(d.prompt_tokens + d.completion_tokens)} (${fmtNum(d.prompt_tokens)} in prompts, ${fmtNum(d.completion_tokens)} in replies). ${TOKENS_AS_TEXT_TIP}`}">${isFloor ? '–' : fmtNum(d.prompt_tokens + d.completion_tokens)}${isFloor ? '' : `<br><span style="font-size:11px;color:var(--text-muted)">${tokensAsText(d.prompt_tokens + d.completion_tokens)}</span>`}</td>
         <td>$${d.amount_usd.toFixed(6)}</td>
         ${showEst ? `<td>${isFloor ? '–' : '$' + d.local_estimate_usd.toFixed(6)}</td><td class="${cutClass}">${isFloor ? '–' : fmtPct(d.cut_pct)}</td>` : ''}
         <td>${d.real_usd_per_m_tokens == null ? '–' : '$' + d.real_usd_per_m_tokens.toFixed(3)}</td>
@@ -1156,7 +1177,7 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
 
   const ns = account && account.connected ? account.nerdy_stats : null;
   const tokenLine = ns && ns.real_jobs
-    ? `<span title="From the ${fmtNum(ns.real_jobs)} real jobs in the recent ledger window; the ${fmtNum(ns.base_reward_jobs)} base-reward entries are excluded since they carry no tokens. Only token counts exist anywhere - neither Darkbloom's API nor this Mac keeps the actual prompt or response text.">Avg prompt: <strong>${fmtNum(Math.round(ns.avg_prompt_tokens))} tokens</strong> · Avg reply: <strong>${fmtNum(Math.round(ns.avg_completion_tokens))} tokens</strong> · ${fmtNum(ns.real_jobs)} jobs</span>`
+    ? `<span title="From the ${fmtNum(ns.real_jobs)} real jobs in the recent ledger window; the ${fmtNum(ns.base_reward_jobs)} base-reward entries are excluded since they carry no tokens. Only token counts exist anywhere - neither Darkbloom's API nor this Mac keeps the actual prompt or response text.">Avg prompt: <strong>${fmtNum(Math.round(ns.avg_prompt_tokens))} tokens</strong> (${tokensAsText(ns.avg_prompt_tokens)}) · Avg reply: <strong>${fmtNum(Math.round(ns.avg_completion_tokens))} tokens</strong> (${tokensAsText(ns.avg_completion_tokens)}) · ${fmtNum(ns.real_jobs)} jobs</span>`
     : 'Not enough real (non-base-reward) job data yet to compute token averages.';
   const spamLine = (ns && ns.spam_jobs > 0)
     ? `<span title="Heuristic: exact 25-prompt-token jobs, this account's own observed signature - not an official Darkbloom spam flag. Matches a network-wide Gemma spam flood Darkbloom's own team confirmed and began rate-limiting on 2026-09-10 (#providers: &quot;a spammer on Gemma side - we have rate limited them&quot;); other providers independently reported the identical pattern the same week.">⚠ ${fmtNum(ns.spam_jobs)} of those (${(ns.spam_jobs / ns.real_jobs * 100).toFixed(0)}%) look like spam</span> - excluding them: avg prompt <strong>${fmtNum(Math.round(ns.avg_prompt_tokens_excl_spam))} tokens</strong>, avg completion <strong>${fmtNum(Math.round(ns.avg_completion_tokens_excl_spam))} tokens</strong>`
