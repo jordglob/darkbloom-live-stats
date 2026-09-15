@@ -1,5 +1,9 @@
 # Changelog
 
+## v18
+
+**Live serving view in the chat box.** When the provider is busy with paid traffic (so the chat is locked), the same box now shows a simulated token stream - blocks appearing at the provider's real, measured rate, with "~N tokens/s", a "reading the prompt…" state when the counter isn't moving mid-request, and a running "tokens since this busy stretch began (≈ words/pages)" line. What's real is the rhythm: a new 1-second `/api/serving_pulse` poll reads the daemon's own `tokens_generated` counter. What isn't is the text - the actual words are the customer's private conversation and are never visible to a provider, by design (checked: no log level, config option or local endpoint exposes them; paid traffic arrives over the coordinator websocket straight into the daemon's memory). The header and tooltip say so plainly. The 1s pulse also makes the busy/idle switch on the chat box near-instant instead of up to 10s late. Chat messages are kept across busy stretches.
+
 ## v17
 
 **Tokens shown as text.** Token counts now come with a rough "how much text is that" next to them - the Requests card ("254,557 tokens ≈ 191k words · 382 pages · 2.1 novels"), the per-model Tokens column in the Account table, the average prompt/reply lengths in Nerdy Stats, and the Utilization gauge's tokens/h (≈ pages/h). Rule of thumb ≈ 0.75 words per token, 500 words per page, 90,000 words per novel; the tooltip says so and that code/non-English text runs higher. Only counts exist anywhere - the actual prompt and reply text is never stored by Darkbloom or this Mac - so this is the closest the dashboard can get to "what did my Mac actually write".

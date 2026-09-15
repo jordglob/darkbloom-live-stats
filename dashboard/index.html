@@ -410,7 +410,7 @@
   </div>
 
   <div class="panel">
-    <h2 title="Direct chat with whichever model is currently loaded on this Mac. Only enabled when the provider is running and NOT currently serving a real paid request - this shares the exact same model/hardware as real traffic, so it steps aside the instant a real job needs it, same as running Ollama locally would.">Chat (idle only)</h2>
+    <h2 title="Direct chat with whichever model is currently loaded on this Mac, using the same model and hardware as paid traffic - so it steps aside the instant a real job arrives. While the provider is busy, this box instead shows a simulated token stream at the real measured rate: the rhythm follows the provider's own token counter, but the words are the customer's private conversation and are never visible to a provider. Chat re-opens automatically when the provider goes idle; your messages are kept.">Chat <span class="gauge-time">(your questions when idle · live serving view when busy)</span></h2>
     <div id="chat"></div>
   </div>
 
@@ -449,6 +449,27 @@ let chatAvailable = false;
 let chatUnavailableReason = '';
 let chatBusy = false;
 let chatShowReasoning = false;
+// Live "serving paid traffic" visualization. The real words are the
+// customer's and never visible to a provider; what IS real here is the
+// rhythm - the daemon's own token counter drives the rate.
+// The daemon's tokens_generated counter only counts coordinator (paid)
+// jobs and, as far as observed, advances when a job completes rather than
+// per token. So the stream runs at a LEARNED rate - tokens per active
+// second, refined from every completed job - while inference_active is
+// true, and is reconciled against the real counter when the job lands.
+let servingPulse = {
+  active: null, tokens: null, lastTokens: null, lastT: null,
+  liveRate: 0, lastGrowthAt: 0,
+  activeSince: null, activeSecAccum: 0,
+  learnedRate: null, emittedSinceJump: 0, debt: 0,
+};
+const SIM_DEFAULT_RATE = 30;  // typical gpt-oss-20b decode speed on an M4 Pro until measured
+let lastDaemonRunning = null;
+let chatSimTimer = null;
+let chatSimText = '';
+let chatSimFrac = 0;
+let chatSimLineLeft = 0;
+let chatSimStartTokens = null;
 const GAUGE_R = 80;
 const GAUGE_ARC_LEN = Math.PI * GAUGE_R; // half-circle arc length
 
@@ -892,9 +913,13 @@ async function refreshPriceGuard() {
 
 function updateChatAvailability(status, daemonState) {
   const daemonRunning = (status.daemon || '').startsWith('running');
+  lastDaemonRunning = daemonRunning;
   if (!daemonRunning) {
     chatAvailable = false;
     chatUnavailableReason = 'the provider daemon is not running right now.';
+  } else if (chatBusy) {
+    chatAvailable = true;  // our own request is what's making the provider busy
+    chatUnavailableReason = '';
   } else if (!daemonState || daemonState.inference_active !== false) {
     chatAvailable = false;
     chatUnavailableReason = 'busy serving real paid traffic right now.';
@@ -909,6 +934,143 @@ function escapeHtmlChat(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML.replace(/\n/g, '<br>');
+}
+
+async function refreshServingPulse() {
+  // 1s poll of a single JSON file read. Gives a live tokens/s figure and a
+  // snappy busy/idle switch for the chat panel (the 10s /api/data poll
+  // still sets the authoritative daemon-running state).
+  let data;
+  try {
+    const res = await fetch('/api/serving_pulse');
+    data = await res.json();
+  } catch (e) { return; }
+  const p = servingPulse;
+  const tok = data.tokens_generated;
+  const t = data.t || (Date.now() / 1000);
+  const active = data.inference_active === true;
+
+  // Active-time bookkeeping (seconds inference_active has been true).
+  if (active && p.activeSince == null) p.activeSince = t;
+  if (!active && p.activeSince != null) { p.activeSecAccum += t - p.activeSince; p.activeSince = null; }
+
+  if (tok != null && p.lastTokens != null && tok < p.lastTokens) {
+    // daemon restarted, counter reset
+    p.liveRate = 0; p.debt = 0; p.emittedSinceJump = 0; p.activeSecAccum = 0;
+  } else if (tok != null && p.lastTokens != null && tok > p.lastTokens) {
+    const jump = tok - p.lastTokens;
+    p.lastGrowthAt = Date.now();
+    if (p.lastT != null && t > p.lastT) p.liveRate = p.liveRate * 0.4 + (jump / (t - p.lastT)) * 0.6;
+    // Learn tokens per active second from this completed job (or burst).
+    const activeSec = p.activeSecAccum + (p.activeSince != null ? t - p.activeSince : 0);
+    if (activeSec >= 0.8) {
+      const r = Math.max(1, Math.min(500, jump / activeSec));
+      p.learnedRate = p.learnedRate == null ? r : p.learnedRate * 0.7 + r * 0.3;
+    }
+    // Reconcile what the stream already showed against the real count.
+    p.debt += jump - p.emittedSinceJump;
+    p.emittedSinceJump = 0;
+    p.activeSecAccum = 0;
+    if (p.activeSince != null) p.activeSince = t;
+  } else if (Date.now() - p.lastGrowthAt > 2000) {
+    p.liveRate = p.liveRate * 0.5;
+    if (p.liveRate < 0.2) p.liveRate = 0;
+  }
+  p.lastTokens = tok;
+  p.lastT = t;
+  p.tokens = tok;
+  p.active = data.inference_active;
+
+  // Our own local chat request also flips inference_active - don't hide
+  // the user's own conversation behind the serving view while it's running.
+  if (lastDaemonRunning && !chatBusy) {
+    const avail = data.inference_active === false;
+    if (avail !== chatAvailable) {
+      chatAvailable = avail;
+      chatUnavailableReason = avail ? '' : 'busy serving real paid traffic right now.';
+      renderChat();
+    }
+  }
+}
+
+function simRate() {
+  // Live per-second growth wins when the counter is actually moving;
+  // otherwise the learned per-active-second rate while a job is running.
+  const p = servingPulse;
+  if (Date.now() - p.lastGrowthAt < 2000 && p.liveRate > 0) return { rate: p.liveRate, kind: 'live' };
+  if (p.active === true) return { rate: p.learnedRate ?? SIM_DEFAULT_RATE, kind: p.learnedRate == null ? 'typical' : 'learned' };
+  return { rate: 0, kind: 'idle' };
+}
+
+function chatSimMode() {
+  return !chatAvailable && chatUnavailableReason.startsWith('busy');
+}
+
+function fakeToken() {
+  // Block lengths roughly like English word-piece tokens; a line break
+  // every 12-28 tokens and the odd blank line so it reads like prose.
+  const r = Math.random();
+  const len = r < 0.15 ? 1 : r < 0.40 ? 2 : r < 0.65 ? 3 : r < 0.85 ? 4 : r < 0.95 ? 5 : 6;
+  let s = '█'.repeat(len);
+  if (chatSimLineLeft <= 0) {
+    s = (Math.random() < 0.15 ? '\n\n' : '\n') + s;
+    chatSimLineLeft = 12 + Math.floor(Math.random() * 16);
+  } else {
+    s = ' ' + s;
+  }
+  chatSimLineLeft--;
+  return s;
+}
+
+function chatSimTick() {
+  const el = document.getElementById('chat-sim');
+  if (!el) return;
+  const p = servingPulse;
+  const { rate, kind } = simRate();
+  let credits = rate * 0.1;
+  // Reconciliation: the real counter said more than we showed -> catch up
+  // (at most 3x speed); it said less -> hold the stream until even.
+  if (p.debt < 0) { p.debt += credits; credits = 0; }
+  else if (p.debt > 0) { const extra = Math.min(p.debt, credits * 2); credits += extra; p.debt -= extra; }
+  chatSimFrac += credits;
+  let n = Math.min(120, Math.floor(chatSimFrac));
+  chatSimFrac -= n;
+  p.emittedSinceJump += n;
+  while (n-- > 0) chatSimText += fakeToken();
+  if (chatSimText.length > 6000) chatSimText = chatSimText.slice(-6000).replace(/^[^\n]*\n/, '');
+  el.textContent = chatSimText + '▍';
+  const rateEl = document.getElementById('chat-sim-rate');
+  if (rateEl) {
+    rateEl.textContent = kind === 'live' ? `${rate.toFixed(0)} tokens/s (live)`
+      : kind === 'learned' ? `~${rate.toFixed(0)} tokens/s (this Mac's measured pace)`
+      : kind === 'typical' ? `~${rate} tokens/s (typical, not measured yet)`
+      : 'between requests';
+  }
+  const totalEl = document.getElementById('chat-sim-total');
+  if (totalEl && p.tokens != null && chatSimStartTokens != null) {
+    const n2 = Math.max(0, p.tokens - chatSimStartTokens);
+    totalEl.textContent = n2 > 0 ? `${fmtNum(n2)} tokens since this busy stretch began (${tokensAsText(n2)})` : '';
+  }
+  const box = el.parentElement;
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+function startChatSim() {
+  if (chatSimTimer) return;
+  chatSimText = '';
+  chatSimFrac = 0;
+  chatSimLineLeft = 12 + Math.floor(Math.random() * 16);  // no leading blank line
+  chatSimStartTokens = servingPulse.tokens;
+  servingPulse.debt = 0;
+  servingPulse.emittedSinceJump = 0;
+  chatSimTimer = setInterval(chatSimTick, 100);
+}
+
+function stopChatSim() {
+  if (!chatSimTimer) return;
+  clearInterval(chatSimTimer);
+  chatSimTimer = null;
+  chatSimText = '';
 }
 
 function renderChat() {
@@ -936,6 +1098,14 @@ function renderChat() {
   }).join('');
 
   const inputsDisabled = !chatAvailable || chatBusy || !chatModel;
+  const simMode = chatSimMode();
+  const simHtml = `
+    <div style="font-size:12px;margin-bottom:6px" title="The rhythm is real: it follows the provider's own token counter, polled every second. The blocks are not - the actual words are the customer's private conversation and are never visible to a provider, by design. Chat re-opens automatically when the provider goes idle.">
+      <strong style="color:var(--status-warning)">Serving paid traffic</strong> · <span id="chat-sim-rate">~0 tokens/s</span>
+      <span style="color:var(--text-muted)"> — simulated stream at the real rate; the words themselves are the customer's and never visible here <span style="opacity:.6">(hover for details)</span></span>
+    </div>
+    <div id="chat-sim" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:var(--text-muted);opacity:.75;min-height:60px"></div>
+    <div id="chat-sim-total" style="font-size:11px;color:var(--text-muted);margin-top:6px"></div>`;
 
   el.innerHTML = `
     <div class="warmup-row">
@@ -949,9 +1119,9 @@ function renderChat() {
       </label>
       <span class="warmup-status" style="margin:0">${chatAvailable ? '<span style="color:var(--status-good)">idle - available</span>' : `<span style="color:var(--status-warning)">unavailable - ${chatUnavailableReason}</span>`}</span>
     </div>
-    <div id="chat-history" class="warmup-log" style="max-height:240px;">${historyHtml || '<span style="color:var(--text-muted)">No messages yet - this resets on page reload, nothing is saved.</span>'}</div>
+    <div id="chat-history" class="warmup-log" style="max-height:240px;">${simMode ? simHtml : (historyHtml || '<span style="color:var(--text-muted)">No messages yet - this resets on page reload, nothing is saved.</span>')}</div>
     <div class="warmup-row" style="margin-top:8px">
-      <textarea id="chat-input" rows="2" style="flex:1;min-width:200px;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);font-family:inherit" placeholder="Ask the loaded model something... (Enter to send, Shift+Enter for newline)" ${inputsDisabled ? 'disabled' : ''}></textarea>
+      <textarea id="chat-input" rows="2" style="flex:1;min-width:200px;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);font-family:inherit" placeholder="${simMode ? 'Chat opens automatically as soon as the provider is idle - your earlier messages are kept.' : 'Ask the loaded model something... (Enter to send, Shift+Enter for newline)'}" ${inputsDisabled ? 'disabled' : ''}></textarea>
       <button class="copy-cmd-btn" id="chat-send-btn" ${inputsDisabled ? 'disabled' : ''}>${chatBusy ? 'Thinking…' : 'Send'}</button>
       <button class="copy-cmd-btn" id="chat-clear-btn" ${chatMessages.length === 0 ? 'disabled' : ''}>Clear</button>
     </div>
@@ -979,6 +1149,7 @@ function renderChat() {
 
   const hist = document.getElementById('chat-history');
   if (hist) hist.scrollTop = hist.scrollHeight;
+  if (simMode) startChatSim(); else stopChatSim();
 }
 
 async function sendChatMessage() {
@@ -1846,6 +2017,8 @@ refreshPowerFast();
 refreshWarmup();
 refreshPriceGuard();
 renderChat();
+refreshServingPulse();
+setInterval(refreshServingPulse, 1000);
 setInterval(refresh, REFRESH_MS);
 setInterval(refreshLivePower, LIVE_POWER_REFRESH_MS);
 setInterval(refreshPowerFast, POWER_FAST_REFRESH_MS);

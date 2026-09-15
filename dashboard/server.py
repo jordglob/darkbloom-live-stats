@@ -2048,6 +2048,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "price_48h": get_price_48h(),
             }
             self._send_json(data)
+        elif self.path == "/api/serving_pulse":
+            # One JSON file read - safe to poll every second. Feeds the chat
+            # panel's live "serving paid traffic" visualization.
+            ds = get_daemon_state() or {}
+            self._send_json({
+                "inference_active": ds.get("inference_active"),
+                "tokens_generated": ds.get("tokens_generated"),
+                "requests_served": ds.get("requests_served"),
+                "age_sec": ds.get("age_sec"),
+                "t": time.time(),
+            })
         elif self.path == "/api/price_now":
             self._send_json(get_price_now())
         elif self.path == "/api/price_source":
