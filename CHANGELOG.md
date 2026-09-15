@@ -1,5 +1,16 @@
 # Changelog
 
+## v14
+
+**Works outside Sweden, and measures the whole Mac.** Second half of the newcomer pass, plus the two things that made the cost numbers untrustworthy.
+
+- **Electricity price sources, picked in the UI.** One configured source now feeds everything price-related (48h chart, "$/kWh right now", Price Guard break-even, and cost tracking - `energy-monitor.sh` asks the dashboard for the current price instead of fetching its own). Sources, all free and key-less: elprisetjustnu.se (SE1-4, SEK), hvakosterstrommen.no (NO1-5, NOK), energy-charts.info (every European bidding zone, EUR - Fraunhofer ISE's API, the same data Home Assistant's ENTSO-E/EPEX integrations use), Octopus Agile (UK regions, GBP incl. VAT), ComEd hourly pricing (US Illinois, real-time), or a flat rate in any currency. FX via frankfurter.app hourly. Grid fee / energy tax / VAT are now in the source's currency with an editable VAT % (old öre config migrates automatically). Old `elpris-zone.json` is read once and carried over.
+- **Real whole-system power via macmon.** `powermetrics` only sees CPU+GPU. Measured live on this M4 Pro Mac mini against the SMC's system-power sensor: the flat 7W guess was ~2W too high at idle and ~10-15W too low under full inference load (RAM + fans). With `macmon` on PATH the energy monitor now runs it as a background child and uses the real whole-system reading ÷ 90% assumed PSU efficiency; the live Total gauge and page footer say which method is active, and each CSV row logs `power_method`. Falls back to the old guess without macmon.
+- **A chart that matches the Net card.** New "Real Earnings vs. Electricity Cost — last 48h": every real ledger entry (including the base reward) summed against measured cost. The two older estimate-based charts - which exclude the base reward and therefore showed a loss while the real balance showed a profit - are folded into a collapsed "nerdy" block with a plain explanation of why they disagree.
+- **Status cards in plain language.** "Network trust: Trusted — receiving jobs" instead of "hardware / online, coordinator reason: continuity"; "Provider: Running, waiting for jobs" instead of "Daemon: running (pid …)". Raw strings kept as sub-lines.
+- **Account table:** "base_reward" row is now "base reward (being online)" with a tooltip; the "Our local estimate" / "gap" columns are hidden by default behind a checkbox (they're about this dashboard's own guess, and were easy to misread as Darkbloom shortchanging you).
+- **Ollama indicator hidden when Ollama isn't installed.** Price Guard gets a what-it-does line above its controls. Abbreviations spelled out (tokens/h, $ per million tokens).
+
 ## v13
 
 **Newcomer pass.** Reviewed the dashboard as someone who just started renting out their Mac and fixed everything that would have scared them off or left them stuck:

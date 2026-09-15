@@ -6,8 +6,10 @@ Binds to 127.0.0.1 (this machine only) on port 8787.
 import csv
 import http.server
 import json
+import os
 import plistlib
 import re
+import shutil
 import socketserver
 import subprocess
 import threading
@@ -16,6 +18,9 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# launchd starts us with a minimal PATH; Homebrew/user tools (ollama, jq) live here.
+os.environ["PATH"] = os.environ.get("PATH", "") + ":/opt/homebrew/bin:/usr/local/bin"
 
 HOME = Path.home()
 CSV_PATH = HOME / ".darkbloom" / "energy-log.csv"
@@ -79,6 +84,35 @@ SAMPLE_HEADER_RE = re.compile(r"\*\*\* Sampled system activity \((.+?)\) \((.+?)
 GPU_ACTIVE_RESIDENCY_RE = re.compile(r"^GPU HW active residency:\s*([\d.]+)%")
 
 
+MACMON_LOG = HOME / ".darkbloom" / "macmon.jsonl"
+# SMC's system-power sensor sits after the power supply; wall draw is higher
+# by the PSU's conversion loss. Keep in sync with energy-monitor.sh.
+PSU_EFFICIENCY = 0.90
+
+
+def _latest_smc_system_w():
+    """Most recent whole-system watts from macmon's SMC log, or None if the
+    log is missing or stale (macmon samples every 5s; >20s old means it's
+    not running). File-tail only - safe for the fast /api/power poll."""
+    try:
+        if not MACMON_LOG.exists() or time.time() - MACMON_LOG.stat().st_mtime > 20:
+            return None
+        size = MACMON_LOG.stat().st_size
+        with open(MACMON_LOG, "rb") as f:
+            f.seek(max(0, size - 4096))
+            lines = f.read().decode("utf-8", errors="ignore").strip().splitlines()
+        for line in reversed(lines):
+            try:
+                v = json.loads(line).get("sys_power")
+                if v is not None:
+                    return float(v)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def get_live_power():
     """Latest SINGLE CPU/GPU sample from the raw log (not the 5-min average)."""
     if not RAW_POWER_LOG.exists():
@@ -121,11 +155,20 @@ def get_live_power():
     if cpu_mw is None or gpu_mw is None:
         return None
     soc_w = (cpu_mw + gpu_mw) / 1000
+    # Whole-system reading from the SMC (via energy-monitor.sh's macmon
+    # child) when it's fresh - measures RAM/SSD/fans too, not a guess.
+    sys_w = _latest_smc_system_w()
+    if sys_w is not None:
+        total_w, total_method = sys_w / PSU_EFFICIENCY, "smc"
+    else:
+        total_w, total_method = soc_w + BASELINE_W, "soc+baseline"
     return {
         "cpu_w": round(cpu_mw / 1000, 3),
         "gpu_w": round(gpu_mw / 1000, 3),
-        "total_w": round(soc_w + BASELINE_W, 3),  # incl. estimated system baseline
+        "total_w": round(total_w, 3),
+        "total_method": total_method,
         "baseline_w": BASELINE_W,
+        "psu_efficiency": PSU_EFFICIENCY,
         "sample_time": sample_time,
         # GPU busy-ness (0-100%), read directly from powermetrics' own "GPU HW
         # active residency" line - a real measurement, not derived/estimated
@@ -304,13 +347,16 @@ def get_ollama_status():
     """Whether Ollama currently has any model resident in memory - this is
     exactly what competed for RAM with the darkbloom provider during our
     stress test, so surface it directly instead of leaving it a mystery."""
+    installed = shutil.which("ollama") is not None or (HOME / ".ollama").exists()
+    if not installed:
+        return {"installed": False, "loaded": [], "count": 0}
     try:
         out = subprocess.run(["ollama", "ps"], capture_output=True, text=True, timeout=5).stdout
         lines = [l for l in out.splitlines()[1:] if l.strip()]
         models = [line.split()[0] for line in lines if line.split()]
-        return {"loaded": models, "count": len(models)}
+        return {"installed": True, "loaded": models, "count": len(models)}
     except Exception:
-        return {"loaded": [], "count": 0}
+        return {"installed": True, "loaded": [], "count": 0}
 
 
 def get_daemon_state():
@@ -599,7 +645,7 @@ def read_price_guard_config():
         "last_action_at": None,
         "last_reason": None,
         "last_evaluated_at": None,
-        "last_price_sek_per_kwh": None,
+        "last_price_per_kwh": None,
         "last_break_even_sek_per_kwh": None,
     }
     if not PRICE_GUARD_CONFIG.exists():
@@ -718,6 +764,9 @@ def _evaluate_price_guard(cfg):
         return None
 
     total_kw = total_w / 1000
+    # usd_sek is "units of the configured currency per 1 USD" (column name
+    # kept for history compatibility), so this break-even is in that currency.
+    cur = get_price_source_config()["currency"]
     break_even_sek_per_kwh = (active_rate * usd_sek) / total_kw
     margin = max(0, cfg.get("margin_pct", 15)) / 100
 
@@ -733,25 +782,26 @@ def _evaluate_price_guard(cfg):
     if price > break_even_sek_per_kwh * (1 + margin) and daemon_running:
         if last_action == "stop" or (now - last_action_at) >= min_running_sec:
             action = "stop"
-            reason = (f"price {price:.3f} SEK/kWh is above break-even {break_even_sek_per_kwh:.3f} "
+            reason = (f"price {price:.3f} {cur}/kWh is above break-even {break_even_sek_per_kwh:.3f} "
                        f"(+{cfg.get('margin_pct', 15)}% margin) for the measured ${active_rate:.4f}/hr active rate")
         else:
-            reason = "would stop, but min_running_min not yet elapsed since last action"
+            reason = "would stop, but the minimum running time hasn't elapsed since the last action"
     elif price < break_even_sek_per_kwh * (1 - margin) and not daemon_running:
         if last_action == "start" or (now - last_action_at) >= min_stopped_sec:
             action = "start"
-            reason = (f"price {price:.3f} SEK/kWh is below break-even {break_even_sek_per_kwh:.3f} "
+            reason = (f"price {price:.3f} {cur}/kWh is below break-even {break_even_sek_per_kwh:.3f} "
                        f"(-{cfg.get('margin_pct', 15)}% margin) for the measured ${active_rate:.4f}/hr active rate")
         else:
-            reason = "would start, but min_stopped_min not yet elapsed since last action"
+            reason = "would start, but the minimum stopped time hasn't elapsed since the last action"
     elif daemon_running:
-        reason = f"running and profitable ({price:.3f} vs break-even {break_even_sek_per_kwh:.3f} SEK/kWh)"
+        reason = f"running and profitable ({price:.3f} vs break-even {break_even_sek_per_kwh:.3f} {cur}/kWh)"
     else:
-        reason = f"stopped and still unprofitable to resume ({price:.3f} vs break-even {break_even_sek_per_kwh:.3f} SEK/kWh)"
+        reason = f"stopped and still unprofitable to resume ({price:.3f} vs break-even {break_even_sek_per_kwh:.3f} {cur}/kWh)"
 
     return {
-        "price_sek_per_kwh": price,
-        "break_even_sek_per_kwh": break_even_sek_per_kwh,
+        "currency": cur,
+        "price_per_kwh": price,
+        "break_even_per_kwh": break_even_sek_per_kwh,
         "active_rate_per_hour_usd": active_rate,
         "total_power_w": total_w,
         "daemon_running": daemon_running,
@@ -767,7 +817,7 @@ def price_guard_loop():
             decision = _evaluate_price_guard(cfg)
             if decision:
                 cfg["last_evaluated_at"] = time.time()
-                cfg["last_price_sek_per_kwh"] = decision["price_sek_per_kwh"]
+                cfg["last_price_per_kwh"] = decision["price_per_kwh"]
                 cfg["last_break_even_sek_per_kwh"] = decision["break_even_sek_per_kwh"]
                 if decision["action"] and cfg.get("mode") == "auto":
                     ok = _apply_price_guard_action(decision["action"], decision["reason"])
@@ -1374,92 +1424,187 @@ def _bucket_downsample(rows, max_points):
     return out_rows, peak_total_power_w
 
 
-ELPRIS_ZONE_CONFIG = HOME / ".darkbloom" / "elpris-zone.json"
-ELPRIS_VALID_ZONES = ["SE1", "SE2", "SE3", "SE4"]
-ELPRIS_DEFAULT_ZONE = "SE3"
-ELPRIS_POLL_INTERVAL_SEC = 900  # matches energy-monitor.sh's own elpris cache cadence
-ELPRIS_PAST_DAYS = 1  # how many real (always-published) days to show before today
-_elpris_cache = {"data": None, "fetched_at": 0.0, "zone": None}
-_elpris_cache_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# Electricity price sources
+#
+# One configured source feeds everything price-related: the 48h chart, the
+# "$/kWh right now" header, Price Guard's break-even, and (via /api/price_now)
+# energy-monitor.sh's cost accounting - so no two parts of the dashboard can
+# ever disagree about what electricity costs. Every fetcher returns the same
+# shape, one calendar day at a time:
+#     [{"time_start": ISO8601, "time_end": ISO8601, "price_per_kwh": float}]
+# in the source's own currency per kWh, [] when that day isn't published yet
+# or on any error (never raises - a slow API means a shorter chart, not a
+# broken page). Currency is converted to USD once, centrally, in
+# get_price_48h. All sources here are free and need no API key.
+# ---------------------------------------------------------------------------
+PRICE_SOURCE_CONFIG = HOME / ".darkbloom" / "price-source.json"
+LEGACY_ZONE_CONFIG = HOME / ".darkbloom" / "elpris-zone.json"
+PRICE_POLL_INTERVAL_SEC = 900  # matches energy-monitor.sh's own price cache cadence
+PRICE_PAST_DAYS = 1  # how many real (always-published) days to show before today
+_price_cache = {"data": None, "fetched_at": 0.0, "key": None}
+_price_cache_lock = threading.Lock()
+_fx_cache = {}  # currency -> (local units per 1 USD, fetched_at)
+_fx_lock = threading.Lock()
+
+ENERGY_CHARTS_ZONES = [
+    "AT", "BE", "BG", "CH", "CZ", "DE-LU", "DK1", "DK2", "EE", "ES", "FI", "FR",
+    "GR", "HR", "HU", "IT-North", "IT-Centre-North", "IT-Centre-South", "IT-South",
+    "IT-Sicily", "IT-Sardinia", "LT", "LV", "NL", "NO1", "NO2", "NO3", "NO4", "NO5",
+    "PL", "PT", "RO", "RS", "SE1", "SE2", "SE3", "SE4", "SI", "SK",
+]
+OCTOPUS_AGILE_PRODUCT = "AGILE-24-10-01"
+OCTOPUS_REGIONS = {
+    "A": "Eastern England", "B": "East Midlands", "C": "London", "D": "Merseyside & N. Wales",
+    "E": "West Midlands", "F": "North East England", "G": "North West England",
+    "H": "Southern England", "J": "South East England", "K": "South Wales",
+    "L": "South West England", "M": "Yorkshire", "N": "South Scotland", "P": "North Scotland",
+}
+
+PRICE_SOURCES = {
+    "elprisetjustnu": {
+        "label": "Sweden — elprisetjustnu.se (Nord Pool day-ahead)",
+        "currency": "SEK", "zones": ["SE1", "SE2", "SE3", "SE4"], "default_zone": "SE3",
+        "default_vat_pct": 25, "forecast": True, "url": "https://www.elprisetjustnu.se",
+    },
+    "hvakosterstrommen": {
+        "label": "Norway — hvakosterstrommen.no (Nord Pool day-ahead)",
+        "currency": "NOK", "zones": ["NO1", "NO2", "NO3", "NO4", "NO5"], "default_zone": "NO1",
+        "default_vat_pct": 25, "forecast": True, "url": "https://www.hvakosterstrommen.no",
+    },
+    "energy-charts": {
+        "label": "Europe — energy-charts.info (Fraunhofer ISE, EPEX/ENTSO-E day-ahead)",
+        "currency": "EUR", "zones": ENERGY_CHARTS_ZONES, "default_zone": "DE-LU",
+        "default_vat_pct": 0, "forecast": True, "url": "https://energy-charts.info",
+        "note": "Free, no key, all European bidding zones. Licensed for private/internal use - fine for your own dashboard, not for republishing.",
+    },
+    "octopus-agile": {
+        "label": "UK — Octopus Agile tariff (half-hourly, incl. VAT)",
+        "currency": "GBP", "zones": list(OCTOPUS_REGIONS), "zone_labels": OCTOPUS_REGIONS,
+        "default_zone": "C", "default_vat_pct": 0, "forecast": True, "url": "https://octopus.energy/agile",
+        "note": "This is Octopus's retail Agile tariff (what an Agile customer actually pays), not the wholesale price.",
+    },
+    "comed": {
+        "label": "US (Illinois) — ComEd Hourly Pricing (real-time, no day-ahead)",
+        "currency": "USD", "zones": ["ComEd"], "default_zone": "ComEd",
+        "default_vat_pct": 0, "forecast": False, "url": "https://hourlypricing.comed.com",
+        "note": "Real-time 5-minute prices averaged to hours. There is no day-ahead auction, so tomorrow stays blank. Energy price only - delivery charges are extra.",
+    },
+    "fixed": {
+        "label": "Flat rate — any country (enter your own price)",
+        "currency": None, "zones": [], "default_zone": "", "default_vat_pct": 0, "forecast": True,
+        "note": "Use the all-in price per kWh from your bill. Enter it including tax to skip the surcharge fields below.",
+    },
+}
+DEFAULT_PRICE_SOURCE = "elprisetjustnu"
 
 
-def get_elpris_zone():
+def get_price_source_config():
+    cfg = {"source": DEFAULT_PRICE_SOURCE, "zone": None, "fixed_price": 0.0, "fixed_currency": "USD"}
     try:
-        zone = json.loads(ELPRIS_ZONE_CONFIG.read_text()).get("zone")
-        if zone in ELPRIS_VALID_ZONES:
-            return zone
+        stored = json.loads(PRICE_SOURCE_CONFIG.read_text())
+        cfg.update({k: v for k, v in stored.items() if k in cfg})
     except Exception:
-        pass
-    return ELPRIS_DEFAULT_ZONE
+        # Pre-v14 installs only stored a Swedish zone - carry it over.
+        try:
+            zone = json.loads(LEGACY_ZONE_CONFIG.read_text()).get("zone")
+            if zone in PRICE_SOURCES["elprisetjustnu"]["zones"]:
+                cfg["zone"] = zone
+        except Exception:
+            pass
+    if cfg["source"] not in PRICE_SOURCES:
+        cfg["source"] = DEFAULT_PRICE_SOURCE
+    src = PRICE_SOURCES[cfg["source"]]
+    if src["zones"] and cfg["zone"] not in src["zones"]:
+        cfg["zone"] = src["default_zone"]
+    cfg["currency"] = src["currency"] or (str(cfg.get("fixed_currency") or "USD").upper()[:3])
+    return cfg
 
 
-def set_elpris_zone(zone):
-    if zone not in ELPRIS_VALID_ZONES:
+def set_price_source_config(body):
+    cfg = get_price_source_config()
+    source = body.get("source") or cfg["source"]
+    if source not in PRICE_SOURCES:
         return False
-    ELPRIS_ZONE_CONFIG.write_text(json.dumps({"zone": zone}))
-    with _elpris_cache_lock:
-        _elpris_cache["fetched_at"] = 0.0  # force a refetch under the new zone next poll
+    src = PRICE_SOURCES[source]
+    zone = body.get("zone") or (cfg["zone"] if source == cfg["source"] else src["default_zone"])
+    if src["zones"] and zone not in src["zones"]:
+        zone = src["default_zone"]
+    try:
+        fixed_price = max(0.0, float(body.get("fixed_price", cfg["fixed_price"]) or 0))
+    except Exception:
+        fixed_price = cfg["fixed_price"]
+    fixed_currency = str(body.get("fixed_currency") or cfg["fixed_currency"] or "USD").upper()[:3]
+    PRICE_SOURCE_CONFIG.write_text(json.dumps({
+        "source": source, "zone": zone, "fixed_price": fixed_price, "fixed_currency": fixed_currency,
+    }))
+    with _price_cache_lock:
+        _price_cache["fetched_at"] = 0.0  # force a refetch under the new config next poll
     return True
 
 
-ELPRIS_SURCHARGE_CONFIG = HOME / ".darkbloom" / "elpris-surcharge.json"
-# Swedish VAT on electricity is a fixed nationwide rate (25%) - a real fact,
-# not a guess, unlike grid fee/energy tax below which genuinely vary per
-# household (grid operator, subscription size, region) and can't be known
-# without the user entering their own numbers.
-ELPRIS_VAT_PCT = 25
+PRICE_SURCHARGE_CONFIG = HOME / ".darkbloom" / "price-surcharge.json"
+LEGACY_SURCHARGE_CONFIG = HOME / ".darkbloom" / "elpris-surcharge.json"
 
 
-def get_elpris_surcharge():
-    """Grid fee (nätavgift) and energy tax (energiskatt), both öre/kWh,
-    entered by the user via the dashboard - defaults to 0/0 (i.e. the
-    'incl. fees & tax' chart line starts out identical to the raw spot
-    price) rather than guessing at a 'typical' Swedish rate, since actual
-    grid fees vary enormously by grid operator and subscription size, and
-    the energy tax rate itself changes with the annual government budget."""
+def get_price_surcharge(default_vat_pct):
+    """Grid fee and energy tax (per kWh, in the configured currency's main
+    unit) plus VAT %, entered by the user - what turns a bare spot price into
+    what a household actually pays. Defaults to 0/0 so the 'incl. fees & tax'
+    line starts identical to the spot line rather than guessing a 'typical'
+    rate: grid fees vary enormously by operator and subscription, tax rates
+    change with each budget. VAT defaults per source (25% for SE/NO spot)."""
     try:
-        data = json.loads(ELPRIS_SURCHARGE_CONFIG.read_text())
+        data = json.loads(PRICE_SURCHARGE_CONFIG.read_text())
         return {
-            "grid_fee_ore_per_kwh": float(data.get("grid_fee_ore_per_kwh", 0) or 0),
-            "energy_tax_ore_per_kwh": float(data.get("energy_tax_ore_per_kwh", 0) or 0),
+            "grid_fee_per_kwh": float(data.get("grid_fee_per_kwh", 0) or 0),
+            "energy_tax_per_kwh": float(data.get("energy_tax_per_kwh", 0) or 0),
+            "vat_pct": float(data.get("vat_pct", default_vat_pct) if data.get("vat_pct") is not None else default_vat_pct),
         }
     except Exception:
-        return {"grid_fee_ore_per_kwh": 0.0, "energy_tax_ore_per_kwh": 0.0}
+        pass
+    try:
+        # Pre-v14 file stored Swedish öre/kWh - convert to SEK/kWh once.
+        legacy = json.loads(LEGACY_SURCHARGE_CONFIG.read_text())
+        return {
+            "grid_fee_per_kwh": float(legacy.get("grid_fee_ore_per_kwh", 0) or 0) / 100,
+            "energy_tax_per_kwh": float(legacy.get("energy_tax_ore_per_kwh", 0) or 0) / 100,
+            "vat_pct": 25.0,
+        }
+    except Exception:
+        return {"grid_fee_per_kwh": 0.0, "energy_tax_per_kwh": 0.0, "vat_pct": float(default_vat_pct)}
 
 
-def set_elpris_surcharge(grid_fee_ore, energy_tax_ore):
-    ELPRIS_SURCHARGE_CONFIG.write_text(json.dumps({
-        "grid_fee_ore_per_kwh": grid_fee_ore,
-        "energy_tax_ore_per_kwh": energy_tax_ore,
+def set_price_surcharge(grid_fee, energy_tax, vat_pct):
+    PRICE_SURCHARGE_CONFIG.write_text(json.dumps({
+        "grid_fee_per_kwh": grid_fee, "energy_tax_per_kwh": energy_tax, "vat_pct": vat_pct,
     }))
 
 
-def _fetch_elpris_day(date_obj, zone):
-    """One calendar day's hourly day-ahead prices for a Swedish Nord Pool
-    bidding zone, straight from elprisetjustnu.se (free, no API key). Returns
-    [] if that day's file isn't published yet (tomorrow's prices clear the
-    day-ahead auction and go live daily around 13:00 CET) or on any fetch
-    error - never raises, so a slow/offline API just means a shorter chart,
-    not a broken page.
+def _http_json(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": "darkbloom-live-stats/1"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
 
-    NOT PORTABLE OUTSIDE SWEDEN - if you're adapting this dashboard for a
-    different country, this is the one function to replace: elprisetjustnu.se
-    only covers Sweden's four Nord Pool zones (SE1-SE4). Swap in your own
-    market's day-ahead price API instead - e.g. ENTSO-E Transparency Platform
-    (covers most of the EU, needs a free API token), aWATTar (DE/AT), Elexon/
-    N2EX (UK), or your local utility/exchange's published day-ahead API.
-    Whatever you use, keep returning this same shape - a list of
-    {"time_start": ISO8601, "time_end": ISO8601, "sek_per_kwh": float} dicts
-    (rename the price key to your own currency/unit) - so nothing downstream
-    (get_elpris_48h, the /api/elpris_48h response, the frontend chart) needs
-    to change. Also update ELPRIS_VALID_ZONES/ELPRIS_DEFAULT_ZONE above to
-    your market's own zone codes, and the currency conversion in
-    get_elpris_48h if your source isn't already in USD."""
-    url = f"https://www.elprisetjustnu.se/api/v1/prices/{date_obj.year}/{date_obj.month:02d}-{date_obj.day:02d}_{zone}.json"
+
+def _local_day_bounds(date_obj):
+    tz = datetime.now().astimezone().tzinfo
+    start = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=tz)
+    return start, start + timedelta(days=1)
+
+
+def _iso_local(unix_ts):
+    return datetime.fromtimestamp(unix_ts).astimezone().isoformat()
+
+
+def _fetch_day_nordic(date_obj, zone, host, price_key):
+    """elprisetjustnu.se and hvakosterstrommen.no share one JSON layout
+    (same open-source lineage): one file per day and zone, each entry with
+    explicit +HH:MM offsets. Tomorrow's file appears once the day-ahead
+    auction clears, around 13:00 CET."""
+    url = f"https://{host}/api/v1/prices/{date_obj.year}/{date_obj.month:02d}-{date_obj.day:02d}_{zone}.json"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "darkbloom-live-stats/1"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
+        data = _http_json(url)
     except Exception:
         return []
     if not isinstance(data, list):
@@ -1467,29 +1612,151 @@ def _fetch_elpris_day(date_obj, zone):
     out = []
     for e in data:
         try:
+            out.append({"time_start": e["time_start"], "time_end": e["time_end"], "price_per_kwh": float(e[price_key])})
+        except Exception:
+            continue
+    return out
+
+
+def _fetch_day_energy_charts(date_obj, zone):
+    """EUR/MWh in 15-min steps from Fraunhofer ISE's Energy-Charts API. The
+    start/end window is inclusive by date, so asking for one day returns
+    exactly that day; entries are filtered by local date anyway in case the
+    API's notion of a day drifts from ours across a timezone boundary."""
+    d = date_obj.isoformat()
+    try:
+        data = _http_json(f"https://api.energy-charts.info/price?bzn={zone}&start={d}&end={d}")
+    except Exception:
+        return []
+    secs, prices = data.get("unix_seconds") or [], data.get("price") or []
+    out = []
+    for i, (t, p) in enumerate(zip(secs, prices)):
+        if p is None:
+            continue
+        dt = datetime.fromtimestamp(t).astimezone()
+        if dt.date() != date_obj:
+            continue
+        t_end = secs[i + 1] if i + 1 < len(secs) else t + 900
+        out.append({"time_start": dt.isoformat(), "time_end": _iso_local(t_end), "price_per_kwh": float(p) / 1000.0})
+    return out
+
+
+def _fetch_day_octopus(date_obj, region):
+    """Octopus Agile half-hourly unit rates for one grid region, pence incl.
+    VAT -> GBP/kWh. Tomorrow's rates publish around 16:00 UK time."""
+    start, end = _local_day_bounds(date_obj)
+    fmt = lambda dt: dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    tariff = f"E-1R-{OCTOPUS_AGILE_PRODUCT}-{region}"
+    url = (f"https://api.octopus.energy/v1/products/{OCTOPUS_AGILE_PRODUCT}/electricity-tariffs/{tariff}/"
+           f"standard-unit-rates/?period_from={fmt(start)}&period_to={fmt(end)}&page_size=100")
+    try:
+        data = _http_json(url)
+    except Exception:
+        return []
+    out = []
+    for r in reversed(data.get("results") or []):  # API returns newest first
+        try:
             out.append({
-                "time_start": e["time_start"],
-                "time_end": e["time_end"],
-                "sek_per_kwh": float(e["SEK_per_kWh"]),
+                "time_start": _iso_local(_parse_iso_ts(r["valid_from"])),
+                "time_end": _iso_local(_parse_iso_ts(r["valid_to"])),
+                "price_per_kwh": float(r["value_inc_vat"]) / 100.0,
             })
         except Exception:
             continue
     return out
 
 
-def _latest_usd_sek_rate():
-    """The most recently logged USD/SEK rate (energy-monitor.sh refreshes it
-    hourly and writes it into every CSV row) - reused here instead of a
-    separate fetch, so the 48h price chart's USD conversion always matches
-    what the rest of the dashboard is already using."""
+def _fetch_day_comed(date_obj, _zone):
+    """ComEd's real-time 5-minute prices (cents/kWh), averaged into hourly
+    buckets. Only exists for elapsed time - there is no day-ahead auction,
+    so a future date returns [] and the chart shows tomorrow as a gap."""
+    start, end = _local_day_bounds(date_obj)
+    if start > datetime.now().astimezone():
+        return []
+    fmt = lambda dt: dt.astimezone(timezone.utc).strftime("%Y%m%d%H%M")
+    url = f"https://hourlypricing.comed.com/api?type=5minutefeed&datestart={fmt(start - timedelta(hours=1))}&dateend={fmt(end + timedelta(hours=1))}"
+    try:
+        data = _http_json(url)
+    except Exception:
+        return []
+    hours = {}
+    for e in data or []:
+        try:
+            t = int(e["millisUTC"]) / 1000
+            dt = datetime.fromtimestamp(t).astimezone()
+            if dt.date() != date_obj:
+                continue
+            hours.setdefault(dt.replace(minute=0, second=0, microsecond=0), []).append(float(e["price"]))
+        except Exception:
+            continue
+    return [
+        {"time_start": h.isoformat(), "time_end": (h + timedelta(hours=1)).isoformat(), "price_per_kwh": sum(v) / len(v) / 100.0}
+        for h, v in sorted(hours.items())
+    ]
+
+
+def _fetch_day_fixed(date_obj, fixed_price):
+    start, _ = _local_day_bounds(date_obj)
+    out = []
+    for i in range(96):
+        t0 = start + timedelta(minutes=15 * i)
+        out.append({"time_start": t0.isoformat(), "time_end": (t0 + timedelta(minutes=15)).isoformat(), "price_per_kwh": fixed_price})
+    return out
+
+
+def _fetch_price_day(date_obj, cfg):
+    source, zone = cfg["source"], cfg["zone"]
+    if source == "elprisetjustnu":
+        return _fetch_day_nordic(date_obj, zone, "www.elprisetjustnu.se", "SEK_per_kWh")
+    if source == "hvakosterstrommen":
+        return _fetch_day_nordic(date_obj, zone, "www.hvakosterstrommen.no", "NOK_per_kWh")
+    if source == "energy-charts":
+        return _fetch_day_energy_charts(date_obj, zone)
+    if source == "octopus-agile":
+        return _fetch_day_octopus(date_obj, zone)
+    if source == "comed":
+        return _fetch_day_comed(date_obj, zone)
+    if source == "fixed":
+        return _fetch_day_fixed(date_obj, cfg["fixed_price"])
+    return []
+
+
+def _latest_csv_rate():
+    """Last exchange rate energy-monitor.sh logged (units of the configured
+    currency per 1 USD) - the offline fallback for _local_per_usd."""
     if not CSV_PATH.exists():
-        return 9.5
+        return None
     try:
         with open(CSV_PATH, newline="") as f:
             rows = list(csv.DictReader(f))
-        return float(rows[-1].get("usd_sek", 0) or 0) or 9.5 if rows else 9.5
+        return (float(rows[-1].get("usd_sek", 0) or 0) or None) if rows else None
     except Exception:
-        return 9.5
+        return None
+
+
+def _local_per_usd(currency):
+    """How many units of `currency` one USD buys, via frankfurter.app (free,
+    ECB reference rates, no key), cached an hour. USD is 1 by definition.
+    Falls back to the last cached or CSV-logged rate rather than failing, so
+    a flaky FX API can't blank out the whole cost side of the dashboard."""
+    currency = (currency or "USD").upper()
+    if currency == "USD":
+        return 1.0
+    now = time.time()
+    with _fx_lock:
+        cached = _fx_cache.get(currency)
+    if cached and now - cached[1] < 3600:
+        return cached[0]
+    try:
+        data = _http_json(f"https://api.frankfurter.app/latest?from=USD&to={currency}")
+        rate = float(data["rates"][currency])
+        with _fx_lock:
+            _fx_cache[currency] = (rate, now)
+        return rate
+    except Exception:
+        if cached:
+            return cached[0]
+        return _latest_csv_rate() or 1.0
 
 
 def _earnings_by_bucket(all_prices):
@@ -1584,47 +1851,52 @@ def _placeholder_day_prices(date_obj):
     for i in range(96):
         t0 = start + timedelta(minutes=15 * i)
         t1 = t0 + timedelta(minutes=15)
-        out.append({"time_start": t0.isoformat(), "time_end": t1.isoformat(), "sek_per_kwh": None})
+        out.append({"time_start": t0.isoformat(), "time_end": t1.isoformat(), "price_per_kwh": None})
     return out
 
 
-def get_elpris_48h():
-    """Real past days (ELPRIS_PAST_DAYS back) + today + tomorrow's published
-    day-ahead electricity prices for the configured zone - a continuous real
-    history running into a forecast, not just a forward-looking schedule.
-    Past days and today are always real (elprisetjustnu.se keeps every past
-    day's file permanently); only tomorrow can still be a placeholder if the
-    next day's auction hasn't cleared yet. Cached for ELPRIS_POLL_INTERVAL_SEC
-    per zone; tomorrow_available flips to true the moment elprisetjustnu.se
-    publishes the next day's prices (usually early-to-mid afternoon local
-    time), which is what makes this chart update itself as soon as a new
-    day's prices are released."""
-    zone = get_elpris_zone()
+def _price_sources_public():
+    return {
+        sid: {k: v for k, v in s.items() if k in ("label", "currency", "zones", "zone_labels", "default_zone", "default_vat_pct", "forecast", "url", "note")}
+        for sid, s in PRICE_SOURCES.items()
+    }
+
+
+def get_price_48h():
+    """Yesterday + today + tomorrow's electricity prices from the configured
+    source - a continuous real history running into a forecast. Past days
+    and today are always real; tomorrow is a placeholder gap until the
+    source publishes it (day-ahead auctions clear early-to-mid afternoon;
+    ComEd never does, being real-time only). Cached PRICE_POLL_INTERVAL_SEC
+    per source+zone; tomorrow_available flips the moment the next day's
+    prices land, which is what makes the chart update itself."""
+    cfg = get_price_source_config()
+    src = PRICE_SOURCES[cfg["source"]]
+    cache_key = (cfg["source"], cfg["zone"], cfg["fixed_price"], cfg["currency"])
     now = time.time()
-    with _elpris_cache_lock:
-        cached, fetched_at, cached_zone = _elpris_cache["data"], _elpris_cache["fetched_at"], _elpris_cache["zone"]
-        if cached is not None and cached_zone == zone and (now - fetched_at) < ELPRIS_POLL_INTERVAL_SEC:
-            # Surcharge is user-editable and cheap to read - always attach the
-            # current value rather than baking it into the 15-min price cache,
-            # so changing it reflects immediately instead of waiting on a refetch.
-            result = dict(cached)
-            result["surcharge"] = {**get_elpris_surcharge(), "vat_pct": ELPRIS_VAT_PCT}
-            return result
+    with _price_cache_lock:
+        cached, fetched_at, cached_key = _price_cache["data"], _price_cache["fetched_at"], _price_cache["key"]
+    if cached is not None and cached_key == cache_key and (now - fetched_at) < PRICE_POLL_INTERVAL_SEC:
+        # Surcharge is user-editable and cheap to read - always attach the
+        # current value rather than baking it into the price cache.
+        result = dict(cached)
+        result["surcharge"] = get_price_surcharge(src["default_vat_pct"])
+        return result
 
     today = datetime.now().date()
     tomorrow = today + timedelta(days=1)
-    usd_rate = _latest_usd_sek_rate()
+    local_per_usd = _local_per_usd(cfg["currency"])
 
     all_prices = []
-    for offset in range(-ELPRIS_PAST_DAYS, 0):
-        all_prices += _fetch_elpris_day(today + timedelta(days=offset), zone)
-    all_prices += _fetch_elpris_day(today, zone)
-    tomorrow_prices = _fetch_elpris_day(tomorrow, zone)
+    for offset in range(-PRICE_PAST_DAYS, 0):
+        all_prices += _fetch_price_day(today + timedelta(days=offset), cfg)
+    all_prices += _fetch_price_day(today, cfg)
+    tomorrow_prices = _fetch_price_day(tomorrow, cfg)
     tomorrow_available = len(tomorrow_prices) > 0
     all_prices += tomorrow_prices if tomorrow_available else _placeholder_day_prices(tomorrow)
 
     for p in all_prices:
-        p["usd_per_kwh"] = (p["sek_per_kwh"] / usd_rate) if (usd_rate and p["sek_per_kwh"] is not None) else None
+        p["usd_per_kwh"] = (p["price_per_kwh"] / local_per_usd) if (local_per_usd and p["price_per_kwh"] is not None) else None
     for p, earnings_usd in zip(all_prices, _earnings_by_bucket(all_prices)):
         p["earnings_usd"] = earnings_usd
     for p, cost_usd in zip(all_prices, _cost_by_bucket(all_prices)):
@@ -1632,18 +1904,57 @@ def get_elpris_48h():
         p["net_usd"] = p["earnings_usd"] - cost_usd
 
     result = {
-        "zone": zone,
-        "valid_zones": ELPRIS_VALID_ZONES,
+        "source": cfg["source"],
+        "source_label": src["label"],
+        "zone": cfg["zone"],
+        "currency": cfg["currency"],
+        "fixed_price": cfg["fixed_price"],
+        "has_forecast": src["forecast"],
+        "sources": _price_sources_public(),
         "prices": all_prices,
         "tomorrow_available": tomorrow_available,
-        "usd_sek_rate": usd_rate,
-        "surcharge": {**get_elpris_surcharge(), "vat_pct": ELPRIS_VAT_PCT},
+        "local_per_usd": local_per_usd,
+        "surcharge": get_price_surcharge(src["default_vat_pct"]),
+        "today_available": any(p["price_per_kwh"] is not None for p in all_prices),
     }
-    with _elpris_cache_lock:
-        _elpris_cache["data"] = result
-        _elpris_cache["fetched_at"] = now
-        _elpris_cache["zone"] = zone
+    with _price_cache_lock:
+        _price_cache["data"] = result
+        _price_cache["fetched_at"] = now
+        _price_cache["key"] = cache_key
     return result
+
+
+def get_price_now():
+    """The price in force right now (configured currency per kWh) plus the
+    exchange rate - what energy-monitor.sh polls every 15 minutes for its
+    cost accounting, so the CSV always uses exactly what the chart shows."""
+    data = get_price_48h()
+    now_ts = time.time()
+    price = None
+    latest_past = None
+    for p in data["prices"]:
+        if p["price_per_kwh"] is None:
+            continue
+        try:
+            t0, t1 = _parse_iso_ts(p["time_start"]), _parse_iso_ts(p["time_end"])
+        except Exception:
+            continue
+        if t0 <= now_ts < t1:
+            price = p["price_per_kwh"]
+            break
+        if t0 <= now_ts:
+            latest_past = p["price_per_kwh"]
+    if price is None:
+        price = latest_past  # e.g. real-time sources lagging a few minutes
+    rate = data["local_per_usd"] or 1.0
+    return {
+        "source": data["source"],
+        "zone": data["zone"],
+        "currency": data["currency"],
+        "price_per_kwh": price,
+        "local_per_usd": rate,
+        "price_usd_per_kwh": (price / rate) if price is not None else None,
+    }
 
 
 def get_energy_series():
@@ -1721,9 +2032,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "daemon_state": get_daemon_state(),
                 "doctor": get_doctor_report(),
                 "inference_durations": get_inference_duration_stats(),
-                "elpris_48h": get_elpris_48h(),
+                "price_48h": get_price_48h(),
             }
             self._send_json(data)
+        elif self.path == "/api/price_now":
+            self._send_json(get_price_now())
+        elif self.path == "/api/price_source":
+            self._send_json(get_price_48h())
         elif self.path == "/api/power":
             # Cheap, fast-poll-friendly: just a file tail, no subprocess spawns.
             # Kept separate from /api/live_power so polling this at 5Hz doesn't
@@ -1812,27 +2127,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             result = _proxy_local_chat(body.get("model"), body.get("messages") or [])
             self._send_json(result)
-        elif self.path == "/api/elpris_zone":
+        elif self.path == "/api/price_source":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
-            zone = (body.get("zone") or "").upper()
-            if set_elpris_zone(zone):
-                self._send_json(get_elpris_48h())
+            if set_price_source_config(body):
+                self._send_json(get_price_48h())
             else:
                 self.send_response(400)
                 self.end_headers()
-        elif self.path == "/api/elpris_surcharge":
+        elif self.path == "/api/price_surcharge":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
             try:
-                grid_fee = float(body.get("grid_fee_ore_per_kwh", 0) or 0)
-                energy_tax = float(body.get("energy_tax_ore_per_kwh", 0) or 0)
+                grid_fee = max(0.0, float(body.get("grid_fee_per_kwh", 0) or 0))
+                energy_tax = max(0.0, float(body.get("energy_tax_per_kwh", 0) or 0))
+                vat_pct = max(0.0, float(body.get("vat_pct", 0) or 0))
             except (TypeError, ValueError):
                 self.send_response(400)
                 self.end_headers()
             else:
-                set_elpris_surcharge(grid_fee, energy_tax)
-                self._send_json(get_elpris_48h())
+                set_price_surcharge(grid_fee, energy_tax, vat_pct)
+                self._send_json(get_price_48h())
         else:
             self.send_response(404)
             self.end_headers()

@@ -251,16 +251,16 @@
 
       <div class="explainer-section">
         <h4>Top summary cards</h4>
-        <p><strong>Trust</strong> — the hardware-attestation level the Darkbloom coordinator has assigned this Mac. <code>hardware</code> means it's eligible to actually receive inference traffic; <code>self_signed</code> means it's online but not yet trusted enough to be routed any jobs. A drop from hardware-level triggers a macOS notification and a red banner automatically.</p>
-        <p><strong>Daemon</strong> — whether the `darkbloom` background process itself is running, and (read straight from the daemon's own live state file) whether it's currently idle/warm or actively serving a request right this second (pulsing dot).</p>
-        <p><strong>Requests</strong> — requests served and tokens processed since the daemon last (re)started. This resets on every restart, so it's not a lifetime total.</p>
+        <p><strong>Network trust</strong> — whether Darkbloom's coordinator (the server that hands out work) trusts this Mac enough to send it paid jobs. "Trusted — receiving jobs" (raw value <code>hardware</code>) is what you want. "Online, not trusted yet" (raw <code>self_signed</code>) means connected but receiving nothing - on this network it's usually a temporary flicker on Darkbloom's side that clears in minutes, and you get a macOS notification either way. The raw coordinator string is shown under the label for anyone debugging with Darkbloom support.</p>
+        <p><strong>Provider</strong> — the `darkbloom` background program that actually serves requests. "Serving a request now" is read from its own live state file (pulsing dot). "Running, waiting for jobs" is the normal state most of the time - you still earn the base reward while trusted and idle.</p>
+        <p><strong>Requests</strong> — requests served and tokens processed since the provider last (re)started. This resets on every restart, so it's not a lifetime total; lifetime numbers are in the Darkbloom Account panel.</p>
         <p><strong>Warm models</strong> — how many models are currently loaded in memory (instant response) vs. how many are downloaded to disk in total.</p>
         <p><strong>Accumulated electricity cost</strong> and <strong>Net</strong> — see the calculation explainer under the cost/revenue chart further down for the exact formula.</p>
       </div>
 
       <div class="explainer-section">
         <h4>Live Power gauges</h4>
-        <p><strong>CPU / GPU / Total</strong> — instantaneous power draw read straight from `powermetrics`, sampled ~5 times per second. "Total" adds a fixed 7W estimate on top for everything `powermetrics` can't see (RAM, disk, fans, PSU losses) — real wall power is somewhat higher than shown.</p>
+        <p><strong>CPU / GPU / Total</strong> — CPU and GPU are instantaneous draw straight from `powermetrics`, ~5 times per second. "Total" is the whole Mac: if <code>macmon</code> is installed it's the real reading from the Mac's own SMC power sensor (RAM, SSD, fans and all) divided by an assumed 90% power-supply efficiency, i.e. close to what a wall meter would show. Without macmon it's CPU+GPU plus a flat 7W guess - measured on an M4 Pro Mac mini that guess is about right at idle but 10-15W too low under full inference load, so install macmon (<code>brew install macmon</code>) if you care about the cost numbers.</p>
         <p><strong>RAM used</strong> — system-wide memory pressure, not just this app's usage. Turns red/orange as it approaches full, since that's the exact condition that caused real model-load failures during testing.</p>
         <p><strong>GPU Headroom</strong> — how much of the GPU is <em>not</em> busy right now, straight from powermetrics. Idle Macs sit around 75-85% (the OS itself uses some); it drops toward 0% during real inference. Low is expected while serving, not a problem.</p>
         <p><strong>Fan Speed / GPU Temp</strong> — read via <code>darkbloom fan status</code> (Apple Silicon doesn't expose either through powermetrics). Temp turns orange at 85°C and red at 95°C. If the GPU is hot but the fan is barely spinning, a banner appears at the top: that means Darkbloom's own fan-control helper isn't engaging. It isn't dangerous (macOS throttles the chip before any damage) but it costs performance - the small text under the gauge shows the helper's current mode.</p>
@@ -290,13 +290,14 @@
       <div class="explainer-section">
         <h4>Charts</h4>
         <p><strong>Power history</strong> — the same wattage as the live gauges, logged every 5 minutes so you can see trends over hours/days. Once there's enough history to need downsampling, a faint dashed "peak" line appears alongside the average — the highest single reading inside each plotted bucket, so brief spikes stay visible even when hundreds of raw samples are compressed into one line.</p>
-        <p><strong>Electricity cost vs. estimated revenue</strong> — running totals over time; see its own "How is this calculated?" details below the chart for the exact formula.</p>
-        <p><strong>Net (Estimated) Over Time</strong> — the same figure as the Net summary card, plotted over time instead of just showing the current number, so you can see whether it's trending up or down. This is our own running estimate over the full logged history (revenue from the flat blended $/token rate above, cost from real measured power) - not the same thing as the "Net" line in the Electricity Price & Profitability panel further down, which is real earnings minus real cost per 15-minute slot, only over that panel's own recent window.</p>
+        <p><strong>Real Earnings vs. Electricity Cost (last 48h)</strong> — the one chart to trust for "am I making money": every real ledger entry Darkbloom paid (including the base reward) added up, against the measured electricity cost added up, over the last two days. Both real, both USD. Builds up locally over ~2 days of dashboard uptime because Darkbloom's API only returns the most recent batch of entries.</p>
+        <p><strong>Estimated cost vs. revenue (folded away, nerdy)</strong> — two older charts using a rough local revenue guess (tokens × a flat rate) over the full logged history. They ignore the base reward, so they look far worse than reality; kept only for the long-range token-earnings trend.</p>
+        <p><strong>Electricity Price &amp; Profitability</strong> — the actual price per kWh, yesterday through tomorrow, from the source you pick (Sweden, Norway, any European bidding zone, UK Octopus Agile, US ComEd, or a flat rate). The right-axis "Net" overlay is real earnings minus real cost per 15-minute slot - so you can see which hours of the day are actually worth running. Picking a source/zone here changes every price-related number on the page, including cost tracking from that moment on.</p>
       </div>
 
       <div class="explainer-section">
         <h4>Ollama indicator</h4>
-        <p>Flags when Ollama has a model loaded in memory at the same time, since that competed for RAM with the Darkbloom provider and caused real crashes during testing on this 48GB Mac.</p>
+        <p>Only shown if Ollama (another program for running local AI models) is installed on this Mac. It flags when Ollama has a model loaded in memory at the same time, since that competes for the same unified memory as the Darkbloom provider and caused real crashes during testing on a 48GB Mac. If you don't have Ollama, you won't see this at all.</p>
       </div>
     </details>
   </div>
@@ -323,7 +324,7 @@
   </div>
 
   <div class="panel">
-    <h2 title="Compares today's real electricity price against this account's own measured $/hr active pay rate, converted to a break-even SEK/kWh price. Auto mode calls the real darkbloom start/stop CLI commands - Manual mode just shows the numbers and lets you trigger start/stop yourself.">Price Guard</h2>
+    <h2 title="Compares the current electricity price against this account's own measured $/hr active pay rate, converted to a break-even price per kWh in your configured currency. Auto mode calls the real darkbloom start/stop CLI commands - Manual mode just shows the numbers and lets you trigger start/stop yourself.">Price Guard <span class="gauge-time">(optional: pause serving when electricity costs more than serving earns)</span></h2>
     <div id="price-guard"></div>
   </div>
 
@@ -342,27 +343,44 @@
   </div>
 
   <div class="panel">
-    <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Revenue (USD) <span id="money-chart-stats" class="gauge-time"></span></h2>
+    <h2 title="What Darkbloom actually paid this account (every ledger entry, including the base reward for being online) versus what this Mac's electricity actually cost, both added up over the last two days. Real numbers on both sides - the one chart here that should line up with the Net card at the top.">Real Earnings vs. Electricity Cost — last 48h (USD) <span id="real48-chart-stats" class="gauge-time"></span></h2>
     <div class="legend">
-      <span><i style="background:var(--series-cost)"></i>Electricity cost</span>
-      <span><i style="background:var(--series-revenue)"></i>Estimated revenue</span>
+      <span><i style="background:var(--series-revenue)"></i>Real earnings (incl. base reward)</span>
+      <span><i style="background:var(--series-cost)"></i>Electricity cost (measured)</span>
     </div>
     <div class="chart-wrap">
-      <svg class="chart" id="chart-money"></svg>
-      <div class="tooltip" id="tooltip-money"></div>
+      <svg class="chart" id="chart-real48"></svg>
+      <div class="tooltip" id="tooltip-real48"></div>
     </div>
+    <p style="font-size:11px;color:var(--text-muted);margin-top:8px" id="real48-note"></p>
     <details class="sync-help" style="margin-top:10px">
-      <summary>How is the kWh price and Net figure calculated?</summary>
-      <p><strong>Electricity price:</strong> fetched live from <a href="https://www.elprisetjustnu.se" target="_blank" rel="noopener">elprisetjustnu.se</a> (Sweden, zone SE3), re-checked every 15 minutes - it's the actual spot price for the current hour, not an estimate. The source is Swedish SEK; this dashboard converts to USD (checked hourly) so everything on the page shares one currency.</p>
-      <p><strong>Cost so far:</strong> every 5 minutes, measured power draw (CPU+GPU from powermetrics, plus a fixed 7W baseline guess for RAM/disk/fans/PSU loss that powermetrics doesn't see) is converted to the energy used in that 5-minute slice, then priced at that slice's own USD/kWh rate. Those slices add up into the running "Accumulated electricity cost" card and the cost line on this chart.</p>
-      <p><strong>Estimated revenue:</strong> uses a flat $0.048/M-token rate, last recalibrated 2026-09-10 straight from this account's own real ledger, excluding jobs matching a known spam signature (not from Darkbloom's advertised alpha pricing, which didn't match real payouts even correcting for real prompt/completion token mix). Since <code>darkbloom status</code> only reports a combined token count (not split input/output), this stays a single blended rate rather than separate input/output prices - already USD-native, no conversion needed. Real network pricing/mix shifts over time, so this is recalibrated periodically rather than trusted indefinitely.</p>
-      <p><strong>Net (estimated) = Estimated revenue − Accumulated electricity cost.</strong> This is our own guess built from local numbers, not what Darkbloom actually paid - once the account is synced (see the Darkbloom Account panel above), "Net (real balance)" replaces it with your real ledger balance instead.</p>
+      <summary>How is the electricity cost calculated?</summary>
+      <p><strong>Electricity price:</strong> the source and zone you picked in the Electricity Price panel below, re-checked every 15 minutes - the actual price for the current hour, not an estimate. Prices arrive in that source's currency and are converted to USD (rate checked hourly) so everything on this page shares one currency.</p>
+      <p><strong>Power:</strong> every 5 minutes the Mac's average power draw is turned into the energy used in that slice and priced at that slice's own rate. If <code>macmon</code> is installed, power is the whole-system reading from the Mac's own SMC sensor (RAM, SSD, fans included) divided by an assumed 90% power-supply efficiency to approximate the wall. Without it, it's CPU+GPU from powermetrics plus a flat 7W guess - which measured about right at idle but ~10-15W too low under full load on an M4 Pro Mac mini. The footer at the bottom of the page says which method is in use.</p>
+      <p><strong>Net (real balance)</strong> at the top = your real account balance minus this accumulated cost.</p>
     </details>
-    <h2 style="margin-top:16px" title="Net = estimated revenue minus electricity cost, over the full logged history. Uses the same net_usd figures as the Net card above. Not the same as the real per-15-min Net further down in the Electricity Price & Profitability panel.">Net (Estimated) Over Time <span id="net-chart-stats" class="gauge-time"></span></h2>
-    <div class="chart-wrap">
-      <svg class="chart" id="chart-net"></svg>
-      <div class="tooltip" id="tooltip-net"></div>
-    </div>
+  </div>
+
+  <div class="panel">
+    <details class="explainer">
+      <summary>Estimated cost vs. revenue over full history (nerdy — will NOT match the Net card, read why)</summary>
+      <p style="font-size:12px;color:var(--text-muted);margin:8px 0">These two charts use a rough <em>local</em> revenue guess (tokens × a flat rate) that ignores the base reward - which is most of the real income - so they read far more pessimistic than your real balance. They're kept because they cover the full logged history (the real ledger only covers ~2 days locally) and show the token-earnings trend. For "am I making money", use the Net card and the real 48h chart above instead.</p>
+      <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Token Revenue (USD) <span id="money-chart-stats" class="gauge-time"></span></h2>
+      <div class="legend">
+        <span><i style="background:var(--series-cost)"></i>Electricity cost</span>
+        <span><i style="background:var(--series-revenue)"></i>Estimated token revenue (excl. base reward)</span>
+      </div>
+      <div class="chart-wrap">
+        <svg class="chart" id="chart-money"></svg>
+        <div class="tooltip" id="tooltip-money"></div>
+      </div>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Estimated revenue uses a flat $0.048 per million tokens, last recalibrated 2026-09-10 from this account's real ledger (excluding a known spam signature). <code>darkbloom status</code> only reports a combined token count, so it can't be split into input/output pricing. Recalibrated periodically, not trusted indefinitely.</p>
+      <h2 style="margin-top:16px" title="Estimated token revenue minus electricity cost, over the full logged history. Excludes the base reward, so it runs well below the real Net card.">Net (Estimated, excl. base reward) Over Time <span id="net-chart-stats" class="gauge-time"></span></h2>
+      <div class="chart-wrap">
+        <svg class="chart" id="chart-net"></svg>
+        <div class="tooltip" id="tooltip-net"></div>
+      </div>
+    </details>
   </div>
 
   <div class="panel">
@@ -370,24 +388,25 @@
       Electricity Price & Profitability
       <span class="gauge-time" id="elpris-chart-stats"></span>
     </h2>
-    <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)">
-      Zone: <select id="elpris-zone-select" style="font-size:13px;padding:2px 6px"></select>
-      <span style="color:var(--text-muted)"> — changes what this chart and the "$/kWh right now" figure above show. The Accumulated electricity cost card and its chart keep tracking this Mac's own real zone regardless, since that's the actual cost incurred here.</span>
+    <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary);display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center">
+      <span>Where you are: <select id="price-source-select" style="font-size:13px;padding:2px 6px;max-width:100%"></select></span>
+      <span id="price-zone-wrap">Zone: <select id="price-zone-select" style="font-size:13px;padding:2px 6px"></select></span>
+      <span id="price-fixed-wrap" hidden>Your price: <input type="number" id="price-fixed-input" step="0.01" min="0" style="width:80px;font-size:13px;padding:2px 4px"> <input type="text" id="price-fixed-currency-input" maxlength="3" placeholder="USD" style="width:48px;font-size:13px;padding:2px 4px;text-transform:uppercase"> per kWh</span>
+      <span id="price-source-status" style="color:var(--text-muted)"></span>
     </div>
-    <div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)" title="Spot price is only part of what Swedish households actually pay - grid fee and energy tax are added, then 25% VAT on top of all three. Both fields default to 0 (so the 'incl. fees & tax' line starts out identical to the spot line) since actual rates depend entirely on your own grid operator and subscription - fill in your own contract's numbers to make it accurate.">
-      Grid fee: <input type="number" id="elpris-grid-fee-input" step="0.1" min="0" style="width:64px;font-size:13px;padding:2px 4px"> öre/kWh ·
-      Energy tax: <input type="number" id="elpris-energy-tax-input" step="0.1" min="0" style="width:64px;font-size:13px;padding:2px 4px"> öre/kWh
-      <span style="color:var(--text-muted)"> (+ 25% VAT applied on top of spot+fee+tax) — adds the "incl. fees &amp; tax" line below.</span>
+    <div id="price-source-note" style="margin-bottom:8px;font-size:12px;color:var(--text-muted)"></div>
+    <div id="price-surcharge-row" style="margin-bottom:8px;font-size:13px;color:var(--text-secondary)" title="A spot price is only part of what you actually pay: your grid operator's fee and energy tax are added per kWh, then VAT on top of all three. Both fees default to 0 (so the 'incl. fees & tax' line starts out identical to the spot line) because real rates depend on your own contract - copy the per-kWh numbers from your bill.">
+      Grid fee: <input type="number" id="price-grid-fee-input" step="0.001" min="0" style="width:72px;font-size:13px;padding:2px 4px"> <span class="price-cur">/kWh</span> ·
+      Energy tax: <input type="number" id="price-energy-tax-input" step="0.001" min="0" style="width:72px;font-size:13px;padding:2px 4px"> <span class="price-cur">/kWh</span> ·
+      VAT: <input type="number" id="price-vat-input" step="1" min="0" max="100" style="width:52px;font-size:13px;padding:2px 4px"> %
+      <span style="color:var(--text-muted)"> — adds the "incl. fees &amp; tax" line below. Optional; the spot line alone is fine to start with.</span>
     </div>
     <div class="legend" id="elpris-legend"></div>
     <div class="chart-wrap">
       <svg class="chart" id="chart-elpris"></svg>
       <div class="tooltip" id="tooltip-elpris"></div>
     </div>
-    <p style="font-size:11px;color:var(--text-muted);margin-top:8px">
-      Sweden-only data source (<a href="https://www.elprisetjustnu.se" target="_blank" rel="noopener">elprisetjustnu.se</a>, Nord Pool zones SE1-SE4).
-      <strong>Adapting this dashboard for a different country?</strong> This chart and its zone picker are the Sweden-specific part - see the docstring on <code>_fetch_elpris_day()</code> in <code>server.py</code> for exactly what to replace it with for your own market's day-ahead price API (it spells out the required return shape and a few starting-point APIs for the EU/DE/AT/UK).
-    </p>
+    <p style="font-size:11px;color:var(--text-muted);margin-top:8px" id="price-source-footer"></p>
   </div>
 
   <div class="panel">
@@ -452,7 +471,7 @@ function initGauges() {
         <text x="100" y="88" class="gauge-number" id="gauge-num-${g.id}" text-anchor="middle">–</text>
         <text x="100" y="104" class="gauge-unit" text-anchor="middle">${g.unit === 'W' ? 'watt' : g.unit}</text>
       </svg>
-      <div class="gauge-label">${g.label}</div>
+      <div class="gauge-label" id="gauge-label-${g.id}">${g.label}</div>
       <div class="gauge-detail" id="gauge-detail-${g.id}"></div>
     </div>
   `).join('');
@@ -511,6 +530,12 @@ function updateGauges(data) {
       arcEl.setAttribute('stroke', val >= 95 ? 'var(--status-critical)' : val >= 85 ? 'var(--status-warning)' : `var(${g.color})`);
       if (detailEl) detailEl.textContent = val >= 95 ? 'very hot - see banner' : val >= 85 ? 'hot' : val >= 70 ? 'working' : 'cool';
     }
+    if (g.id === 'total') {
+      const measured = power && power.total_method === 'smc';
+      const labelEl = document.getElementById('gauge-label-total');
+      if (labelEl) labelEl.textContent = measured ? 'Total (whole Mac, measured)' : 'Total (CPU+GPU + 7W guess)';
+      if (detailEl) detailEl.textContent = measured ? 'SMC sensor ÷ 90% PSU' : 'install macmon for a real reading';
+    }
     if (g.id === 'fan' && detailEl) {
       const mode = fanTemp && fanTemp.fan_mode;
       detailEl.textContent = mode === 'error' ? 'helper error - see banner'
@@ -522,7 +547,7 @@ function updateGauges(data) {
     if (g.source === 'utilization' && detailEl) {
       const reqH = utilization.requests_per_hour;
       const tokH = utilization.tokens_per_hour;
-      detailEl.textContent = (reqH != null) ? `${reqH}/h · ${(tokH ?? 0).toLocaleString('en-US')} tok/h` : '';
+      detailEl.textContent = (reqH != null) ? `${reqH} requests/h · ${(tokH ?? 0).toLocaleString('en-US')} tokens/h` : '';
     }
   });
 }
@@ -530,10 +555,14 @@ function updateGauges(data) {
 function renderOllamaBadge(ollama) {
   const el = document.getElementById('ollama-badge');
   if (!el) return;
-  if (!ollama || ollama.count === 0) {
-    el.innerHTML = `<span class="pill"><span class="dot" style="background:var(--status-good)"></span>Ollama idle</span>`;
+  // Only meaningful on Macs that actually have Ollama - a green "Ollama idle"
+  // pill on a machine without it just makes a newcomer wonder what Ollama is.
+  if (!ollama || ollama.installed === false) {
+    el.innerHTML = '';
+  } else if (ollama.count === 0) {
+    el.innerHTML = `<span class="pill" title="Ollama (another local LLM runner) is installed but has nothing loaded - good, it isn't competing with Darkbloom for memory."><span class="dot" style="background:var(--status-good)"></span>Ollama idle</span>`;
   } else {
-    el.innerHTML = `<span class="pill"><span class="dot" style="background:var(--status-warning)"></span>Ollama: ${ollama.count} model${ollama.count === 1 ? '' : 's'} loaded (${ollama.loaded.join(', ')}) — competing for RAM</span>`;
+    el.innerHTML = `<span class="pill" title="Ollama has a model in memory right now. On a shared-memory Mac that directly reduces what Darkbloom can serve - unload it (ollama stop) if you're not using it."><span class="dot" style="background:var(--status-warning)"></span>Ollama: ${ollama.count} model${ollama.count === 1 ? '' : 's'} loaded (${ollama.loaded.join(', ')}) — competing for RAM with Darkbloom</span>`;
   }
 }
 
@@ -592,41 +621,46 @@ function fmtPct(v) {
   return (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
 }
 
+// Plain-language reading of the coordinator's trust string. The raw value
+// ("hardware / online", "self_signed / online", "awaiting coordinator
+// status") is kept as the card's sub-line for anyone who knows what it means.
 function trustStatus(trust) {
-  if (!trust) return {status:'critical', label:'unknown'};
-  if (trust.startsWith('hardware')) return {status:'good', label:trust};
-  if (trust.startsWith('self_signed')) return {status:'warning', label:trust};
+  if (!trust) return {status:'critical', label:'Unknown'};
+  if (trust.startsWith('hardware')) return {status:'good', label:'Trusted — receiving jobs'};
+  if (trust.startsWith('self_signed')) return {status:'warning', label:'Online, not trusted yet — no jobs'};
+  if (trust.toLowerCase().includes('awaiting')) return {status:'warning', label:'Waiting for the network'};
   return {status:'critical', label:trust};
 }
 
 const CARD_TOOLTIPS = {
-  'Trust': 'Hardware-attestation level with the coordinator. "hardware" = eligible for real traffic. "self_signed" = online but receiving nothing yet.',
-  'Daemon': 'Whether the darkbloom provider background process is running, and - read straight from the daemon\'s own live state file - whether it\'s idle (warm, waiting) or actively serving a request right this second (pulsing dot).',
-  'Requests': 'Requests/tokens served since the LAST daemon restart (this counter resets on every restart - it is not the lifetime total).',
-  'Warm models': 'Number of models currently loaded in memory and ready to serve instantly, vs. total downloaded to disk.',
-  'Accumulated electricity cost': 'Running total electricity cost since energy-monitor.sh started, based on measured power draw x live SE3 spot price.',
+  'Network trust': 'Whether Darkbloom\'s coordinator trusts this Mac enough to send it paid work. "Trusted" (raw: hardware) = yes, jobs can arrive. "Not trusted yet" (raw: self_signed) = online but receiving nothing - usually a temporary flicker on Darkbloom\'s side that clears within minutes. The raw coordinator string is shown underneath.',
+  'Provider': 'The darkbloom background program that actually serves requests. "Serving a request now" is read from its own live state file (pulsing dot). "Waiting for jobs" is the normal idle state - you still earn the base reward while trusted.',
+  'Requests': 'Requests and tokens served since the provider last (re)started - this counter resets on every restart, it is not a lifetime total. Lifetime figures are in the Darkbloom Account panel.',
+  'Warm models': 'Models currently loaded in memory and ready to answer instantly, vs. total downloaded to disk.',
+  'Accumulated electricity cost': 'Running total since energy tracking started: measured power draw x the live electricity price for your configured zone (see the Electricity Price panel), converted to USD.',
   'Net (estimated)': 'Local rough estimate: our own flat-rate guess at revenue, minus accumulated electricity cost. Only shown when the Darkbloom account is not connected.',
-  'Net (real balance)': 'Your real Darkbloom account balance (USD) minus accumulated electricity cost (converted from SEK).',
+  'Net (real balance)': 'Your real Darkbloom account balance (USD) minus accumulated electricity cost (converted to USD).',
 };
 
 function renderCards(status, energy, account, daemonState) {
   const t = trustStatus(status.trust);
   const daemonUp = status.daemon && status.daemon.startsWith('running');
   const active = daemonUp && daemonState && daemonState.inference_active === true;
-  const daemonLabel = !daemonUp ? 'down' : active ? 'running, actively serving' : 'running, idle';
+  const daemonLabel = !daemonUp ? 'Not running' : active ? 'Serving a request now' : 'Running, waiting for jobs';
   const latest = energy.latest;
+  const trustRaw = [status.trust, status.trust_reason].filter(Boolean).join(' · ');
   const cards = [
     {
-      label: 'Trust',
+      label: 'Network trust',
       value: `<span class="pill"><span class="dot" style="background:var(--status-${t.status})"></span>${t.label}</span>`,
-      sub: status.trust_reason || ''
+      sub: trustRaw ? `raw: ${trustRaw}` : ''
     },
     {
-      label: 'Daemon',
+      label: 'Provider',
       value: `<span class="pill"><span class="dot ${active ? 'pulse' : ''}" style="background:var(--status-${daemonUp ? 'good' : 'critical'})"></span>${daemonLabel}</span>`,
       sub: status.daemon || ''
     },
-    { label: 'Requests', value: fmtNum(status.requests_served), sub: fmtNum(status.tokens) + ' tokens' },
+    { label: 'Requests', value: fmtNum(status.requests_served), sub: fmtNum(status.tokens) + ' tokens since last restart' },
   ];
   const warmList = (status.warm_models || '').split(',').map(s => s.trim()).filter(Boolean);
   cards.push({
@@ -750,9 +784,11 @@ function renderPriceGuard(pg) {
   const daemonRunning = pg.daemon_running;
   const lastActionAge = pg.last_action_at ? fmtAgeShort(Date.now() / 1000 - pg.last_action_at) : null;
 
+  const cur = (live && live.currency) || '';
   const priceLine = live
-    ? `Now: <strong>${live.price_sek_per_kwh.toFixed(3)} SEK/kWh</strong> vs break-even <strong>${live.break_even_sek_per_kwh.toFixed(3)} SEK/kWh</strong> (from $${live.active_rate_per_hour_usd.toFixed(4)}/hr measured active rate) — ${live.reason}`
+    ? `Now: <strong>${live.price_per_kwh.toFixed(3)} ${cur}/kWh</strong> vs break-even <strong>${live.break_even_per_kwh.toFixed(3)} ${cur}/kWh</strong> (from $${live.active_rate_per_hour_usd.toFixed(4)}/hr measured active rate) — ${live.reason}`
     : 'Not enough data yet - needs at least one real served request and a live electricity price reading.';
+  const explainLine = `<strong>What this does:</strong> compares what electricity costs right now with what serving actually earns per hour on this Mac, and works out the "break-even" price above which running loses money. <strong>Manual</strong> just shows you the numbers. <strong>Auto</strong> stops the provider when the price is above break-even (plus the margin) and restarts it when it drops back below. Note it only counts <em>serving</em> income - not the base reward for being online - so it's deliberately cautious. Margin = how far past break-even before acting; Min running / Min stopped = how long to wait between actions so it doesn't flip back and forth.`;
 
   const lastActionLine = pg.last_action
     ? `Last action: <strong>${pg.last_action}</strong>${lastActionAge ? ' ' + lastActionAge : ''} — ${pg.last_reason || ''}`
@@ -773,6 +809,7 @@ function renderPriceGuard(pg) {
       <span class="warmup-interval" title="Minimum time the daemon must have been running before Auto is allowed to stop it again">Min running <input type="number" id="pg-min-running-input" min="0" step="5" value="${pg.min_running_min}"> min</span>
       <span class="warmup-interval" title="Minimum time the daemon must have been stopped before Auto is allowed to start it again">Min stopped <input type="number" id="pg-min-stopped-input" min="0" step="5" value="${pg.min_stopped_min}"> min</span>
     </div>
+    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${explainLine}</div>
     <div class="warmup-status">${priceLine}</div>
     <div class="warmup-status">${lastActionLine}</div>
     ${pg.mode === 'manual' ? `
@@ -1007,18 +1044,25 @@ function renderAccount(account) {
     return;
   }
 
+  // "Our local estimate" / "gap" columns are about how accurate this
+  // dashboard's own revenue guess is - interesting to whoever maintains that
+  // guess, noise (and easily misread as "Darkbloom shortchanges me") for
+  // everyone else. Off by default, remembered per browser.
+  let showEst = false;
+  try { showEst = localStorage.getItem('db-show-estimate-cols') === '1'; } catch (e) {}
+
   const rows = Object.entries(account.per_model || {})
     .sort((a, b) => b[1].jobs - a[1].jobs)
     .map(([model, d]) => {
       const cutClass = d.cut_pct == null ? '' : (d.cut_pct >= 0 ? 'cut-positive' : 'cut-negative');
+      const isFloor = model === 'base_reward';
       return `
       <tr>
-        <td>${model}</td>
+        <td>${isFloor ? '<span title="Not a model: the base reward Darkbloom pays just for being online and hardware-trusted, per time slot. Usually the biggest line here.">base reward (being online)</span>' : model}</td>
         <td>${fmtNum(d.jobs)}</td>
-        <td>${fmtNum(d.prompt_tokens + d.completion_tokens)}</td>
+        <td>${isFloor ? '–' : fmtNum(d.prompt_tokens + d.completion_tokens)}</td>
         <td>$${d.amount_usd.toFixed(6)}</td>
-        <td>$${d.local_estimate_usd.toFixed(6)}</td>
-        <td class="${cutClass}">${fmtPct(d.cut_pct)}</td>
+        ${showEst ? `<td>${isFloor ? '–' : '$' + d.local_estimate_usd.toFixed(6)}</td><td class="${cutClass}">${isFloor ? '–' : fmtPct(d.cut_pct)}</td>` : ''}
         <td>${d.real_usd_per_m_tokens == null ? '–' : '$' + d.real_usd_per_m_tokens.toFixed(3)}</td>
       </tr>
     `;
@@ -1034,17 +1078,23 @@ function renderAccount(account) {
     </div>
     <div class="table-scroll">
     <table class="rotation-table">
-      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th><th title="What our own flat $0.048/M-token guess would have estimated for these same tokens - that rate is recalibrated periodically from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means our guess ran low.">Darkbloom gap</th><th title="Profitability per model: the real rate Darkbloom actually paid per million tokens for this model. Lets you compare models by efficiency, not just raw job/token volume.">Real rate ($/M tok)</th></tr></thead>
+      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th>${showEst ? `<th title="What our own flat $0.048 per million tokens guess would have estimated for these same tokens - recalibrated periodically from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means it ran low.">Our estimate's error</th>` : ''}<th title="What Darkbloom actually paid per million tokens for this model - compare models by how well they pay, not just volume.">Real rate ($ per million tokens)</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     </div>
     <div class="rotation-summary" style="margin-top:10px">
-      Totals — real payout: <strong>$${(cs.total_real_usd ?? 0).toFixed(6)}</strong> ·
-      local estimate: <strong>$${(cs.total_local_estimate_usd ?? 0).toFixed(6)}</strong> ·
-      overall gap vs. Darkbloom: <strong class="${cs.cut_pct != null && cs.cut_pct >= 0 ? 'cut-positive' : 'cut-negative'}">${fmtPct(cs.cut_pct)}</strong>
-      <br><span style="font-size:11px">Not an official platform fee or any claim about Darkbloom's pricing - Darkbloom's alpha terms advertise 0% fee. This is purely how far off OUR OWN rough flat-rate guess (a single blended $/token number, not split by input/output) turned out to be; base_reward entries are excluded since they aren't token-based.</span>
+      <label style="cursor:pointer;font-size:12px;color:var(--text-muted)"><input type="checkbox" id="show-estimate-cols" ${showEst ? 'checked' : ''}> Show this dashboard's own estimate columns (nerdy - about our guess's accuracy, not about Darkbloom)</label>
+      ${showEst ? `<br>Totals — real payout: <strong>$${(cs.total_real_usd ?? 0).toFixed(6)}</strong> ·
+      our estimate: <strong>$${(cs.total_local_estimate_usd ?? 0).toFixed(6)}</strong> ·
+      our estimate's error: <strong class="${cs.cut_pct != null && cs.cut_pct >= 0 ? 'cut-positive' : 'cut-negative'}">${fmtPct(cs.cut_pct)}</strong>
+      <br><span style="font-size:11px">Not an official platform fee or any claim about Darkbloom's pricing - Darkbloom's alpha terms advertise 0% fee. This is purely how far off OUR OWN rough flat-rate guess (a single blended $/token number, not split by input/output) turned out to be; base reward entries are excluded since they aren't token-based.</span>` : ''}
     </div>
   `;
+  const cb = document.getElementById('show-estimate-cols');
+  if (cb) cb.onchange = () => {
+    try { localStorage.setItem('db-show-estimate-cols', cb.checked ? '1' : '0'); } catch (e) {}
+    renderAccount(account);
+  };
 }
 
 function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
@@ -1113,47 +1163,97 @@ Note: active $/hr counts every real job including likely spam (see the token-len
   `;
 }
 
-function renderElpris(elpris48h) {
-  const sel = document.getElementById('elpris-zone-select');
-  if (sel && elpris48h && elpris48h.valid_zones) {
-    sel.innerHTML = elpris48h.valid_zones.map(z =>
-      `<option value="${z}" ${z === elpris48h.zone ? 'selected' : ''}>${z}</option>`
-    ).join('');
-    // Reassigned (not addEventListener) every render since these input nodes
-    // persist across refreshes - addEventListener would stack a new duplicate
-    // handler on every 10s poll instead of replacing it.
-    sel.onchange = async () => {
-      await fetch('/api/elpris_zone', { method: 'POST', body: JSON.stringify({ zone: sel.value }) });
-      refresh();
-    };
+function renderPriceControls(p) {
+  const sources = (p && p.sources) || {};
+  const srcSel = document.getElementById('price-source-select');
+  const zoneSel = document.getElementById('price-zone-select');
+  const zoneWrap = document.getElementById('price-zone-wrap');
+  const fixedWrap = document.getElementById('price-fixed-wrap');
+  const fixedInput = document.getElementById('price-fixed-input');
+  const fixedCurInput = document.getElementById('price-fixed-currency-input');
+  if (!srcSel || !p) return;
+
+  const postSource = async (body) => {
+    await fetch('/api/price_source', { method: 'POST', body: JSON.stringify(body) });
+    refresh();
+  };
+
+  // Reassigned (not addEventListener) every render since these input nodes
+  // persist across refreshes - addEventListener would stack a duplicate
+  // handler on every 10s poll instead of replacing it.
+  if (document.activeElement !== srcSel) {
+    srcSel.innerHTML = Object.entries(sources).map(([id, s]) =>
+      `<option value="${id}" ${id === p.source ? 'selected' : ''}>${s.label}</option>`).join('');
+  }
+  srcSel.onchange = () => postSource({ source: srcSel.value });
+
+  const src = sources[p.source] || {};
+  const zones = src.zones || [];
+  zoneWrap.hidden = zones.length === 0;
+  if (zones.length && document.activeElement !== zoneSel) {
+    const labels = src.zone_labels || {};
+    zoneSel.innerHTML = zones.map(z =>
+      `<option value="${z}" ${z === p.zone ? 'selected' : ''}>${labels[z] ? `${z} — ${labels[z]}` : z}</option>`).join('');
+  }
+  zoneSel.onchange = () => postSource({ zone: zoneSel.value });
+
+  fixedWrap.hidden = p.source !== 'fixed';
+  if (p.source === 'fixed') {
+    if (document.activeElement !== fixedInput) fixedInput.value = p.fixed_price ?? 0;
+    if (document.activeElement !== fixedCurInput) fixedCurInput.value = p.currency || 'USD';
+    const postFixed = () => postSource({ fixed_price: parseFloat(fixedInput.value) || 0, fixed_currency: (fixedCurInput.value || 'USD').toUpperCase() });
+    fixedInput.onchange = postFixed;
+    fixedCurInput.onchange = postFixed;
   }
 
-  const surcharge = (elpris48h && elpris48h.surcharge) || { grid_fee_ore_per_kwh: 0, energy_tax_ore_per_kwh: 0, vat_pct: 25 };
-  const gridFeeInput = document.getElementById('elpris-grid-fee-input');
-  const energyTaxInput = document.getElementById('elpris-energy-tax-input');
+  const status = document.getElementById('price-source-status');
+  if (status) {
+    const rate = p.local_per_usd && p.currency !== 'USD' ? ` · 1 USD = ${p.local_per_usd.toFixed(3)} ${p.currency}` : '';
+    status.textContent = p.today_available ? `${p.currency}${rate}` : `no prices received from this source yet — if this stays empty, try another zone/source`;
+  }
+  const note = document.getElementById('price-source-note');
+  if (note) note.textContent = src.note || '';
+  document.querySelectorAll('.price-cur').forEach(el => { el.textContent = `${p.currency}/kWh`; });
+
+  const surcharge = p.surcharge || { grid_fee_per_kwh: 0, energy_tax_per_kwh: 0, vat_pct: 0 };
+  const gridFeeInput = document.getElementById('price-grid-fee-input');
+  const energyTaxInput = document.getElementById('price-energy-tax-input');
+  const vatInput = document.getElementById('price-vat-input');
   const postSurcharge = async () => {
-    await fetch('/api/elpris_surcharge', { method: 'POST', body: JSON.stringify({
-      grid_fee_ore_per_kwh: parseFloat(gridFeeInput.value) || 0,
-      energy_tax_ore_per_kwh: parseFloat(energyTaxInput.value) || 0,
+    await fetch('/api/price_surcharge', { method: 'POST', body: JSON.stringify({
+      grid_fee_per_kwh: parseFloat(gridFeeInput.value) || 0,
+      energy_tax_per_kwh: parseFloat(energyTaxInput.value) || 0,
+      vat_pct: parseFloat(vatInput.value) || 0,
     }) });
     refresh();
   };
-  if (gridFeeInput && document.activeElement !== gridFeeInput) gridFeeInput.value = surcharge.grid_fee_ore_per_kwh;
-  if (energyTaxInput && document.activeElement !== energyTaxInput) energyTaxInput.value = surcharge.energy_tax_ore_per_kwh;
-  if (gridFeeInput) gridFeeInput.onchange = postSurcharge;
-  if (energyTaxInput) energyTaxInput.onchange = postSurcharge;
+  if (document.activeElement !== gridFeeInput) gridFeeInput.value = surcharge.grid_fee_per_kwh;
+  if (document.activeElement !== energyTaxInput) energyTaxInput.value = surcharge.energy_tax_per_kwh;
+  if (document.activeElement !== vatInput) vatInput.value = surcharge.vat_pct;
+  gridFeeInput.onchange = postSurcharge;
+  energyTaxInput.onchange = postSurcharge;
+  vatInput.onchange = postSurcharge;
 
-  const prices = (elpris48h && elpris48h.prices) || [];
-  const timestamps = prices.map(p => p.time_start);
-  const values = prices.map(p => p.usd_per_kwh);
-  const usdSekRate = (elpris48h && elpris48h.usd_sek_rate) || 9.5;
-  const totalValues = prices.map(p => {
-    if (p.sek_per_kwh == null) return null;
-    const oreAllIn = (p.sek_per_kwh * 100 + surcharge.grid_fee_ore_per_kwh + surcharge.energy_tax_ore_per_kwh) * (1 + surcharge.vat_pct / 100);
-    return (oreAllIn / 100) / usdSekRate;
+  const footer = document.getElementById('price-source-footer');
+  if (footer) {
+    const link = src.url ? `<a href="${src.url}" target="_blank" rel="noopener">${src.url.replace(/^https?:\/\//, '')}</a>` : 'your own flat rate';
+    footer.innerHTML = `Source: ${link} — free, no account needed. Changing source or zone here changes <strong>everything</strong> price-related on this page: this chart, the "$/kWh right now" figure at the top, Price Guard's break-even, and the cost tracking from now on (past cost rows keep the price they were logged with). Sources with a day-ahead auction show tomorrow once it's published (usually early-to-mid afternoon). Missing your country? The fetchers in <code>server.py</code> are ~20 lines each - <a href="https://github.com/jordglob/darkbloom-live-stats/issues" target="_blank" rel="noopener">open an issue</a> with a free price API and it can be added.`;
+  }
+  return surcharge;
+}
+
+function renderElpris(p) {
+  const surcharge = renderPriceControls(p) || { grid_fee_per_kwh: 0, energy_tax_per_kwh: 0, vat_pct: 0 };
+  const prices = (p && p.prices) || [];
+  const timestamps = prices.map(x => x.time_start);
+  const values = prices.map(x => x.usd_per_kwh);
+  const rate = (p && p.local_per_usd) || 1;
+  const totalValues = prices.map(x => {
+    if (x.price_per_kwh == null) return null;
+    return ((x.price_per_kwh + surcharge.grid_fee_per_kwh + surcharge.energy_tax_per_kwh) * (1 + surcharge.vat_pct / 100)) / rate;
   });
-  const netValues = prices.map(p => p.net_usd ?? ((p.earnings_usd || 0) - (p.cost_usd || 0)));
-  const hasSurcharge = surcharge.grid_fee_ore_per_kwh > 0 || surcharge.energy_tax_ore_per_kwh > 0;
+  const netValues = prices.map(x => x.net_usd ?? ((x.earnings_usd || 0) - (x.cost_usd || 0)));
+  const hasSurcharge = surcharge.grid_fee_per_kwh > 0 || surcharge.energy_tax_per_kwh > 0 || surcharge.vat_pct > 0;
 
   const leftSeries = [{ name: 'Spot price', values }];
   const leftColors = ['line-elpris'];
@@ -1169,9 +1269,9 @@ function renderElpris(elpris48h) {
 
   const legendEl = document.getElementById('elpris-legend');
   if (legendEl) {
-    legendEl.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Spot price</span>` +
+    legendEl.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Electricity price (USD/kWh, left axis)</span>` +
       (hasSurcharge ? `<span><i style="background:var(--series-elpris-total)"></i>Incl. fees & tax</span>` : '') +
-      `<span><i style="background:var(--series-revenue)"></i>Net (real, per 15-min) = earnings − cost, right axis, indicative - not the same as the "Net (Estimated) Over Time" chart above</span>`;
+      `<span><i style="background:var(--series-revenue)"></i>Net per 15 min = real earnings − real cost (USD, right axis)</span>`;
   }
 
   let nowVal = null;
@@ -1179,16 +1279,46 @@ function renderElpris(elpris48h) {
   const realValues = values.filter(v => v != null);
   if (realValues.length) {
     const nowMs = Date.now();
-    const nowIdx = prices.findIndex(p => new Date(p.time_end).getTime() > nowMs);
+    const nowIdx = prices.findIndex(x => new Date(x.time_end).getTime() > nowMs);
     nowVal = (nowIdx >= 0 && values[nowIdx] != null) ? values[nowIdx] : realValues.at(-1);
     if (statsEl) {
-      const tomorrowNote = elpris48h.tomorrow_available ? 'tomorrow published' : "tomorrow not published yet (usually appears mid-afternoon)";
+      const tomorrowNote = !p.has_forecast ? 'real-time source, no day-ahead prices'
+        : p.tomorrow_available ? 'tomorrow published' : 'tomorrow not published yet (usually appears mid-afternoon)';
       statsEl.textContent = `now: ${fmtUsdPerKwh(nowVal)} · min: ${fmtUsdPerKwh(Math.min(...realValues))} · max: ${fmtUsdPerKwh(Math.max(...realValues))} · ${tomorrowNote}`;
     }
   } else if (statsEl) {
     statsEl.textContent = '';
   }
-  return { nowVal, zone: elpris48h && elpris48h.zone };
+  return { nowVal, zone: p && p.zone, source: p && p.source };
+}
+
+function renderReal48(p) {
+  // Cumulative real earnings vs. cumulative measured cost over the price
+  // panel's 15-min grid - the same per-bucket data as its Net overlay, just
+  // summed so it reads like a bank balance. Future buckets are gaps.
+  const prices = (p && p.prices) || [];
+  const nowMs = Date.now();
+  let earn = 0, cost = 0, firstIdx = -1;
+  const earnVals = [], costVals = [];
+  prices.forEach((x, i) => {
+    const elapsed = new Date(x.time_end).getTime() <= nowMs;
+    if (!elapsed) { earnVals.push(null); costVals.push(null); return; }
+    if (firstIdx < 0 && ((x.earnings_usd || 0) > 0 || (x.cost_usd || 0) > 0)) firstIdx = i;
+    earn += x.earnings_usd || 0;
+    cost += x.cost_usd || 0;
+    earnVals.push(earn);
+    costVals.push(cost);
+  });
+  renderLineChart('chart-real48', 'tooltip-real48', prices.map(x => x.time_start),
+    [{ name: 'Real earnings', values: earnVals }, { name: 'Electricity cost', values: costVals }],
+    ['line-revenue', 'line-cost'], fmtUsd);
+  const statsEl = document.getElementById('real48-chart-stats');
+  const noteEl = document.getElementById('real48-note');
+  if (statsEl) statsEl.textContent = prices.length ? `earned ${fmtUsd(earn)} · cost ${fmtUsd(cost)} · net ${fmtUsd(earn - cost)}` : '';
+  if (noteEl) {
+    const coverage = firstIdx >= 0 ? `Real data from ${fmtTime(prices[firstIdx].time_start)} — the ledger history builds up locally over ~2 days of dashboard uptime, so a freshly installed dashboard starts near the right edge.` : 'No ledger entries in this window yet - fills in as the account sync runs.';
+    noteEl.textContent = coverage;
+  }
 }
 
 function fmtAgeShort(sec) {
@@ -1231,7 +1361,7 @@ function renderBanners(status, energy, doctor, daemonState) {
     // every other status on this page ("Daemon: not running") - say why.
     const live = lastPriceGuard.live;
     const priceNote = live
-      ? ` (${live.price_sek_per_kwh.toFixed(3)} vs break-even ${live.break_even_sek_per_kwh.toFixed(3)} SEK/kWh)`
+      ? ` (${live.price_per_kwh.toFixed(3)} vs break-even ${live.break_even_per_kwh.toFixed(3)} ${live.currency || ''}/kWh)`
       : '';
     banners.push(banner('warning', `Price Guard has paused serving — not profitable at the current electricity price${priceNote}. Re-evaluates every 5 min; will resume automatically once profitable again.`));
   }
@@ -1565,7 +1695,7 @@ async function refresh() {
   try {
     const res = await fetch('/api/data');
     const data = await res.json();
-    const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations, elpris_48h } = data;
+    const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations, price_48h } = data;
     lastUtilization = utilization || null;
 
     renderCards(status, energy, account, daemon_state);
@@ -1574,7 +1704,8 @@ async function refresh() {
     renderAccount(account);
     renderDisk(disk);
     renderNerdyStats(daemon_state, account, doctor, inference_durations);
-    const elprisNow = renderElpris(elpris_48h);
+    const elprisNow = renderElpris(price_48h);
+    renderReal48(price_48h);
     updateFavicon(status);
 
     const rows = energy.rows || {};
@@ -1608,10 +1739,13 @@ async function refresh() {
 
     document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
     document.getElementById('kwh-price').textContent = elprisNow && elprisNow.nowVal != null
-      ? `⚡ $${elprisNow.nowVal.toFixed(4)}/kWh right now (${elprisNow.zone})` : '';
+      ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';
+    const powerMethod = (energy.latest && energy.latest.power_method) || 'soc+baseline';
     document.getElementById('footnote').innerHTML =
-      `Power/cost includes an estimated baseline (7W) on top of measured CPU+GPU, since powermetrics only measures SoC power rails, not the whole machine's wall power ·
-       Revenue is a rough approximation (blended flat rate $0.048/M tokens, last recalibrated 2026-09-10 from this account's real ledger, not split by input/output) ·
+      (powerMethod === 'smc'
+        ? `Power is the whole-system reading from the Mac's SMC sensor (via macmon; covers RAM/SSD/fans) ÷ 90% assumed power-supply efficiency ≈ wall draw`
+        : `Power is CPU+GPU from powermetrics plus a flat 7W guess for everything else (RAM/SSD/fans/PSU) - install <code>macmon</code> (<code>brew install macmon</code>) and restart the energy monitor for a real whole-system measurement`) +
+      ` · Estimated token revenue uses a flat $0.048 per million tokens, last recalibrated 2026-09-10 from this account's real ledger ·
        ${energy.total_rows ?? 0} data points logged · updates every 10s (power gauges ~5Hz, RAM/Ollama every 2s)`;
   } catch (e) {
     document.getElementById('updated').textContent = 'could not fetch data: ' + e;

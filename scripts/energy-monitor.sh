@@ -4,29 +4,44 @@
 # which needs sudo - see README). Does NOT need sudo itself. Logs to
 # ~/.darkbloom/energy-log.csv every 5 minutes.
 #
-# ELECTRICITY PRICE: defaults to Sweden's free spot-price API
-# (elprisetjustnu.se, zone SE3). If you're elsewhere, set FIXED_PRICE_PER_KWH
-# below to a flat rate in your own currency instead - the rest of the script
-# doesn't care about currency, it just needs a number per kWh.
+# ELECTRICITY PRICE: comes from the dashboard server's single configured price
+# source (GET /api/price_now) - pick your country/zone/currency or a flat rate
+# in the dashboard's Electricity Price panel, nothing to edit here. The CSV
+# columns are still named elpris_sek_kwh / usd_sek for history compatibility,
+# but they hold "price per kWh in your configured currency" and "units of that
+# currency per 1 USD".
+#
+# POWER: if `macmon` (brew install macmon) is on PATH, whole-system power is
+# read from the Mac's own SMC sensor (covers RAM, SSD, fans, everything - not
+# just CPU+GPU), divided by PSU_EFFICIENCY to approximate wall draw. Without
+# it, falls back to powermetrics CPU+GPU plus a flat BASELINE_W guess.
 
 set -uo pipefail
 export LC_ALL=C  # force period as decimal separator (some locales use comma, which bc/awk can't parse)
 : "${HOME:=$(eval echo ~"$(id -un)")}"
+# launchd starts us with a minimal PATH; Homebrew tools (jq, macmon) live here.
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
 
 RAW_LOG="/tmp/darkbloom-pm-raw.log"
 DIR="$HOME/.darkbloom"
 CSV="$DIR/energy-log.csv"
 STATE="$DIR/energy-monitor.state"
-ZONE="SE3"                 # Swedish price zone - only relevant if FIXED_PRICE_PER_KWH is empty
-FIXED_PRICE_PER_KWH=""     # e.g. "0.30" to skip the Swedish API entirely and use a flat rate
+DASHBOARD_URL="http://127.0.0.1:8787"
 INTERVAL=300
 DARKBLOOM="$HOME/.darkbloom/bin/darkbloom"
 # powermetrics cpu_power/gpu_power only measures the SoC's own power rails, not
 # the whole machine's wall power (RAM, storage, networking/fans, PSU losses are
-# not counted). BASELINE_W is a constant estimate for everything else - set it
-# to your own measurement if you have a smart plug, otherwise a reasonable
-# guess for a Mac mini/Studio at idle-ish load.
+# not counted). BASELINE_W is the fallback constant for everything else when
+# macmon isn't available. Measured on an M4 Pro Mac mini: the real gap is
+# ~5W at idle and grows under load (RAM + fans), so this is a rough middle.
 BASELINE_W=7
+# SMC's system-power sensor sits after the power supply, so wall draw is a bit
+# higher. ~90% is typical for Apple's small-form-factor PSUs at these loads;
+# a smart plug is the only way to pin this down for your own unit.
+PSU_EFFICIENCY=0.90
+MACMON="$(command -v macmon 2>/dev/null || true)"
+MACMON_LOG="$DIR/macmon.jsonl"
+MACMON_PID=""
 # Rough revenue estimate. Originally a 50/50 blend of quoted alpha pricing
 # ($0.05/M input + $0.20/M output = $0.125/M), but that never matched real
 # ledger data even after correcting for the real ~2:1 prompt:completion mix
@@ -43,7 +58,20 @@ BLENDED_USD_PER_TOKEN=$(echo "scale=12; 0.048/1000000" | bc 2>/dev/null)
 [ -z "$BLENDED_USD_PER_TOKEN" ] && BLENDED_USD_PER_TOKEN=0.000000048
 
 mkdir -p "$DIR"
-[ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w,avg_gpu_active_pct" > "$CSV"
+[ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w,avg_gpu_active_pct,power_method" > "$CSV"
+
+# Whole-system power sampler: macmon reads the SMC every 5s into a JSONL log
+# this script averages per interval. Runs as our child (no sudo), dies with us.
+start_macmon() {
+  [ -n "$MACMON" ] || return 0
+  : > "$MACMON_LOG"
+  "$MACMON" pipe -s 0 -i 5000 >> "$MACMON_LOG" 2>/dev/null &
+  MACMON_PID=$!
+}
+cleanup() { [ -n "$MACMON_PID" ] && kill "$MACMON_PID" 2>/dev/null; }
+trap cleanup EXIT INT TERM
+start_macmon
+MACMON_OFFSET=0
 
 LAST_OFFSET=0
 CUM_WH=0
@@ -106,27 +134,22 @@ while true; do
     fi
   fi
 
-  # --- electricity price, cached 15 min ---
-  if [ -n "$FIXED_PRICE_PER_KWH" ]; then
-    ELPRIS_VAL="$FIXED_PRICE_PER_KWH"
-    ELPRIS_TS=$NOW
-  elif [ $((NOW - ELPRIS_TS)) -gt 900 ]; then
-    RESP=$(curl -s --max-time 10 "https://www.elprisetjustnu.se/api/v1/prices/$(date +%Y)/$(date +%m)-$(date +%d)_${ZONE}.json" || true)
-    NEWVAL=$(echo "$RESP" | jq -r --arg now "$NOW_ISO" '[.[] | select(.time_start <= $now and .time_end > $now)][0].SEK_per_kWh // empty' 2>/dev/null || true)
+  # --- electricity price + exchange rate, one call to the dashboard's configured
+  # source, cached 15 min. The dashboard owns which country/zone/currency is
+  # in use so this script and the charts can never disagree. ---
+  if [ $((NOW - ELPRIS_TS)) -gt 900 ]; then
+    RESP=$(curl -s --max-time 10 "$DASHBOARD_URL/api/price_now" || true)
+    NEWVAL=$(echo "$RESP" | jq -r '.price_per_kwh // empty' 2>/dev/null || true)
+    NEWRATE=$(echo "$RESP" | jq -r '.local_per_usd // empty' 2>/dev/null || true)
     if [ -n "${NEWVAL:-}" ]; then
       ELPRIS_VAL=$NEWVAL
       ELPRIS_TS=$NOW
+      if [ -n "${NEWRATE:-}" ]; then
+        USDSEK_VAL=$NEWRATE
+        USDSEK_TS=$NOW
+      fi
     else
-      log "WARNING: could not fetch electricity price right now, keeping last value ($ELPRIS_VAL per kWh)"
-    fi
-  fi
-
-  # --- usd/sek, cached 1h (only meaningful if you're actually tracking SEK) ---
-  if [ $((NOW - USDSEK_TS)) -gt 3600 ]; then
-    NEWRATE=$(curl -sL --max-time 10 "https://api.frankfurter.app/latest?from=USD&to=SEK" | jq -r '.rates.SEK // empty' 2>/dev/null || true)
-    if [ -n "${NEWRATE:-}" ]; then
-      USDSEK_VAL=$NEWRATE
-      USDSEK_TS=$NOW
+      log "WARNING: could not get the electricity price from the dashboard at $DASHBOARD_URL (is it running?) - keeping last value ($ELPRIS_VAL per kWh)"
     fi
   fi
 
@@ -159,7 +182,33 @@ while true; do
     fi
   fi
 
+  # --- whole-system power from macmon's SMC log for this interval, if we have
+  # it; otherwise SoC + baseline guess. Restart macmon if it died. ---
+  POWER_METHOD="soc+baseline"
   TOTAL_W=$(calc "scale=3; $AVG_W + $BASELINE_W")
+  if [ -n "$MACMON" ]; then
+    if [ -n "$MACMON_PID" ] && ! kill -0 "$MACMON_PID" 2>/dev/null; then
+      log "macmon exited - restarting it"
+      start_macmon
+      MACMON_OFFSET=0
+    fi
+    if [ -f "$MACMON_LOG" ]; then
+      MSIZE=$(stat -f%z "$MACMON_LOG" 2>/dev/null || echo 0)
+      [ "$MACMON_OFFSET" -gt "$MSIZE" ] && MACMON_OFFSET=0
+      if [ "$MSIZE" -gt "$MACMON_OFFSET" ]; then
+        SYS_W=$(tail -c +$((MACMON_OFFSET + 1)) "$MACMON_LOG" | jq -s '[.[] | .sys_power | select(. != null)] | if length > 0 then add / length else empty end' 2>/dev/null || true)
+        MACMON_OFFSET=$MSIZE
+        if [ -n "${SYS_W:-}" ]; then
+          TOTAL_W=$(calc "scale=3; $SYS_W / $PSU_EFFICIENCY")
+          POWER_METHOD="smc"
+        fi
+      fi
+      # keep the log from growing forever: it's only ever read incrementally
+      if [ "$MSIZE" -gt 20000000 ]; then
+        cleanup; start_macmon; MACMON_OFFSET=0
+      fi
+    fi
+  fi
   INTERVAL_WH=$(calc "scale=6; $TOTAL_W * $INTERVAL / 3600")
   CUM_WH=$(calc "scale=6; $CUM_WH + $INTERVAL_WH")
   INTERVAL_COST=$(calc "scale=6; ($INTERVAL_WH/1000) * $ELPRIS_VAL")
@@ -192,7 +241,7 @@ while true; do
   EST_REV_SEK=$(calc "scale=6; $EST_REV_USD * $USDSEK_VAL")
   NET_SEK=$(calc "scale=6; $EST_REV_SEK - $CUM_COST")
 
-  echo "$NOW_ISO,$AVG_W,$INTERVAL_WH,$CUM_WH,$ELPRIS_VAL,$INTERVAL_COST,$CUM_COST,$USDSEK_VAL,$REQS,$TOKENS,$EST_REV_USD,$EST_REV_SEK,$NET_SEK,$TOTAL_W,$AVG_GPU_ACTIVE_PCT" >> "$CSV"
+  echo "$NOW_ISO,$AVG_W,$INTERVAL_WH,$CUM_WH,$ELPRIS_VAL,$INTERVAL_COST,$CUM_COST,$USDSEK_VAL,$REQS,$TOKENS,$EST_REV_USD,$EST_REV_SEK,$NET_SEK,$TOTAL_W,$AVG_GPU_ACTIVE_PCT,$POWER_METHOD" >> "$CSV"
 
   {
     echo "LAST_OFFSET=$LAST_OFFSET"
@@ -206,7 +255,11 @@ while true; do
     echo "CUM_TOKENS=$CUM_TOKENS"
   } > "$STATE"
 
-  log "SoC=${AVG_W}W (+baseline ${BASELINE_W}W = ${TOTAL_W}W)  cumulative energy=${CUM_WH}Wh  electricity cost=${CUM_COST}  ~revenue=${EST_REV_SEK} SEK  net=${NET_SEK} SEK"
+  if [ "$POWER_METHOD" = "smc" ]; then
+    log "SoC=${AVG_W}W  whole-system (SMC/${PSU_EFFICIENCY} PSU)=${TOTAL_W}W  cumulative energy=${CUM_WH}Wh  electricity cost=${CUM_COST}  ~revenue=${EST_REV_SEK}  net=${NET_SEK} (local currency)"
+  else
+    log "SoC=${AVG_W}W (+baseline ${BASELINE_W}W = ${TOTAL_W}W)  cumulative energy=${CUM_WH}Wh  electricity cost=${CUM_COST}  ~revenue=${EST_REV_SEK}  net=${NET_SEK} (local currency)"
+  fi
 
   sleep "$INTERVAL"
 done

@@ -13,12 +13,13 @@ already stores on this Mac.
 Community tool, use at your own risk. It only reads local system state and
 your own Darkbloom account data - it does not modify your provider's behavior.
 
-**Built in Sweden, for a Swedish electricity market.** Everything works
-anywhere, but the cost tracking defaults to Swedish spot prices in SEK and the
-price-forecast chart is Sweden-only. If you're elsewhere, one edit in
-`energy-monitor.sh` gives you a flat price in your own currency - see
-[Electricity price](#electricity-price) below. Do that before reading too much
-into the cost numbers.
+**Works anywhere.** Electricity prices come from free, key-less public APIs
+you pick in the dashboard itself: Sweden and Norway (Nord Pool day-ahead),
+every European bidding zone (Energy-Charts / EPEX), UK Octopus Agile, US
+ComEd hourly pricing, or a flat rate in any currency. Defaults to Sweden
+(SE3) because that's where it was built - change it once in the Electricity
+Price panel and every cost number on the page follows. See
+[Electricity price](#electricity-price).
 
 **New to running a provider?** The dashboard's top banners are graded: grey
 means "a check flagged something but requests are succeeding, no rush",
@@ -70,13 +71,20 @@ machine it runs on:
 - **History charts** - power over time, cumulative electricity cost vs.
   estimated revenue, with an expandable explainer for exactly how the kWh
   price and net figure are calculated
-- **Electricity Price & Profitability** - Sweden's real day-ahead spot prices
-  (Nord Pool, zone picker for SE1-SE4) shown both backward (yesterday, always
-  real) and forward (today + tomorrow once published, never guessed), with an
-  optional grid-fee/energy-tax/VAT line and a real Net (earnings minus this
-  Mac's own electricity cost) overlay per 15-minute slot - see at a glance
-  whether a given stretch was actually profitable, all currency-converted to
-  USD throughout
+- **Electricity Price & Profitability** - real prices per kWh from the
+  source you pick (see [Electricity price](#electricity-price)), shown both
+  backward (yesterday, always real) and forward (today + tomorrow once the
+  day-ahead auction publishes, never guessed), with an optional grid-fee/
+  energy-tax/VAT line and a real Net (earnings minus this Mac's own measured
+  electricity cost) overlay per 15-minute slot - see at a glance which hours
+  were actually profitable, all currency-converted to USD throughout
+- **Real earnings vs. cost, last 48h** - every ledger entry Darkbloom paid
+  (including the base reward for being online) added up against measured
+  electricity cost. The one chart that lines up with your real balance
+- **Real whole-system power** - with [`macmon`](https://github.com/vladkens/macmon)
+  installed, cost tracking uses the Mac's own SMC system-power sensor (RAM,
+  SSD, fans included) instead of CPU+GPU plus a guess. Measured on an M4 Pro
+  Mac mini, the guess was ~10-15W too low under full inference load
 
 ## Prerequisites
 
@@ -85,6 +93,9 @@ machine it runs on:
   `darkbloom status` should work)
 - `python3`, `bc`, `jq`, `curl` - all present on a stock macOS install except
   `jq`, which you may need to install (`brew install jq`)
+- Optional but recommended: `macmon` (`brew install macmon`) for real
+  whole-system power readings. Without it, power is CPU+GPU from
+  `powermetrics` plus a flat 7W guess for everything else
 
 ## Install
 
@@ -132,20 +143,50 @@ its target file on start.
 
 ## Electricity price
 
-The real cost-tracking (Accumulated electricity cost card, its chart)
-defaults to Sweden's free spot-price API (`elprisetjustnu.se`, zone SE3) -
-this Mac's actual location, hardcoded on purpose since it's real incurred
-cost. If you're elsewhere, open `~/.darkbloom/energy-monitor.sh` and set
-`FIXED_PRICE_PER_KWH` to a flat rate in your own currency - the rest of the
-math doesn't care what currency it is, it just needs a number per kWh.
+One configured source feeds everything price-related - the 48h chart, the
+"$/kWh right now" header, Price Guard's break-even, and the cost tracking
+(the energy monitor asks the dashboard for the current price every 15
+minutes, so no two parts of the page can disagree). Pick it in the
+**Electricity Price & Profitability** panel; the choice is saved in
+`~/.darkbloom/price-source.json`. All sources are free and need no API key:
 
-Separately, the **Electricity Price & Profitability** panel is a Sweden-only
-day-ahead forecast/history view with its own zone picker (SE1-SE4) in the UI
-- switching it only changes that chart and the header's "$/kWh right now"
-figure, never the real cost accounting above. If you're adapting this
-dashboard for a non-Swedish market, `server.py`'s `_fetch_elpris_day()` has a
-docstring spelling out exactly what to replace and a few starting-point APIs
-(ENTSO-E, aWATTar, Elexon/N2EX).
+| Source | Covers | Currency | Tomorrow's prices? |
+|---|---|---|---|
+| elprisetjustnu.se | Sweden SE1-SE4 (Nord Pool day-ahead) | SEK | yes, ~13:00 CET |
+| hvakosterstrommen.no | Norway NO1-NO5 (Nord Pool day-ahead) | NOK | yes, ~13:00 CET |
+| energy-charts.info (Fraunhofer ISE) | every European bidding zone: DE-LU, FR, NL, AT, CH, DK, FI, PL, ES, PT, IT-*, … | EUR | yes, early afternoon |
+| Octopus Energy | UK Agile tariff, per grid region (what an Agile customer pays, incl. VAT) | GBP | yes, ~16:00 UK |
+| ComEd Hourly Pricing | US Illinois, real-time 5-min prices averaged hourly | USD | no (real-time only) |
+| Flat rate | anywhere - type the per-kWh price from your bill | any | n/a |
+
+Prices are converted to USD hourly via frankfurter.app (ECB reference
+rates). Grid fee, energy tax and VAT can be added on top in the same panel to
+get an "incl. fees & tax" line; they default to 0 since they're contract-
+specific. Energy-Charts data is licensed for private/internal use - fine for
+your own dashboard, not for republishing.
+
+Missing your country? Each fetcher in `server.py` is ~20 lines returning
+`[{"time_start", "time_end", "price_per_kwh"}]` for one day - open an issue
+with a free price API and it can be added.
+
+Changing currency mid-history: the CSV keeps each row's own price and rate,
+so old rows stay correct, but the cumulative cost total is a running sum
+across currencies. If you switch currency, consider starting a fresh
+`energy-log.csv` (delete it and `energy-monitor.state`).
+
+## Power measurement
+
+`powermetrics` only reports the chip's own CPU and GPU rails. Measured on an
+M4 Pro Mac mini against the SMC's whole-system sensor, the rest of the
+machine (RAM, SSD, fans, board) adds ~5W at idle and ~16W under full
+inference load - so a flat baseline can't be right at both ends. If
+[`macmon`](https://github.com/vladkens/macmon) is installed, the energy
+monitor runs it in the background and uses that whole-system reading,
+divided by an assumed 90% power-supply efficiency to approximate the wall.
+Without it, cost tracking falls back to CPU+GPU plus a flat 7W. The page
+footer says which method is in use, and the CSV logs it per row
+(`power_method`: `smc` or `soc+baseline`). A smart plug is still the only
+way to pin down your own unit's PSU losses.
 
 ## Live account data (Darkbloom's own API)
 
