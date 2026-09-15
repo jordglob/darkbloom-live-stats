@@ -196,7 +196,9 @@ while true; do
       MSIZE=$(stat -f%z "$MACMON_LOG" 2>/dev/null || echo 0)
       [ "$MACMON_OFFSET" -gt "$MSIZE" ] && MACMON_OFFSET=0
       if [ "$MSIZE" -gt "$MACMON_OFFSET" ]; then
-        SYS_W=$(tail -c +$((MACMON_OFFSET + 1)) "$MACMON_LOG" | jq -s '[.[] | .sys_power | select(. != null)] | if length > 0 then add / length else empty end' 2>/dev/null || true)
+        # macmon 0.7 reports sys_power == all_power exactly when the SMC read
+        # fails for a sample - drop those rather than average them in.
+        SYS_W=$(tail -c +$((MACMON_OFFSET + 1)) "$MACMON_LOG" | jq -s '[.[] | select(.sys_power != null and .all_power != null and ((.sys_power - .all_power) | fabs) > 0.01) | .sys_power] | if length > 0 then add / length else empty end' 2>/dev/null || true)
         MACMON_OFFSET=$MSIZE
         if [ -n "${SYS_W:-}" ]; then
           TOTAL_W=$(calc "scale=3; $SYS_W / $PSU_EFFICIENCY")

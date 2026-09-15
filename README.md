@@ -84,7 +84,8 @@ machine it runs on:
 - **Real whole-system power** - with [`macmon`](https://github.com/vladkens/macmon)
   installed, cost tracking uses the Mac's own SMC system-power sensor (RAM,
   SSD, fans included) instead of CPU+GPU plus a guess. Measured on an M4 Pro
-  Mac mini, the guess was ~10-15W too low under full inference load
+  Mac mini, the guess was roughly 2.5x too low under sustained inference
+  (SMC ~60W vs. CPU+GPU+RAM rails ~29W, nothing plugged into the ports)
 
 ## Prerequisites
 
@@ -177,9 +178,12 @@ across currencies. If you switch currency, consider starting a fresh
 ## Power measurement
 
 `powermetrics` only reports the chip's own CPU and GPU rails. Measured on an
-M4 Pro Mac mini against the SMC's whole-system sensor, the rest of the
-machine (RAM, SSD, fans, board) adds ~5W at idle and ~16W under full
-inference load - so a flat baseline can't be right at both ends. If
+M4 Pro Mac mini (48GB, one HDMI display, nothing on the USB/Thunderbolt
+ports) against the SMC's whole-system sensor: the rest of the machine adds
+~5W at idle but 30-40W under sustained inference - the SMC read ~60W while
+CPU+GPU+RAM rails summed to ~29W (memory PHY, VRM losses, SSD, board). So a
+flat baseline can't be right at both ends, and the old 7W guess made busy
+hours look 2-2.5x cheaper than they were. If
 [`macmon`](https://github.com/vladkens/macmon) is installed, the energy
 monitor runs it in the background and uses that whole-system reading,
 divided by an assumed 90% power-supply efficiency to approximate the wall.

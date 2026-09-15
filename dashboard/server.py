@@ -103,8 +103,11 @@ def _latest_smc_system_w():
             lines = f.read().decode("utf-8", errors="ignore").strip().splitlines()
         for line in reversed(lines):
             try:
-                v = json.loads(line).get("sys_power")
-                if v is not None:
+                row = json.loads(line)
+                v, a = row.get("sys_power"), row.get("all_power")
+                # macmon 0.7 reports sys_power == all_power exactly when the
+                # SMC read fails for a sample - skip to the previous one.
+                if v is not None and (a is None or abs(float(v) - float(a)) > 0.01):
                     return float(v)
             except Exception:
                 continue
