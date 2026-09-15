@@ -646,7 +646,7 @@ def read_price_guard_config():
         "last_reason": None,
         "last_evaluated_at": None,
         "last_price_per_kwh": None,
-        "last_break_even_sek_per_kwh": None,
+        "last_break_even_per_kwh": None,
     }
     if not PRICE_GUARD_CONFIG.exists():
         return default
@@ -818,7 +818,7 @@ def price_guard_loop():
             if decision:
                 cfg["last_evaluated_at"] = time.time()
                 cfg["last_price_per_kwh"] = decision["price_per_kwh"]
-                cfg["last_break_even_sek_per_kwh"] = decision["break_even_sek_per_kwh"]
+                cfg["last_break_even_per_kwh"] = decision["break_even_per_kwh"]
                 if decision["action"] and cfg.get("mode") == "auto":
                     ok = _apply_price_guard_action(decision["action"], decision["reason"])
                     if ok:
