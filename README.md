@@ -13,6 +13,22 @@ already stores on this Mac.
 Community tool, use at your own risk. It only reads local system state and
 your own Darkbloom account data - it does not modify your provider's behavior.
 
+**Built in Sweden, for a Swedish electricity market.** Everything works
+anywhere, but the cost tracking defaults to Swedish spot prices in SEK and the
+price-forecast chart is Sweden-only. If you're elsewhere, one edit in
+`energy-monitor.sh` gives you a flat price in your own currency - see
+[Electricity price](#electricity-price) below. Do that before reading too much
+into the cost numbers.
+
+**New to running a provider?** The dashboard's top banners are graded: grey
+means "a check flagged something but requests are succeeding, no rush",
+yellow means "something is actually off, here's what to check", red means
+"a model failed to load in the last two minutes". Open the
+"❓ What does everything on this dashboard mean?" section on the page itself
+for a walkthrough of every panel - including the one economic fact that
+surprises most newcomers (most of your income comes from being online and
+trusted, not from serving).
+
 ![status](https://img.shields.io/badge/status-community%20project-blue)
 
 ## What it looks like
@@ -43,6 +59,11 @@ machine it runs on:
   updating at ~5Hz (matching powermetrics' own sampling rate)
 - **Trust-drop alerts** - a native macOS notification plus an in-page banner
   the moment trust drops below hardware-level, even if the tab isn't open
+- **Running-hot alert** - flags when the GPU is hot but the fan is barely
+  spinning, i.e. Darkbloom's own fan-control helper isn't engaging (seen in
+  the wild: 100°C+ at 20% fan with the helper reporting "did not enter
+  manual mode"). Explains it's a performance cost, not a safety issue, and
+  what to check
 - **Ollama indicator** - flags when Ollama has a model loaded, since that's a
   common cause of memory contention with the Darkbloom provider on the same
   machine

@@ -1,5 +1,18 @@
 # Changelog
 
+## v13
+
+**Newcomer pass.** Reviewed the dashboard as someone who just started renting out their Mac and fixed everything that would have scared them off or left them stuck:
+
+- **Banners are now graded, and the scary one is grey.** When real requests are succeeding, a `darkbloom doctor` FAIL (or an old model-load error) is shown as a neutral grey info note that leads with **"Working: N requests served"** in bold, instead of a yellow warning that reads as "it's broken". doctor's stock "consider a machine with more unified memory" advice is dropped in that case - it's actively misleading when the box is serving fine. Yellow is reserved for things that are actually off, red for a load error in the last two minutes. The explainer section documents the three levels.
+- **Banners no longer break into three columns at narrow widths.** All banner text is one flex item now; before, every text node and inline span became its own column.
+- **Running-hot alert.** New yellow banner when the GPU is at 85°C+ but the fan is under 50% - which is what Darkbloom's fan-control helper failing to engage looks like (observed live: 100°C+ at ~20% fan, `darkbloom fan status` cycling into `Mode: error — fan 0 did not enter manual mode`). Says plainly that macOS throttling still protects the hardware, that it costs performance, what to run to check, and that it's Darkbloom's helper rather than this dashboard. The server now parses the helper's mode/error/policy lines so the fan gauge shows the helper's state underneath it, and the GPU Temp gauge turns orange at 85°C / red at 95°C.
+- **"Active is 13% of floor" gets a plain-language line.** Nerdy Stats now says, in real dollars from the same window, what share of earnings came from the base-reward floor vs. actually serving - and that floor-dominated is normal on this network right now, not a fault. This is the single most misread number on the page.
+- **Disk Usage explains why there are five models.** One sentence: Darkbloom downloaded them itself, unused ones only cost disk, removing is safe and reversible.
+- **Fixes and additions to the explainer:** the Utilization entry described a request-duty-cycle that was replaced in v6 with real GPU busy-ness; now accurate. Added GPU Headroom and Fan/Temp entries.
+- **Yellow banners now say what to do**, not just what's wrong: the power-monitoring-inactive banner names the exact setup step; the trust banner notes the known coordinator flicker usually clears itself.
+- **README** leads with "built for Sweden, one edit if you're elsewhere" and a short orientation for newcomers, so nobody discovers the SEK defaults after installing.
+
 ## v12
 
 **New: idle chat window.** A chat panel at the bottom of the dashboard talks directly to whichever model is currently loaded on this Mac - only enabled when the provider is running and not currently serving real paid traffic (`daemon-state.json`'s `inference_active` flag, the same signal the "running, idle" badge already uses; fails closed if that state can't be read at all). Proxies straight to the local endpoint the warmup pinger already uses, no new auth surface. Nothing is persisted - the conversation lives in the browser tab and resets on reload.

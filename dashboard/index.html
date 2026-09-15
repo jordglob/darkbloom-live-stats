@@ -95,10 +95,18 @@
   .banner.critical { background: color-mix(in srgb, var(--status-critical) 12%, var(--surface-1)); border-color: color-mix(in srgb, var(--status-critical) 35%, transparent); }
   .banner.serious  { background: color-mix(in srgb, var(--status-serious) 14%, var(--surface-1)); border-color: color-mix(in srgb, var(--status-serious) 35%, transparent); }
   .banner.warning  { background: color-mix(in srgb, var(--status-warning) 14%, var(--surface-1)); border-color: color-mix(in srgb, var(--status-warning) 35%, transparent); }
+  .banner.info     { background: var(--surface-1); border-color: var(--border); color: var(--text-muted); }
   .banner .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .banner.critical .dot { background: var(--status-critical); }
   .banner.serious .dot { background: var(--status-serious); }
   .banner.warning .dot { background: var(--status-warning); }
+  .banner.info .dot { background: var(--text-muted); }
+  /* One flex item for all the text - otherwise every text node and inline
+     span becomes its own column and the banner breaks into 3 narrow strips
+     at small widths. */
+  .banner .banner-text { flex: 1 1 0; min-width: 0; }
+  .banner .banner-text strong { color: var(--text); }
+  .banner .banner-text code { font-size: 12px; }
 
   .cards {
     display: grid;
@@ -237,6 +245,11 @@
       <summary>❓ What does everything on this dashboard mean?</summary>
 
       <div class="explainer-section">
+        <h4>Banners at the top (what the colors mean)</h4>
+        <p><strong>Grey</strong> — a check flagged something, but real requests are succeeding right now, so it's informational: read it when you have a minute, nothing to do urgently. Darkbloom's own <code>doctor</code> tool has produced known false positives (its RAM-fit check in particular), which is why those land here rather than in yellow. <strong>Yellow</strong> — something is actually off (trust not hardware-level, power sampling not running, running hot, serving paused by Price Guard) and the banner says what to check. <strong>Red</strong> — a model-load error within the last two minutes; if requests keep failing, that's the one to look at first.</p>
+      </div>
+
+      <div class="explainer-section">
         <h4>Top summary cards</h4>
         <p><strong>Trust</strong> — the hardware-attestation level the Darkbloom coordinator has assigned this Mac. <code>hardware</code> means it's eligible to actually receive inference traffic; <code>self_signed</code> means it's online but not yet trusted enough to be routed any jobs. A drop from hardware-level triggers a macOS notification and a red banner automatically.</p>
         <p><strong>Daemon</strong> — whether the `darkbloom` background process itself is running, and (read straight from the daemon's own live state file) whether it's currently idle/warm or actively serving a request right this second (pulsing dot).</p>
@@ -249,7 +262,9 @@
         <h4>Live Power gauges</h4>
         <p><strong>CPU / GPU / Total</strong> — instantaneous power draw read straight from `powermetrics`, sampled ~5 times per second. "Total" adds a fixed 7W estimate on top for everything `powermetrics` can't see (RAM, disk, fans, PSU losses) — real wall power is somewhat higher than shown.</p>
         <p><strong>RAM used</strong> — system-wide memory pressure, not just this app's usage. Turns red/orange as it approaches full, since that's the exact condition that caused real model-load failures during testing.</p>
-        <p><strong>Utilization (last hour)</strong> — % of the last ~60 minutes (in 5-minute slices) that actually saw new requests arrive, based on the real request counter. A low or 0% reading with a healthy Trust/Daemon status just means genuinely no traffic right now, not a fault — the fan being quiet is expected in that case.</p>
+        <p><strong>GPU Headroom</strong> — how much of the GPU is <em>not</em> busy right now, straight from powermetrics. Idle Macs sit around 75-85% (the OS itself uses some); it drops toward 0% during real inference. Low is expected while serving, not a problem.</p>
+        <p><strong>Fan Speed / GPU Temp</strong> — read via <code>darkbloom fan status</code> (Apple Silicon doesn't expose either through powermetrics). Temp turns orange at 85°C and red at 95°C. If the GPU is hot but the fan is barely spinning, a banner appears at the top: that means Darkbloom's own fan-control helper isn't engaging. It isn't dangerous (macOS throttles the chip before any damage) but it costs performance - the small text under the gauge shows the helper's current mode.</p>
+        <p><strong>Utilization (last hour)</strong> — average GPU busy-ness over the last ~60 minutes, from the same powermetrics figure as GPU Headroom, logged every 5 minutes. A low or 0% reading with a healthy Trust/Daemon status just means genuinely little traffic right now, not a fault — that's when the base-reward floor is what's paying (see Nerdy Stats).</p>
       </div>
 
       <div class="explainer-section">
@@ -269,7 +284,7 @@
 
       <div class="explainer-section">
         <h4>Disk Usage</h4>
-        <p>Every model `darkbloom` has downloaded, with size and whether it's the one currently active. Models not currently in use get a one-click "copy remove command" — this dashboard never deletes files itself, it only prepares the exact command for you to run.</p>
+        <p>Every model `darkbloom` has downloaded, with size and whether it's the one currently active. Darkbloom downloads these on its own as the network assigns models to this Mac, so ending up with several is normal. Unused ones only cost disk space and are safe to remove - darkbloom re-downloads a model if it's ever assigned again. Models not currently in use get a one-click "copy remove command" — this dashboard never deletes files itself, it only prepares the exact command for you to run.</p>
       </div>
 
       <div class="explainer-section">
@@ -491,6 +506,16 @@ function updateGauges(data) {
     // Headroom is the inverse read - low is the bad direction here.
     if (g.id === 'headroom') {
       arcEl.setAttribute('stroke', frac < 0.07 ? 'var(--status-critical)' : frac < 0.15 ? 'var(--status-warning)' : `var(${g.color})`);
+    }
+    if (g.id === 'temp') {
+      arcEl.setAttribute('stroke', val >= 95 ? 'var(--status-critical)' : val >= 85 ? 'var(--status-warning)' : `var(${g.color})`);
+      if (detailEl) detailEl.textContent = val >= 95 ? 'very hot - see banner' : val >= 85 ? 'hot' : val >= 70 ? 'working' : 'cool';
+    }
+    if (g.id === 'fan' && detailEl) {
+      const mode = fanTemp && fanTemp.fan_mode;
+      detailEl.textContent = mode === 'error' ? 'helper error - see banner'
+        : mode === 'waiting_for_temperature' ? 'helper idle (auto curve)'
+        : mode ? `helper: ${mode}` : '';
     }
     const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : g.id === 'temp' ? 1 : g.id === 'headroom' ? 1 : 2;
     numEl.textContent = val.toFixed(decimals);
@@ -951,7 +976,7 @@ function renderDisk(disk) {
   }
   const unused = disk.models.filter(m => !m.active);
   el.innerHTML = `
-    ${unused.length ? `<div class="rotation-summary">${unused.length} model${unused.length === 1 ? '' : 's'} not currently in use — ${disk.unused_total_gb} GB reclaimable</div>` : `<div class="rotation-summary">Only the active model is downloaded — nothing to reclaim.</div>`}
+    ${unused.length ? `<div class="rotation-summary">${unused.length} model${unused.length === 1 ? '' : 's'} not currently in use — ${disk.unused_total_gb} GB reclaimable</div><div class="rotation-summary" style="color:var(--text-muted)">Darkbloom downloads models itself when it starts serving them, so you didn't do anything wrong having several here. Unused ones only cost disk space — removing one is safe for the provider and reversible (if the network assigns that model again, darkbloom just downloads it again). Nothing is ever deleted from this page.</div>` : `<div class="rotation-summary">Only the active model is downloaded — nothing to reclaim.</div>`}
     <div class="table-scroll">
     <table class="rotation-table">
       <thead><tr><th>Model</th><th>Size</th><th>Status</th><th></th></tr></thead>
@@ -1049,6 +1074,17 @@ Note: active $/hr counts every real job including likely spam (see the token-len
   const hourlyLine = hr
     ? `Real pay rate: <strong>${fmtUsd(hr.active_rate_per_hour_usd)}/hr</strong> actively serving vs <strong>${fmtUsd(hr.floor_rate_per_hour_usd)}/hr</strong> on the base-reward floor ${hr.ratio_active_to_floor != null ? `(active is ${(hr.ratio_active_to_floor * 100).toFixed(0)}% of floor)` : ''} <span title="${hourlyTooltip.replace(/"/g, '&quot;')}" style="cursor:help;text-decoration:underline dotted;">(how is this computed?)</span>`
     : 'Not enough local data yet to compare active vs. floor pay rates — builds up as real requests come in.';
+  // "active is 13% of floor" reads like "I'm earning 87% less than I should"
+  // to a newcomer. Spell out what it actually means using the same window's
+  // real dollar split, so the most important economic fact on this page
+  // isn't buried under a "Nerdy" heading as a bare ratio.
+  let plainLine = '';
+  if (hr && hr.floor_usd != null && hr.active_usd != null && (hr.floor_usd + hr.active_usd) > 0) {
+    const floorShare = hr.floor_usd / (hr.floor_usd + hr.active_usd);
+    plainLine = floorShare > 0.5
+      ? `<strong>In plain terms:</strong> ${(floorShare * 100).toFixed(0)}% of this Mac's real earnings in this window came from the base-reward floor — i.e. from simply being online and hardware-trusted — and ${((1 - floorShare) * 100).toFixed(0)}% from actually serving requests. That's normal on this network right now, not a sign something is wrong: staying trusted and online is what pays, serving is the bonus on top.`
+      : `<strong>In plain terms:</strong> ${((1 - floorShare) * 100).toFixed(0)}% of this Mac's real earnings in this window came from actually serving requests, ${(floorShare * 100).toFixed(0)}% from the base-reward floor for being online and trusted.`;
+  }
 
   const ds = daemonState || {};
   const capLine = ds.total_memory_gb != null
@@ -1068,6 +1104,7 @@ Note: active $/hr counts every real job including likely spam (see the token-len
     ${spamLine ? `<div class="rotation-summary" style="color:var(--status-warning)">${spamLine}</div>` : ''}
     <div class="rotation-summary">${durLine}</div>
     <div class="rotation-summary">${hourlyLine}</div>
+    ${plainLine ? `<div class="rotation-summary">${plainLine}</div>` : ''}
     <div class="rotation-summary">${capLine}</div>
     ${slotsLine ? `<div class="rotation-summary">${slotsLine}</div>` : ''}
     <div class="rotation-summary" style="margin-top:6px"><strong>Health checks (\`darkbloom doctor\`, refreshed every 5 min)</strong></div>
@@ -1161,72 +1198,85 @@ function fmtAgeShort(sec) {
   return `${Math.round(sec / 3600)}h ago`;
 }
 
+function banner(level, html) {
+  return `<div class="banner ${level}"><span class="dot"></span><span class="banner-text">${html}</span></div>`;
+}
+
 function renderBanners(status, energy, doctor, daemonState) {
   const banners = [];
+  const served = status.requests_served || 0;
+  // "Requests are actually succeeding" is the single most reassuring fact on
+  // this page - whenever it's true, an alarming-looking check gets demoted to
+  // a neutral info note with that fact in bold up front, instead of a yellow
+  // warning a first-time visitor reads as "it's broken".
+  const okLead = served
+    ? `<strong>✓ Working: ${fmtNum(served)} request${served === 1 ? '' : 's'} served since the daemon last started.</strong> `
+    : '';
+
   const loadErr = daemonState && daemonState.last_model_load_error;
   if (loadErr) {
     // darkbloom status's own "Last model-load error" text never expires or
     // shows an age - a real failure from hours ago reads exactly like one
-    // happening right now. daemon-state.json's timestamped version fixes
-    // that: show how old it actually is, and don't paint it red once it's
-    // clearly old news (same reasoning as the doctor banner below).
+    // happening right now. daemon-state.json's timestamped version fixes that.
     const age = fmtAgeShort(loadErr.age_sec);
     const isRecent = loadErr.age_sec != null && loadErr.age_sec < 120;
-    // Reassurance leads, technical detail follows - a first-time visitor
-    // scanning this page shouldn't have to read past "insufficient memory"
-    // before finding out real requests are succeeding fine.
-    const reqLead = status.requests_served
-      ? `✓ ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} served fine since the daemon last started. `
-      : '';
-    banners.push(`<div class="banner ${isRecent ? 'critical' : 'warning'}"><span class="dot"></span>${reqLead}Logged load error${age ? ` (${age})` : ''}: ${loadErr.model ? loadErr.model + ': ' : ''}${loadErr.message}</div>`);
+    const level = isRecent ? 'critical' : served ? 'info' : 'warning';
+    banners.push(banner(level, `${okLead}Logged load error${age ? ` (${age})` : ''}: ${loadErr.model ? loadErr.model + ': ' : ''}${loadErr.message}`));
   } else if (status.last_error) {
-    // Fallback for when daemon-state.json isn't available - no age info here.
-    banners.push(`<div class="banner warning"><span class="dot"></span>${status.last_error}</div>`);
+    banners.push(banner('warning', status.last_error));
   }
+
   if (lastPriceGuard && lastPriceGuard.mode === 'auto' && !lastPriceGuard.daemon_running) {
-    // Auto mode having stopped the daemon looks identical to a real outage
-    // in every other banner/status on this page (same "Daemon: not running")
-    // - say why explicitly, same reasoning as the load-error/doctor banners
-    // above: don't make a visitor mistake an intentional, price-driven pause
-    // for something broken.
+    // An intentional, price-driven pause looks identical to a real outage in
+    // every other status on this page ("Daemon: not running") - say why.
     const live = lastPriceGuard.live;
     const priceNote = live
       ? ` (${live.price_sek_per_kwh.toFixed(3)} vs break-even ${live.break_even_sek_per_kwh.toFixed(3)} SEK/kWh)`
       : '';
-    banners.push(`<div class="banner warning"><span class="dot"></span>Price Guard has paused serving — not profitable at the current electricity price${priceNote}. Re-evaluates every 5 min; will resume automatically once profitable again.</div>`);
+    banners.push(banner('warning', `Price Guard has paused serving — not profitable at the current electricity price${priceNote}. Re-evaluates every 5 min; will resume automatically once profitable again.`));
   }
   if (!energy.power_monitoring_active) {
-    banners.push(`<div class="banner warning"><span class="dot"></span>Power monitoring inactive — pm-start.sh (sudo) is not running, electricity cost is not being counted right now.</div>`);
+    banners.push(banner('warning', `Power monitoring inactive — the powermetrics service isn't running, so electricity cost is not being counted right now. <strong>Fix:</strong> run the one-time <code>setup-powermetrics-sudoers.sh</code> step from the README, then <code>launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.darkbloom.powermetrics.plist</code>.`));
   }
   if (status.trust && !status.trust.startsWith('hardware')) {
-    banners.push(`<div class="banner warning"><span class="dot"></span>Trust is "${status.trust}", not hardware-level — no real traffic is being routed here right now. A macOS notification fires automatically if this changes.</div>`);
+    banners.push(banner('warning', `Trust is "${status.trust}", not hardware-level — no real traffic is being routed here right now. Usually resolves on its own within minutes (a known coordinator-side flicker); a macOS notification fires automatically when it changes either way.`));
   }
+
+  const ft = lastFanTemp;
+  if (ft && ft.gpu_temp_c != null && ft.fan_rpm != null && ft.fan_max_rpm) {
+    // Hot GPU + fan barely spinning means Darkbloom's fan-control helper isn't
+    // actually driving the fan (observed: 100°C+ at 20% RPM with its status
+    // reporting "did not enter manual mode"). macOS's own thermal management
+    // still protects the chip by throttling, so this is lost performance and
+    // heat, not danger - say exactly that so nobody panics or ignores it.
+    const fanFrac = ft.fan_rpm / ft.fan_max_rpm;
+    const hot = ft.gpu_temp_c >= 85;
+    const helperFailing = ft.fan_mode === 'error' || (ft.fan_error && ft.fan_service_running);
+    if ((hot && fanFrac < 0.5) || (helperFailing && hot)) {
+      const errNote = ft.fan_error ? ` Its own status reports: <em>${ft.fan_error}</em>.` : '';
+      banners.push(banner('warning', `<strong>Running hot:</strong> GPU at ${ft.gpu_temp_c.toFixed(0)}°C but the fan is only at ${ft.fan_rpm} RPM (${(fanFrac * 100).toFixed(0)}% of max) — Darkbloom's fan-control helper does not appear to be engaging.${errNote} Not dangerous (macOS throttles the chip itself before any damage) but it costs performance. <strong>Check:</strong> <code>darkbloom fan status</code>; if it keeps reporting an error, report it in the Darkbloom Slack — it's their helper, not this dashboard.`));
+    }
+  }
+
   if (doctor && doctor.fails && doctor.fails.length) {
     doctor.fails.forEach(f => {
       const label = f.check ? `${f.check}: ` : '';
-      // Darkbloom's own "doctor" check has flagged real false positives before
-      // (e.g. this RAM check, which claims every request fails while hundreds
-      // have visibly succeeded) - show it as a health-check concern to look
-      // into, not a confirmed outage, and reconcile it against what's actually
-      // happening right on this same page instead of leaving that contradiction
-      // for the reader to spot themselves.
-      // Reassurance leads, technical detail follows - same reasoning as the
-      // load-error banner above: don't make a visitor read past "every
-      // request fails to load" before learning requests are succeeding fine.
-      const reqLead = status.requests_served
-        ? `✓ ${fmtNum(status.requests_served)} request${status.requests_served === 1 ? ' has' : 's have'} already succeeded since the daemon last started - worth a look, not a confirmed outage. `
+      // Darkbloom's own "doctor" has flagged real false positives before (this
+      // RAM check claims every request fails while hundreds visibly succeed).
+      // Working theory: it compares a model's footprint against currently-free
+      // RAM rather than the total budget, so whichever model is already loaded
+      // looks like it doesn't fit its own footprint - would explain why it
+      // always lands on the active model and rotates whenever that changes.
+      const isRamCheck = (f.check || '').toLowerCase().includes('fits in ram');
+      const theoryNote = isRamCheck
+        ? ` <span title="Working theory, not confirmed by Darkbloom: this check seems to compare against currently-free RAM rather than the full budget, so whichever model is already loaded (and using its own share) looks like it doesn't fit its own footprint.">(likely a known quirk in this check, not a real fit problem)</span>`
         : '';
-      // Working theory, not confirmed: this FAIL always lands on whichever
-      // model happens to be currently loaded, never one that's actually cold
-      // - consistent with doctor comparing a model's RAM requirement against
-      // CURRENTLY-free memory rather than the total budget, so a model
-      // already using its own share of RAM doesn't get that credited back.
-      // That would explain why it's never the same model twice and never
-      // fires on a model that isn't loaded.
-      const theoryNote = (f.check || '').toLowerCase().includes('fits in ram')
-        ? ` <span title="Working theory, not confirmed by Darkbloom: this check seems to compare against currently-free RAM rather than the full budget, so whichever model is already loaded (and using its own share) looks like it doesn't fit its own footprint - would explain why this always lands on the currently-active model and rotates whenever that changes.">(likely a known quirk in this specific check, not a real fit problem)</span>`
-        : '';
-      banners.push(`<div class="banner warning"><span class="dot"></span>${reqLead}darkbloom doctor flags: ${label}${f.detail}${theoryNote}${f.fix ? ` Suggested fix: ${f.fix}` : ''}</div>`);
+      // doctor's stock "consider a machine with more unified memory" advice is
+      // actively misleading when requests are succeeding - don't show it then.
+      const fix = f.fix && !(served && isRamCheck) ? ` Suggested fix: ${f.fix}` : '';
+      const level = served ? 'info' : 'warning';
+      const intro = served ? `<code>darkbloom doctor</code> also flags: ` : `<code>darkbloom doctor</code> flags: `;
+      banners.push(banner(level, `${okLead}${intro}${label}${f.detail}${theoryNote}${fix}`));
     });
   }
   document.getElementById('banners').innerHTML = banners.join('');

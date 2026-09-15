@@ -254,6 +254,10 @@ def get_ram_status():
 
 FAN_RE = re.compile(r"Fan \d+:\s*actual\s*(\d+),\s*target\s*(\d+),\s*range\s*(\d+)-(\d+)")
 GPU_SENSOR_TEMP_RE = re.compile(r"=([\d.]+)\s*C")
+FAN_MODE_RE = re.compile(r"^Mode:\s*(\S+)", re.MULTILINE)
+FAN_ERROR_RE = re.compile(r"^Last error:\s*(.+)$", re.MULTILINE)
+FAN_POLICY_RE = re.compile(r"^Policy:\s*(.+)$", re.MULTILINE)
+FAN_SERVICE_RE = re.compile(r"^Service:\s*(\S+)", re.MULTILINE)
 
 
 def get_fan_temp():
@@ -280,11 +284,19 @@ def get_fan_temp():
 
     if fan_rpm is None and gpu_temp_c is None:
         return None
+    mode_match = FAN_MODE_RE.search(out)
+    error_match = FAN_ERROR_RE.search(out)
+    policy_match = FAN_POLICY_RE.search(out)
+    service_match = FAN_SERVICE_RE.search(out)
     return {
         "fan_rpm": fan_rpm,
         "fan_max_rpm": fan_max_rpm,
         "gpu_temp_c": gpu_temp_c,
         "gpu_temp_max_c": gpu_temp_max_c,
+        "fan_mode": mode_match.group(1) if mode_match else None,
+        "fan_error": error_match.group(1).strip() if error_match else None,
+        "fan_policy": policy_match.group(1).strip() if policy_match else None,
+        "fan_service_running": (service_match.group(1) == "running") if service_match else None,
     }
 
 
