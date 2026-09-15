@@ -1,5 +1,17 @@
 # Changelog
 
+## v15
+
+**Less text on the page, same information on hover.** A read-through of every visible sentence with fresh eyes: anything a newcomer doesn't need at a glance moved into the tooltip of the thing it explains (marked "hover for details"), and anything that didn't earn its place went.
+
+- Page footer is one line ("Power measured by the Mac's own sensor · updates every 10 s") - the 7W-baseline, PSU-efficiency, $0.048/M-token and poll-rate detail is in its tooltip.
+- Status cards: the raw coordinator string and the provider's pid moved into the card tooltips; the Provider card just shows uptime. Net card rounds the balance.
+- Account panel: "Available / Withdrawable / Lifetime / N most recent analyzed (covers ~48h: …)" is now "Balance · Earned all-time · jobs" with the rest on hover. The plain-language "80% of earnings is the base reward for being online" line moved here from Nerdy Stats - it's the most important sentence on the page and was under the wrong heading.
+- Nerdy Stats: header says "(safe to ignore)"; the base-reward exclusion, the "tracked locally" caveat and the "no prompt text exists" note are all tooltips now.
+- Price Guard: one-line what-it-does, details on hover; "Daemon" → "Provider"; the status line no longer repeats the same two numbers twice.
+- Running-hot banner, Disk Usage note, 48h-chart coverage note, price-panel footer and legends all shortened the same way. Live gauge subtitle ("SMC sensor ÷ 90% PSU", "latest sample: Wed Sep 16 …") gone - the Total gauge tooltip explains measured vs. estimated.
+- Fix: rows written after the `power_method` column was added weren't visible to the server until the CSV header was migrated; the energy monitor now adds the column name to an older header on start and the server tolerates unheadered extras.
+
 ## v14
 
 **Works outside Sweden, and measures the whole Mac.** Second half of the newcomer pass, plus the two things that made the cost numbers untrustworthy.

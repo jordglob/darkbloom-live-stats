@@ -797,9 +797,9 @@ def _evaluate_price_guard(cfg):
         else:
             reason = "would start, but the minimum stopped time hasn't elapsed since the last action"
     elif daemon_running:
-        reason = f"running and profitable ({price:.3f} vs break-even {break_even_sek_per_kwh:.3f} {cur}/kWh)"
+        reason = "running and profitable"
     else:
-        reason = f"stopped and still unprofitable to resume ({price:.3f} vs break-even {break_even_sek_per_kwh:.3f} {cur}/kWh)"
+        reason = "stopped; still not profitable to resume"
 
     return {
         "currency": cur,
@@ -1968,6 +1968,11 @@ def get_energy_series():
     with open(CSV_PATH, newline="") as f:
         reader = csv.DictReader(f)
         for r in reader:
+            # A row written after the power_method column was added but before
+            # the header was migrated lands in DictReader's restkey (None).
+            extra = r.pop(None, None)
+            if extra and not r.get("power_method"):
+                r["power_method"] = extra[0]
             rows.append(r)
 
     if not rows:

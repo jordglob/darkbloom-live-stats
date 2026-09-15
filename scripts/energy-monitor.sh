@@ -59,6 +59,10 @@ BLENDED_USD_PER_TOKEN=$(echo "scale=12; 0.048/1000000" | bc 2>/dev/null)
 
 mkdir -p "$DIR"
 [ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w,avg_gpu_active_pct,power_method" > "$CSV"
+# Pre-v14 files have a 15-column header; add the column name so readers see it.
+if ! head -1 "$CSV" | grep -q ',power_method'; then
+  sed -i '' '1s/$/,power_method/' "$CSV"
+fi
 
 # Whole-system power sampler: macmon reads the SMC every 5s into a JSONL log
 # this script averages per interval. Runs as our child (no sudo), dies with us.

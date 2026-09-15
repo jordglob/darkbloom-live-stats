@@ -314,7 +314,7 @@
   </div>
 
   <div class="panel">
-    <h2 title="Technical detail pulled from the daemon's own state file and the real earnings API - not needed day to day, but useful when something looks off.">Nerdy Stats</h2>
+    <h2 title="Technical detail from the provider's own state file and the real earnings ledger - not needed day to day, useful when something looks off. Note: only token counts exist anywhere; neither Darkbloom's API nor this Mac keeps the actual prompt or response text.">Nerdy Stats <span class="gauge-time">(safe to ignore)</span></h2>
     <div id="nerdy-stats"></div>
   </div>
 
@@ -329,12 +329,12 @@
   </div>
 
   <div class="panel">
-    <h2 title="Downloaded MLX models and how much disk they use. Models left over from stopped rotation experiments are safe to remove if you need the space back.">Disk Usage</h2>
+    <h2 title="Models Darkbloom has downloaded to this Mac and how much disk they use. Unused ones are safe to remove if you need the space back.">Disk Usage</h2>
     <div id="disk"></div>
   </div>
 
   <div class="panel">
-    <h2 title="5-minute-resolution power history, including the estimated 7W baseline for non-SoC system draw.">Power (W) — history <span id="power-chart-stats" class="gauge-time"></span></h2>
+    <h2 title="Whole-Mac power over time, one reading every 5 minutes - the same figure as the Total gauge above.">Power (W) — history <span id="power-chart-stats" class="gauge-time"></span></h2>
     <div class="legend" id="power-legend"></div>
     <div class="chart-wrap">
       <svg class="chart" id="chart-power"></svg>
@@ -399,7 +399,7 @@
       Grid fee: <input type="number" id="price-grid-fee-input" step="0.001" min="0" style="width:72px;font-size:13px;padding:2px 4px"> <span class="price-cur">/kWh</span> ·
       Energy tax: <input type="number" id="price-energy-tax-input" step="0.001" min="0" style="width:72px;font-size:13px;padding:2px 4px"> <span class="price-cur">/kWh</span> ·
       VAT: <input type="number" id="price-vat-input" step="1" min="0" max="100" style="width:52px;font-size:13px;padding:2px 4px"> %
-      <span style="color:var(--text-muted)"> — adds the "incl. fees &amp; tax" line below. Optional; the spot line alone is fine to start with.</span>
+      <span style="color:var(--text-muted)"> (optional, from your bill)</span>
     </div>
     <div class="legend" id="elpris-legend"></div>
     <div class="chart-wrap">
@@ -424,7 +424,8 @@ const POWER_FAST_REFRESH_MS = 200;    // fast poll: CPU/GPU/Total watts only (ch
 const GAUGES = [
   { id: 'cpu', label: 'CPU', source: 'power', key: 'cpu_w', max: 30, unit: 'W', color: '--gauge-cpu' },
   { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
-  { id: 'total', label: 'Total (incl. baseline)', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total' },
+  { id: 'total', label: 'Total', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total',
+    tooltip: 'Whole-Mac power. "Measured" = the Mac\'s own SMC system-power sensor (RAM, SSD, fans included) divided by an assumed 90% power-supply efficiency, i.e. close to a wall meter. "Estimated" = CPU+GPU plus a flat 7W guess, used when macmon isn\'t installed - about right at idle, ~2.5x too low under heavy load.' },
   { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
   { id: 'headroom', label: 'GPU Headroom', source: 'power', key: 'headroom_pct', max: 100, unit: '%', color: '--gauge-total',
     tooltip: 'Sourced directly from the GPU active-residency figure powermetrics itself reports every sample (100% minus GPU busy-ness) - a real-time measurement, not a synthetic/computed estimate. Idle baseline is not literally 0% GPU activity: background OS/WindowServer load alone typically keeps it around 15-25% active even at rest, so this gauge normally reads roughly 75-85% at idle, dropping toward 0% under real MLX/Ollama inference load.' },
@@ -439,6 +440,7 @@ let lastUtilization = null;
 let lastRam = null;
 let lastOllama = null;
 let lastFanTemp = null;
+let lastPowerMethod = null;
 let lastPriceGuard = null;
 let lastConfiguredModels = [];
 let chatMessages = [];
@@ -491,7 +493,8 @@ function updateGauges(data) {
     });
     return;
   }
-  timeEl.textContent = power && power.sample_time ? `latest sample: ${power.sample_time}` : '';
+  timeEl.textContent = '';
+  timeEl.title = power && power.sample_time ? `latest sample: ${power.sample_time}` : '';
   GAUGES.forEach(g => {
     const src = g.source === 'ram' ? ram : g.source === 'utilization' ? utilization : g.source === 'fan_temp' ? fanTemp : power;
     const numEl = document.getElementById(`gauge-num-${g.id}`);
@@ -532,15 +535,14 @@ function updateGauges(data) {
     }
     if (g.id === 'total') {
       const measured = power && power.total_method === 'smc';
+      lastPowerMethod = measured ? 'smc' : 'soc+baseline';
       const labelEl = document.getElementById('gauge-label-total');
-      if (labelEl) labelEl.textContent = measured ? 'Total (whole Mac, measured)' : 'Total (CPU+GPU + 7W guess)';
-      if (detailEl) detailEl.textContent = measured ? 'SMC sensor ÷ 90% PSU' : 'install macmon for a real reading';
+      if (labelEl) labelEl.textContent = measured ? 'Total (whole Mac, measured)' : 'Total (estimated)';
+      if (detailEl) detailEl.textContent = measured ? '' : 'install macmon for a real reading';
     }
     if (g.id === 'fan' && detailEl) {
       const mode = fanTemp && fanTemp.fan_mode;
-      detailEl.textContent = mode === 'error' ? 'helper error - see banner'
-        : mode === 'waiting_for_temperature' ? 'helper idle (auto curve)'
-        : mode ? `helper: ${mode}` : '';
+      detailEl.textContent = mode === 'error' ? 'control error - see banner' : mode === 'waiting_for_temperature' ? 'auto' : '';
     }
     const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : g.id === 'temp' ? 1 : g.id === 'headroom' ? 1 : 2;
     numEl.textContent = val.toFixed(decimals);
@@ -649,18 +651,22 @@ function renderCards(status, energy, account, daemonState) {
   const daemonLabel = !daemonUp ? 'Not running' : active ? 'Serving a request now' : 'Running, waiting for jobs';
   const latest = energy.latest;
   const trustRaw = [status.trust, status.trust_reason].filter(Boolean).join(' · ');
+  // "running (pid 62517, up 3h11m)" -> "up 3h11m"; the pid goes in the tooltip.
+  const uptime = ((status.daemon || '').match(/up ([^)]+)/) || [])[1];
   const cards = [
     {
       label: 'Network trust',
       value: `<span class="pill"><span class="dot" style="background:var(--status-${t.status})"></span>${t.label}</span>`,
-      sub: trustRaw ? `raw: ${trustRaw}` : ''
+      sub: '',
+      tip: trustRaw ? ` Raw coordinator status: ${trustRaw}.` : ''
     },
     {
       label: 'Provider',
       value: `<span class="pill"><span class="dot ${active ? 'pulse' : ''}" style="background:var(--status-${daemonUp ? 'good' : 'critical'})"></span>${daemonLabel}</span>`,
-      sub: status.daemon || ''
+      sub: uptime ? `up ${uptime}` : '',
+      tip: status.daemon ? ` Raw: ${status.daemon}.` : ''
     },
-    { label: 'Requests', value: fmtNum(status.requests_served), sub: fmtNum(status.tokens) + ' tokens since last restart' },
+    { label: 'Requests', value: fmtNum(status.requests_served), sub: fmtNum(status.tokens) + ' tokens since restart' },
   ];
   const warmList = (status.warm_models || '').split(',').map(s => s.trim()).filter(Boolean);
   cards.push({
@@ -677,7 +683,7 @@ function renderCards(status, energy, account, daemonState) {
     if (account && account.connected && account.balance_usd != null) {
       net = parseFloat(account.balance_usd) - costUsd;
       netLabel = 'Net (real balance)';
-      netSub = `balance $${account.balance_usd} − electricity cost`;
+      netSub = `balance ${fmtUsd(parseFloat(account.balance_usd))} − electricity`;
     } else {
       net = parseFloat(latest.est_revenue_usd_approx) - costUsd;
       netLabel = 'Net (estimated)';
@@ -690,7 +696,7 @@ function renderCards(status, energy, account, daemonState) {
     });
   }
   document.getElementById('cards').innerHTML = cards.map(c => `
-    <div class="card" title="${CARD_TOOLTIPS[c.label] || ''}">
+    <div class="card" title="${((CARD_TOOLTIPS[c.label] || '') + (c.tip || '')).replace(/"/g, '&quot;')}">
       <div class="label">${c.label}</div>
       <div class="value">${c.value}</div>
       ${c.sub ? `<div class="sub">${c.sub}</div>` : ''}
@@ -786,9 +792,9 @@ function renderPriceGuard(pg) {
 
   const cur = (live && live.currency) || '';
   const priceLine = live
-    ? `Now: <strong>${live.price_per_kwh.toFixed(3)} ${cur}/kWh</strong> vs break-even <strong>${live.break_even_per_kwh.toFixed(3)} ${cur}/kWh</strong> (from $${live.active_rate_per_hour_usd.toFixed(4)}/hr measured active rate) — ${live.reason}`
+    ? `<span title="Break-even comes from the measured $${live.active_rate_per_hour_usd.toFixed(4)}/hr active pay rate and ${(live.total_power_w || 0).toFixed(0)}W current draw.">Now <strong>${live.price_per_kwh.toFixed(3)} ${cur}/kWh</strong>, break-even <strong>${live.break_even_per_kwh.toFixed(3)}</strong> — ${live.reason}</span>`
     : 'Not enough data yet - needs at least one real served request and a live electricity price reading.';
-  const explainLine = `<strong>What this does:</strong> compares what electricity costs right now with what serving actually earns per hour on this Mac, and works out the "break-even" price above which running loses money. <strong>Manual</strong> just shows you the numbers. <strong>Auto</strong> stops the provider when the price is above break-even (plus the margin) and restarts it when it drops back below. Note it only counts <em>serving</em> income - not the base reward for being online - so it's deliberately cautious. Margin = how far past break-even before acting; Min running / Min stopped = how long to wait between actions so it doesn't flip back and forth.`;
+  const explainLine = `<span title="Break-even = the electricity price at which an hour of serving costs exactly what it earns, from this Mac's own measured pay rate and power draw. Only serving income is counted - not the base reward for being online - so it's deliberately cautious. Margin: how far past break-even before acting. Min running / Min stopped: how long to wait between actions so it doesn't flip back and forth. Auto uses the real darkbloom start/stop commands, so the network sees a clean disconnect."><strong>Manual</strong> just shows the numbers. <strong>Auto</strong> pauses the provider when electricity costs more than serving earns, and resumes when it doesn't. <span style="opacity:.6">(hover for details)</span></span>`;
 
   const lastActionLine = pg.last_action
     ? `Last action: <strong>${pg.last_action}</strong>${lastActionAge ? ' ' + lastActionAge : ''} — ${pg.last_reason || ''}`
@@ -802,7 +808,7 @@ function renderPriceGuard(pg) {
       <label class="warmup-toggle" style="font-weight:400">
         <input type="radio" name="price-guard-mode" value="auto" ${pg.mode === 'auto' ? 'checked' : ''}> Auto
       </label>
-      <span class="warmup-status" style="margin:0">Daemon: ${daemonRunning ? '<span style="color:var(--status-good)">running</span>' : '<span style="color:var(--status-warning)">stopped</span>'}</span>
+      <span class="warmup-status" style="margin:0">Provider: ${daemonRunning ? '<span style="color:var(--status-good)">running</span>' : '<span style="color:var(--status-warning)">stopped</span>'}</span>
     </div>
     <div class="warmup-row">
       <span class="warmup-interval" title="Only stop when price is this far above break-even, and only resume when this far below - prevents flapping right at the edge">Margin <input type="number" id="pg-margin-input" min="0" step="1" value="${pg.margin_pct}"> %</span>
@@ -1013,7 +1019,7 @@ function renderDisk(disk) {
   }
   const unused = disk.models.filter(m => !m.active);
   el.innerHTML = `
-    ${unused.length ? `<div class="rotation-summary">${unused.length} model${unused.length === 1 ? '' : 's'} not currently in use — ${disk.unused_total_gb} GB reclaimable</div><div class="rotation-summary" style="color:var(--text-muted)">Darkbloom downloads models itself when it starts serving them, so you didn't do anything wrong having several here. Unused ones only cost disk space — removing one is safe for the provider and reversible (if the network assigns that model again, darkbloom just downloads it again). Nothing is ever deleted from this page.</div>` : `<div class="rotation-summary">Only the active model is downloaded — nothing to reclaim.</div>`}
+    ${unused.length ? `<div class="rotation-summary">${unused.length} model${unused.length === 1 ? '' : 's'} not currently in use — ${disk.unused_total_gb} GB reclaimable</div><div class="rotation-summary" style="color:var(--text-muted)" title="Darkbloom downloads models on its own as the network assigns them, so having several here is normal. Removing an unused one only frees disk; if that model is ever assigned again, darkbloom downloads it again. This page never deletes anything itself - the button only copies the command for you to run.">Darkbloom downloaded these itself. Unused ones are safe to remove — it re-downloads if needed. <span style="opacity:.6">(hover for details)</span></div>` : `<div class="rotation-summary">Only the active model is downloaded — nothing to reclaim.</div>`}
     <div class="table-scroll">
     <table class="rotation-table">
       <thead><tr><th>Model</th><th>Size</th><th>Status</th><th></th></tr></thead>
@@ -1070,12 +1076,25 @@ function renderAccount(account) {
 
   const cs = account.cut_summary || {};
 
+  // The single most misread number on this page is "active is 13% of
+  // floor" - say what the money split actually means, right where the
+  // money is shown, using the same window's real dollars.
+  const hr = account.hourly_rate_comparison;
+  let plainLine = '';
+  if (hr && hr.floor_usd != null && hr.active_usd != null && (hr.floor_usd + hr.active_usd) > 0) {
+    const floorShare = hr.floor_usd / (hr.floor_usd + hr.active_usd);
+    plainLine = floorShare > 0.5
+      ? `<strong>${(floorShare * 100).toFixed(0)}%</strong> of recent earnings is the base reward for being online and trusted; <strong>${((1 - floorShare) * 100).toFixed(0)}%</strong> is from actually serving requests. <span title="Normal on this network right now, not a sign something is wrong: staying trusted and online is what pays, serving is the bonus on top. Computed from the same real ledger window as the table below.">Normal here.</span>`
+      : `<strong>${((1 - floorShare) * 100).toFixed(0)}%</strong> of recent earnings is from serving requests, <strong>${(floorShare * 100).toFixed(0)}%</strong> the base reward for being online.`;
+  }
+  const windowTip = `Withdrawable now: $${account.withdrawable_balance_usd} (can lag the balance while payouts settle). ${fmtNum(account.total_jobs)} jobs all-time. The table below covers the ${account.sample_size} most recent ledger entries${account.sample_window_hours != null ? ` (~${account.sample_window_hours < 1 ? '<1' : account.sample_window_hours.toFixed(1)}h: ${fmtTime(account.sample_window_start_at)} → ${fmtTime(account.sample_window_end_at)})` : ''} - Darkbloom's API only returns the most recent batch, so this is a recent window, not a long-term average.`;
+
   el.innerHTML = `
     <div class="pill"><span class="dot" style="background:var(--status-good)"></span>Connected (refreshed ${Math.round(account.age_sec)}s ago)</div>
-    <div class="rotation-summary" title="Withdrawable can be lower than available if part of the balance is pending; lifetime is total earned all-time, never decreases.">
-      Available: <strong>$${account.balance_usd}</strong> · Withdrawable: <strong>$${account.withdrawable_balance_usd}</strong> · Lifetime: <strong>$${account.lifetime_usd}</strong>
-      · ${fmtNum(account.total_jobs)} jobs total (account-level, survives restarts) · ${account.sample_size} most recent analyzed here${account.sample_window_hours != null ? ` <span title="The earnings API only ever returns the most recent batch of entries, not a fixed time range - on a busy day (real traffic + spam + base_reward all counted) that can be just a few hours. The stats below only reflect this window, not a stable long-term average.">(covers ~${account.sample_window_hours < 1 ? '<1' : account.sample_window_hours.toFixed(1)}h: ${fmtTime(account.sample_window_start_at)} → ${fmtTime(account.sample_window_end_at)})</span>` : ''}
+    <div class="rotation-summary" title="${windowTip.replace(/"/g, '&quot;')}">
+      Balance: <strong>${fmtUsd(parseFloat(account.balance_usd))}</strong> · Earned all-time: <strong>${fmtUsd(parseFloat(account.lifetime_usd))}</strong> · ${fmtNum(account.total_jobs)} jobs <span style="opacity:.6">(hover for details)</span>
     </div>
+    ${plainLine ? `<div class="rotation-summary">${plainLine}</div>` : ''}
     <div class="table-scroll">
     <table class="rotation-table">
       <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th>${showEst ? `<th title="What our own flat $0.048 per million tokens guess would have estimated for these same tokens - recalibrated periodically from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means it ran low.">Our estimate's error</th>` : ''}<th title="What Darkbloom actually paid per million tokens for this model - compare models by how well they pay, not just volume.">Real rate ($ per million tokens)</th></tr></thead>
@@ -1083,7 +1102,7 @@ function renderAccount(account) {
     </table>
     </div>
     <div class="rotation-summary" style="margin-top:10px">
-      <label style="cursor:pointer;font-size:12px;color:var(--text-muted)"><input type="checkbox" id="show-estimate-cols" ${showEst ? 'checked' : ''}> Show this dashboard's own estimate columns (nerdy - about our guess's accuracy, not about Darkbloom)</label>
+      <label style="cursor:pointer;font-size:12px;color:var(--text-muted)" title="Adds two columns comparing this dashboard's own rough per-token revenue guess against what Darkbloom really paid. It's a check on our guess's accuracy - not a fee, not a claim about Darkbloom."><input type="checkbox" id="show-estimate-cols" ${showEst ? 'checked' : ''}> Show estimate columns (nerdy)</label>
       ${showEst ? `<br>Totals — real payout: <strong>$${(cs.total_real_usd ?? 0).toFixed(6)}</strong> ·
       our estimate: <strong>$${(cs.total_local_estimate_usd ?? 0).toFixed(6)}</strong> ·
       our estimate's error: <strong class="${cs.cut_pct != null && cs.cut_pct >= 0 ? 'cut-positive' : 'cut-negative'}">${fmtPct(cs.cut_pct)}</strong>
@@ -1103,7 +1122,7 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
 
   const ns = account && account.connected ? account.nerdy_stats : null;
   const tokenLine = ns && ns.real_jobs
-    ? `Avg prompt length: <strong>${fmtNum(Math.round(ns.avg_prompt_tokens))} tokens</strong> · Avg completion length: <strong>${fmtNum(Math.round(ns.avg_completion_tokens))} tokens</strong> · from ${fmtNum(ns.real_jobs)} real job${ns.real_jobs === 1 ? '' : 's'} (excludes ${fmtNum(ns.base_reward_jobs)} base-reward floor payments, which carry no token counts)`
+    ? `<span title="From the ${fmtNum(ns.real_jobs)} real jobs in the recent ledger window; the ${fmtNum(ns.base_reward_jobs)} base-reward entries are excluded since they carry no tokens. Only token counts exist anywhere - neither Darkbloom's API nor this Mac keeps the actual prompt or response text.">Avg prompt: <strong>${fmtNum(Math.round(ns.avg_prompt_tokens))} tokens</strong> · Avg reply: <strong>${fmtNum(Math.round(ns.avg_completion_tokens))} tokens</strong> · ${fmtNum(ns.real_jobs)} jobs</span>`
     : 'Not enough real (non-base-reward) job data yet to compute token averages.';
   const spamLine = (ns && ns.spam_jobs > 0)
     ? `<span title="Heuristic: exact 25-prompt-token jobs, this account's own observed signature - not an official Darkbloom spam flag. Matches a network-wide Gemma spam flood Darkbloom's own team confirmed and began rate-limiting on 2026-09-10 (#providers: &quot;a spammer on Gemma side - we have rate limited them&quot;); other providers independently reported the identical pattern the same week.">⚠ ${fmtNum(ns.spam_jobs)} of those (${(ns.spam_jobs / ns.real_jobs * 100).toFixed(0)}%) look like spam</span> - excluding them: avg prompt <strong>${fmtNum(Math.round(ns.avg_prompt_tokens_excl_spam))} tokens</strong>, avg completion <strong>${fmtNum(Math.round(ns.avg_completion_tokens_excl_spam))} tokens</strong>`
@@ -1111,7 +1130,7 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
 
   const idur = inferenceDurations || {};
   const durLine = idur.count > 0
-    ? `Observed request duration: avg <strong>${idur.avg_sec.toFixed(1)}s</strong> · min ${idur.min_sec.toFixed(1)}s · max ${idur.max_sec.toFixed(1)}s, from ${fmtNum(idur.count)} request${idur.count === 1 ? '' : 's'} <span title="Darkbloom exposes no duration/latency data anywhere - this is tracked locally by watching the daemon's inference_active flag twice a second since this dashboard started. May undercount requests shorter than that. It can also OVERcount in the other direction: if several real requests land back-to-back with no idle gap between them, the flag never drops to false in between, so they get measured as one long continuous stretch rather than separate requests - the largest values (multiple whole minutes) are almost certainly this, not one single slow request.">(tracked locally, not from Darkbloom)</span>`
+    ? `Request duration: avg <strong>${idur.avg_sec.toFixed(1)}s</strong> · min ${idur.min_sec.toFixed(1)}s · max ${idur.max_sec.toFixed(1)}s · ${fmtNum(idur.count)} requests <span style="opacity:.6" title="Darkbloom exposes no duration/latency data anywhere - this is tracked locally by watching the daemon's inference_active flag twice a second since this dashboard started. May undercount requests shorter than that. It can also OVERcount in the other direction: if several real requests land back-to-back with no idle gap between them, the flag never drops to false in between, so they get measured as one long continuous stretch rather than separate requests - the largest values (multiple whole minutes) are almost certainly this, not one single slow request.">(measured here)</span>`
     : 'No request durations observed yet - builds up over time as real requests come in (Darkbloom itself exposes no timing data, so this is tracked locally).';
 
   const hr = (account && account.connected) ? account.hourly_rate_comparison : null;
@@ -1124,24 +1143,13 @@ Note: active $/hr counts every real job including likely spam (see the token-len
   const hourlyLine = hr
     ? `Real pay rate: <strong>${fmtUsd(hr.active_rate_per_hour_usd)}/hr</strong> actively serving vs <strong>${fmtUsd(hr.floor_rate_per_hour_usd)}/hr</strong> on the base-reward floor ${hr.ratio_active_to_floor != null ? `(active is ${(hr.ratio_active_to_floor * 100).toFixed(0)}% of floor)` : ''} <span title="${hourlyTooltip.replace(/"/g, '&quot;')}" style="cursor:help;text-decoration:underline dotted;">(how is this computed?)</span>`
     : 'Not enough local data yet to compare active vs. floor pay rates — builds up as real requests come in.';
-  // "active is 13% of floor" reads like "I'm earning 87% less than I should"
-  // to a newcomer. Spell out what it actually means using the same window's
-  // real dollar split, so the most important economic fact on this page
-  // isn't buried under a "Nerdy" heading as a bare ratio.
-  let plainLine = '';
-  if (hr && hr.floor_usd != null && hr.active_usd != null && (hr.floor_usd + hr.active_usd) > 0) {
-    const floorShare = hr.floor_usd / (hr.floor_usd + hr.active_usd);
-    plainLine = floorShare > 0.5
-      ? `<strong>In plain terms:</strong> ${(floorShare * 100).toFixed(0)}% of this Mac's real earnings in this window came from the base-reward floor — i.e. from simply being online and hardware-trusted — and ${((1 - floorShare) * 100).toFixed(0)}% from actually serving requests. That's normal on this network right now, not a sign something is wrong: staying trusted and online is what pays, serving is the bonus on top.`
-      : `<strong>In plain terms:</strong> ${((1 - floorShare) * 100).toFixed(0)}% of this Mac's real earnings in this window came from actually serving requests, ${(floorShare * 100).toFixed(0)}% from the base-reward floor for being online and trusted.`;
-  }
 
   const ds = daemonState || {};
   const capLine = ds.total_memory_gb != null
     ? `GPU memory: <strong>${(ds.gpu_memory_active_gb ?? 0).toFixed(2)} GB active</strong> + <strong>${(ds.gpu_memory_cache_gb ?? 0).toFixed(2)} GB cached</strong> of ${ds.total_memory_gb} GB unified memory`
     : 'Daemon state file not available.';
   const slotsLine = (ds.slots || []).map(s =>
-    `<span class="pill" style="margin-right:12px"><span class="dot" style="background:var(--status-good)"></span>${s.model}: ${s.kv_backend || '?'} KV${s.mtp_enabled ? ', MTP on' : ''}</span>`
+    `<span class="pill" style="margin-right:12px" title="Loaded in memory. KV = how the model's attention cache is stored; MTP = multi-token prediction."><span class="dot" style="background:var(--status-good)"></span>${s.model}${s.kv_backend ? `: ${s.kv_backend} KV` : ''}${s.mtp_enabled ? ', MTP on' : ''}</span>`
   ).join('');
 
   const warns = (doctor && doctor.warns) || [];
@@ -1154,12 +1162,10 @@ Note: active $/hr counts every real job including likely spam (see the token-len
     ${spamLine ? `<div class="rotation-summary" style="color:var(--status-warning)">${spamLine}</div>` : ''}
     <div class="rotation-summary">${durLine}</div>
     <div class="rotation-summary">${hourlyLine}</div>
-    ${plainLine ? `<div class="rotation-summary">${plainLine}</div>` : ''}
     <div class="rotation-summary">${capLine}</div>
     ${slotsLine ? `<div class="rotation-summary">${slotsLine}</div>` : ''}
-    <div class="rotation-summary" style="margin-top:6px"><strong>Health checks (\`darkbloom doctor\`, refreshed every 5 min)</strong></div>
+    <div class="rotation-summary" style="margin-top:6px"><strong>Health checks</strong> <span style="opacity:.6" title="Raw findings from Darkbloom's own \`darkbloom doctor\` tool, refreshed every 5 minutes. Its RAM-fit check is known to produce false positives.">(darkbloom doctor, every 5 min)</span></div>
     ${warnLines}
-    <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Actual prompt/response text isn't available anywhere - not in the API, not locally. Only token counts exist, which is what's shown above.</p>
   `;
 }
 
@@ -1237,7 +1243,8 @@ function renderPriceControls(p) {
   const footer = document.getElementById('price-source-footer');
   if (footer) {
     const link = src.url ? `<a href="${src.url}" target="_blank" rel="noopener">${src.url.replace(/^https?:\/\//, '')}</a>` : 'your own flat rate';
-    footer.innerHTML = `Source: ${link} — free, no account needed. Changing source or zone here changes <strong>everything</strong> price-related on this page: this chart, the "$/kWh right now" figure at the top, Price Guard's break-even, and the cost tracking from now on (past cost rows keep the price they were logged with). Sources with a day-ahead auction show tomorrow once it's published (usually early-to-mid afternoon). Missing your country? The fetchers in <code>server.py</code> are ~20 lines each - <a href="https://github.com/jordglob/darkbloom-live-stats/issues" target="_blank" rel="noopener">open an issue</a> with a free price API and it can be added.`;
+    footer.title = 'Changing source or zone updates every price-related number on this page - this chart, the figure at the top, Price Guard, and cost tracking from now on (older cost rows keep the price they were logged with). Day-ahead sources show tomorrow once it is published, usually early-to-mid afternoon.';
+    footer.innerHTML = `Source: ${link} (free, no account). Changing it updates every price on this page. Missing your country? <a href="https://github.com/jordglob/darkbloom-live-stats/issues" target="_blank" rel="noopener">Open an issue</a> with a free price API.`;
   }
   return surcharge;
 }
@@ -1269,9 +1276,9 @@ function renderElpris(p) {
 
   const legendEl = document.getElementById('elpris-legend');
   if (legendEl) {
-    legendEl.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Electricity price (USD/kWh, left axis)</span>` +
+    legendEl.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Electricity price (left axis)</span>` +
       (hasSurcharge ? `<span><i style="background:var(--series-elpris-total)"></i>Incl. fees & tax</span>` : '') +
-      `<span><i style="background:var(--series-revenue)"></i>Net per 15 min = real earnings − real cost (USD, right axis)</span>`;
+      `<span title="Real earnings minus real electricity cost in each 15-minute slot, in USD - shows which hours were actually worth running."><i style="background:var(--series-revenue)"></i>Net per 15 min (right axis)</span>`;
   }
 
   let nowVal = null;
@@ -1316,8 +1323,8 @@ function renderReal48(p) {
   const noteEl = document.getElementById('real48-note');
   if (statsEl) statsEl.textContent = prices.length ? `earned ${fmtUsd(earn)} · cost ${fmtUsd(cost)} · net ${fmtUsd(earn - cost)}` : '';
   if (noteEl) {
-    const coverage = firstIdx >= 0 ? `Real data from ${fmtTime(prices[firstIdx].time_start)} — the ledger history builds up locally over ~2 days of dashboard uptime, so a freshly installed dashboard starts near the right edge.` : 'No ledger entries in this window yet - fills in as the account sync runs.';
-    noteEl.textContent = coverage;
+    noteEl.title = 'Darkbloom\'s API only returns the most recent batch of ledger entries, so this dashboard saves them locally as they arrive. Coverage grows to about two days after a fresh install.';
+    noteEl.textContent = firstIdx >= 0 ? `Covers from ${fmtTime(prices[firstIdx].time_start)} (builds up to ~2 days)` : 'No ledger entries yet - fills in as the account sync runs.';
   }
 }
 
@@ -1343,6 +1350,12 @@ function renderBanners(status, energy, doctor, daemonState) {
     ? `<strong>✓ Working: ${fmtNum(served)} request${served === 1 ? '' : 's'} served since the daemon last started.</strong> `
     : '';
 
+  // Info-level notes (things a check flagged while requests are succeeding)
+  // are collected and shown as ONE grey banner, so the reassuring lead isn't
+  // repeated once per note.
+  const infoNotes = [];
+  const q = s => String(s).replace(/"/g, '&quot;');
+
   const loadErr = daemonState && daemonState.last_model_load_error;
   if (loadErr) {
     // darkbloom status's own "Last model-load error" text never expires or
@@ -1350,8 +1363,15 @@ function renderBanners(status, energy, doctor, daemonState) {
     // happening right now. daemon-state.json's timestamped version fixes that.
     const age = fmtAgeShort(loadErr.age_sec);
     const isRecent = loadErr.age_sec != null && loadErr.age_sec < 120;
-    const level = isRecent ? 'critical' : served ? 'info' : 'warning';
-    banners.push(banner(level, `${okLead}Logged load error${age ? ` (${age})` : ''}: ${loadErr.model ? loadErr.model + ': ' : ''}${loadErr.message}`));
+    const full = `${loadErr.model ? loadErr.model + ': ' : ''}${loadErr.message}`;
+    if (isRecent) {
+      banners.push(banner('critical', `${okLead}Model load failed just now: ${full}`));
+    } else if (served) {
+      const memory = /memory/i.test(loadErr.message) ? 'not enough free memory at that moment' : 'see details';
+      infoNotes.push(`<span title="${q(full)}">a model load failed ${age || 'earlier'}${loadErr.model ? ` (${loadErr.model}: ${memory})` : ''}</span>`);
+    } else {
+      banners.push(banner('warning', `Logged load error${age ? ` (${age})` : ''}: ${full}`));
+    }
   } else if (status.last_error) {
     banners.push(banner('warning', status.last_error));
   }
@@ -1383,8 +1403,8 @@ function renderBanners(status, energy, doctor, daemonState) {
     const hot = ft.gpu_temp_c >= 85;
     const helperFailing = ft.fan_mode === 'error' || (ft.fan_error && ft.fan_service_running);
     if ((hot && fanFrac < 0.5) || (helperFailing && hot)) {
-      const errNote = ft.fan_error ? ` Its own status reports: <em>${ft.fan_error}</em>.` : '';
-      banners.push(banner('warning', `<strong>Running hot:</strong> GPU at ${ft.gpu_temp_c.toFixed(0)}°C but the fan is only at ${ft.fan_rpm} RPM (${(fanFrac * 100).toFixed(0)}% of max) — Darkbloom's fan-control helper does not appear to be engaging.${errNote} Not dangerous (macOS throttles the chip itself before any damage) but it costs performance. <strong>Check:</strong> <code>darkbloom fan status</code>; if it keeps reporting an error, report it in the Darkbloom Slack — it's their helper, not this dashboard.`));
+      const tip = `Darkbloom installs its own fan-control helper; right now it isn't taking control of the fan${ft.fan_error ? ` (its status says: ${ft.fan_error})` : ''}, so macOS's default fan curve is all that's running. macOS throttles the chip before any damage, so this is lost performance, not a safety issue. Run: darkbloom fan status. If it keeps reporting an error, mention it in the Darkbloom Slack - it's their helper, not this dashboard.`;
+      banners.push(banner('warning', `<span title="${tip.replace(/"/g, '&quot;')}"><strong>Running hot:</strong> GPU ${ft.gpu_temp_c.toFixed(0)}°C, fan only ${(fanFrac * 100).toFixed(0)}% — Darkbloom's fan control isn't engaging. Not dangerous, but slower. Check: <code>darkbloom fan status</code> <span style="opacity:.6">(hover for details)</span></span>`));
     }
   }
 
@@ -1404,10 +1424,18 @@ function renderBanners(status, energy, doctor, daemonState) {
       // doctor's stock "consider a machine with more unified memory" advice is
       // actively misleading when requests are succeeding - don't show it then.
       const fix = f.fix && !(served && isRamCheck) ? ` Suggested fix: ${f.fix}` : '';
-      const level = served ? 'info' : 'warning';
-      const intro = served ? `<code>darkbloom doctor</code> also flags: ` : `<code>darkbloom doctor</code> flags: `;
-      banners.push(banner(level, `${okLead}${intro}${label}${f.detail}${theoryNote}${fix}`));
+      if (served) {
+        const full = `darkbloom doctor: ${label}${f.detail}${isRamCheck ? ' Working theory: this check compares against currently-free RAM rather than the total budget, so the model already loaded looks like it does not fit its own footprint.' : ''}`;
+        infoNotes.push(isRamCheck
+          ? `<span title="${q(full)}">doctor's RAM-fit check flags ${(f.detail.match(/^([\w.-]+)/) || [])[1] || 'the active model'} (known false positive)</span>`
+          : `<span title="${q(full)}">doctor flags: ${label}${f.detail}</span>`);
+      } else {
+        banners.push(banner('warning', `<code>darkbloom doctor</code> flags: ${label}${f.detail}${theoryNote}${fix}`));
+      }
     });
+  }
+  if (infoNotes.length) {
+    banners.push(banner('info', `${okLead}Notes (hover each for details): ${infoNotes.join(' · ')}.`));
   }
   document.getElementById('banners').innerHTML = banners.join('');
 }
@@ -1712,7 +1740,7 @@ async function refresh() {
 
     const hasPeak = !!(rows.peak_total_power_w && rows.peak_total_power_w.length);
     document.getElementById('power-legend').innerHTML = hasPeak
-      ? `<span><i style="background:var(--series-cost)"></i>Power (avg per bucket)</span><span><i style="background:var(--series-cost);opacity:.5"></i>Peak (per bucket)</span>`
+      ? `<span title="Each plotted point averages several 5-minute readings; the faint line is the highest single reading in that stretch, so brief spikes stay visible."><i style="background:var(--series-cost)"></i>Average</span><span><i style="background:var(--series-cost);opacity:.5"></i>Peak</span>`
       : '';
     const powerSeries = [{name: 'Power (incl. baseline)', values: rows.total_power_w || []}];
     const powerColors = ['line-power'];
@@ -1740,13 +1768,17 @@ async function refresh() {
     document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
     document.getElementById('kwh-price').textContent = elprisNow && elprisNow.nowVal != null
       ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';
-    const powerMethod = (energy.latest && energy.latest.power_method) || 'soc+baseline';
-    document.getElementById('footnote').innerHTML =
-      (powerMethod === 'smc'
-        ? `Power is the whole-system reading from the Mac's SMC sensor (via macmon; covers RAM/SSD/fans) ÷ 90% assumed power-supply efficiency ≈ wall draw`
-        : `Power is CPU+GPU from powermetrics plus a flat 7W guess for everything else (RAM/SSD/fans/PSU) - install <code>macmon</code> (<code>brew install macmon</code>) and restart the energy monitor for a real whole-system measurement`) +
-      ` · Estimated token revenue uses a flat $0.048 per million tokens, last recalibrated 2026-09-10 from this account's real ledger ·
-       ${energy.total_rows ?? 0} data points logged · updates every 10s (power gauges ~5Hz, RAM/Ollama every 2s)`;
+    // Prefer the live gauge's method: the CSV's first row after a restart is
+    // always the estimate (macmon's log is empty at that instant).
+    const powerMethod = lastPowerMethod || (energy.latest && energy.latest.power_method) || 'soc+baseline';
+    const foot = document.getElementById('footnote');
+    foot.title = (powerMethod === 'smc'
+      ? 'Power: whole-Mac reading from the SMC system-power sensor via macmon (RAM, SSD, fans included), divided by an assumed 90% power-supply efficiency to approximate wall draw.'
+      : 'Power: CPU+GPU from powermetrics plus a flat 7W guess for everything else. Install macmon (brew install macmon) and restart the energy monitor for a real whole-Mac reading - the guess is ~2.5x too low under heavy load.')
+      + ` Estimated token revenue (nerdy charts only) uses a flat $0.048 per million tokens, last recalibrated 2026-09-10 from this account's real ledger. ${energy.total_rows ?? 0} rows logged. Page refreshes every 10s; power gauges ~5x/s.`;
+    foot.innerHTML = powerMethod === 'smc'
+      ? `Power measured by the Mac's own sensor · updates every 10 s <span style="opacity:.6">(hover for details)</span>`
+      : `Power is estimated — <code>brew install macmon</code> for a real reading · updates every 10 s <span style="opacity:.6">(hover for details)</span>`;
   } catch (e) {
     document.getElementById('updated').textContent = 'could not fetch data: ' + e;
   }
