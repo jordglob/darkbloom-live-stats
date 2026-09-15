@@ -1,5 +1,9 @@
 # Changelog
 
+## v16
+
+**"Expected vs. actual payout" meter is back**, as its own two-bar tile in the Darkbloom Account panel (it had been folded into the hidden estimate columns in v14). Expected = tokens × this dashboard's own calibrated flat rate; Actual = what Darkbloom's ledger paid for the same jobs; a one-line verdict says whether the estimate is within 10%, ran high, or ran low. The tooltip spells out that it measures the accuracy of our guess, not a fee (Darkbloom advertises 0%), that base reward is excluded on both sides, and that a drifting gap means the rate needs recalibrating. Per-model detail stays behind the "Show estimate columns" checkbox.
+
 ## v15
 
 **Less text on the page, same information on hover.** A read-through of every visible sentence with fresh eyes: anything a newcomer doesn't need at a glance moved into the tooltip of the thing it explains (marked "hover for details"), and anything that didn't earn its place went.

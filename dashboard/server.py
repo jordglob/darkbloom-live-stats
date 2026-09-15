@@ -161,10 +161,15 @@ def get_live_power():
     # Whole-system reading from the SMC (via energy-monitor.sh's macmon
     # child) when it's fresh - measures RAM/SSD/fans too, not a guess.
     sys_w = _latest_smc_system_w()
+    estimate_w = soc_w + BASELINE_W
     if sys_w is not None:
-        total_w, total_method = sys_w / PSU_EFFICIENCY, "smc"
+        # The SMC figure is smoothed and lags a few seconds behind the 200ms
+        # powermetrics sample, so at the start of a burst it can read below
+        # what the chip alone is drawing right now. The whole Mac can never
+        # use less than its chip plus the idle board draw - floor it there.
+        total_w, total_method = max(sys_w / PSU_EFFICIENCY, estimate_w), "smc"
     else:
-        total_w, total_method = soc_w + BASELINE_W, "soc+baseline"
+        total_w, total_method = estimate_w, "soc+baseline"
     return {
         "cpu_w": round(cpu_mw / 1000, 3),
         "gpu_w": round(gpu_mw / 1000, 3),

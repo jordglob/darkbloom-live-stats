@@ -1038,6 +1038,39 @@ function renderDisk(disk) {
   `;
 }
 
+function renderPayoutMeter(cs) {
+  // Expected (our own per-token estimate) vs. actual (what Darkbloom's ledger
+  // paid) for the same token jobs. A calibration check on our guess - not a
+  // fee, not a claim about Darkbloom - so the wording keeps saying so.
+  const expected = cs && cs.total_local_estimate_usd;
+  const actual = cs && cs.total_real_usd;
+  if (expected == null || actual == null || (expected <= 0 && actual <= 0)) return '';
+  const gapPct = expected > 0 ? ((expected - actual) / expected) * 100 : null;
+  const max = Math.max(expected, actual, 1e-9);
+  const bar = (label, value, color) => `
+    <div style="display:flex;align-items:center;gap:8px;font-size:12px;margin:3px 0">
+      <span style="width:150px;color:var(--text-secondary)">${label}</span>
+      <span style="flex:1;height:10px;background:var(--surface-2,rgba(128,128,128,.15));border-radius:5px;overflow:hidden"><span style="display:block;height:100%;width:${(value / max * 100).toFixed(1)}%;background:${color}"></span></span>
+      <strong style="width:80px;text-align:right">${fmtUsd(value)}</strong>
+    </div>`;
+  let verdict, verdictColor;
+  if (gapPct == null) { verdict = 'no token jobs in this window yet'; verdictColor = 'var(--text-muted)'; }
+  else if (Math.abs(gapPct) <= 10) { verdict = `estimate within ${Math.abs(gapPct).toFixed(0)}% — well calibrated`; verdictColor = 'var(--status-good)'; }
+  else if (gapPct > 0) { verdict = `estimate ran ${gapPct.toFixed(0)}% high`; verdictColor = 'var(--status-warning)'; }
+  else { verdict = `estimate ran ${Math.abs(gapPct).toFixed(0)}% low`; verdictColor = 'var(--status-warning)'; }
+  const tip = 'Expected = tokens served × a flat rate per million tokens, which this dashboard calibrates from your own past payouts (currently $0.048/M, last recalibrated 2026-09-10). Actual = what Darkbloom\'s ledger really paid for those same jobs. The gap measures how good OUR guess is - it is not a fee and not a claim about Darkbloom, whose alpha terms advertise 0%. Base reward is left out on both sides since it is not paid per token. A drifting gap usually means the network\'s pricing or the prompt/reply mix has shifted and the rate needs recalibrating. Per-model detail: tick "Show estimate columns" below.';
+  return `
+    <div class="rotation-summary" style="margin:10px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px" title="${tip.replace(/"/g, '&quot;')}">
+      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;margin-bottom:4px">
+        <strong>Expected vs. actual payout</strong>
+        <span style="color:${verdictColor}">${verdict}</span>
+        <span style="font-size:11px;color:var(--text-muted)">recent window, token jobs only <span style="opacity:.6">(hover for details)</span></span>
+      </div>
+      ${bar('Expected (our estimate)', expected, 'var(--series-revenue)')}
+      ${bar('Actual (Darkbloom paid)', actual, 'var(--series-cost)')}
+    </div>`;
+}
+
 function renderAccount(account) {
   const el = document.getElementById('account');
   if (!account) { el.innerHTML = ''; return; }
@@ -1095,6 +1128,7 @@ function renderAccount(account) {
       Balance: <strong>${fmtUsd(parseFloat(account.balance_usd))}</strong> · Earned all-time: <strong>${fmtUsd(parseFloat(account.lifetime_usd))}</strong> · ${fmtNum(account.total_jobs)} jobs <span style="opacity:.6">(hover for details)</span>
     </div>
     ${plainLine ? `<div class="rotation-summary">${plainLine}</div>` : ''}
+    ${renderPayoutMeter(cs)}
     <div class="table-scroll">
     <table class="rotation-table">
       <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th>${showEst ? `<th title="What our own flat $0.048 per million tokens guess would have estimated for these same tokens - recalibrated periodically from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means it ran low.">Our estimate's error</th>` : ''}<th title="What Darkbloom actually paid per million tokens for this model - compare models by how well they pay, not just volume.">Real rate ($ per million tokens)</th></tr></thead>
