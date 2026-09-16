@@ -643,6 +643,21 @@ def send_warmup_ping():
     return all_ok
 
 
+def _infer_price_guard_action_source(last_reason):
+    """Pre-v19 configs never recorded WHO issued the last start/stop, which is
+    exactly what made an auto-stop invisible after switching to Manual (see
+    the "last_action_source" plumbing below). Backfill it from the reason
+    text every existing install already has, so the fix takes effect
+    immediately without a migration step."""
+    if not last_reason:
+        return None
+    if last_reason.startswith("manual "):
+        return "manual"
+    if last_reason.startswith("price ") and "break-even" in last_reason:
+        return "auto"
+    return None
+
+
 def read_price_guard_config():
     default = {
         "mode": "manual",  # "manual" | "auto" - manual never calls start/stop on its own
@@ -652,6 +667,7 @@ def read_price_guard_config():
         "last_action": None,
         "last_action_at": None,
         "last_reason": None,
+        "last_action_source": None,  # "auto" | "manual" - who issued last_action
         "last_evaluated_at": None,
         "last_price_per_kwh": None,
         "last_break_even_per_kwh": None,
@@ -661,9 +677,11 @@ def read_price_guard_config():
     try:
         data = json.loads(PRICE_GUARD_CONFIG.read_text())
         default.update(data)
-        return default
     except Exception:
         return default
+    if not default.get("last_action_source"):
+        default["last_action_source"] = _infer_price_guard_action_source(default.get("last_reason"))
+    return default
 
 
 def write_price_guard_config(cfg):
@@ -833,6 +851,7 @@ def price_guard_loop():
                         cfg["last_action"] = decision["action"]
                         cfg["last_action_at"] = time.time()
                         cfg["last_reason"] = decision["reason"]
+                        cfg["last_action_source"] = "auto"
                 write_price_guard_config(cfg)
         except Exception as e:
             log_price_guard(f"ERROR: evaluation loop failed: {e}")
@@ -2144,6 +2163,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cfg["last_action"] = action
                 cfg["last_action_at"] = time.time()
                 cfg["last_reason"] = reason
+                cfg["last_action_source"] = "manual"
                 write_price_guard_config(cfg)
             self._send_json({"ok": ok})
         elif self.path == "/api/chat":

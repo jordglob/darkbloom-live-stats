@@ -1,5 +1,13 @@
 # Changelog
 
+## v19
+
+**Fixed: switching Price Guard from Auto to Manual made an auto-stop invisible while the provider stayed stopped.** Caught live: Auto paused the provider at 08:14 (price above break-even), the mode was switched to Manual soon after expecting that to mean "just keep it running" - but Manual doesn't restart anything, and the one banner that explained why the provider was down only rendered `if (mode === 'auto')`, so it vanished the moment the mode changed even though nothing about the actual stopped state did. The provider sat idle for over 30 minutes with no on-page explanation.
+
+Fix: a new `last_action_source` ("auto" | "manual") is recorded on every start/stop - by the Auto loop and by the manual buttons - and the top banner now keys off *who* issued the last stop rather than the current mode. Auto-stopped-then-switched-to-Manual now shows: "Provider is stopped. Auto paused it (…) before you switched to Manual mode — Manual doesn't resume it for you." with a clickable **Start now** right in the banner. A stop the user issued manually is never nagged about. Existing installs get this retroactively with no migration - the field is inferred once from the reason text already logged (`"price … break-even"` → auto, `"manual …"` → manual) whenever it's missing.
+
+Also renamed the mode radio labels from bare "Manual"/"Auto" to "Manual (you use Start/Stop)" / "Auto (pauses & resumes with price)", since "Manual" reads like a neutral default and was mistaken for "always on" - it isn't; it just means nothing here touches Start/Stop for you. The Price Guard status line now tags "Last action" with its source, e.g. "stop (auto) 34m ago".
+
 ## v18
 
 **Live serving view in the chat box.** When the provider is busy with paid traffic (so the chat is locked), the same box now shows a simulated token stream - blocks appearing at the provider's real, measured rate, with "~N tokens/s", a "reading the prompt…" state when the counter isn't moving mid-request, and a running "tokens since this busy stretch began (≈ words/pages)" line. What's real is the rhythm: a new 1-second `/api/serving_pulse` poll reads the daemon's own `tokens_generated` counter. What isn't is the text - the actual words are the customer's private conversation and are never visible to a provider, by design (checked: no log level, config option or local endpoint exposes them; paid traffic arrives over the coordinator websocket straight into the daemon's memory). The header and tooltip say so plainly. The 1s pulse also makes the busy/idle switch on the chat box near-instant instead of up to 10s late. Chat messages are kept across busy stretches.

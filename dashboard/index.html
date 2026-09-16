@@ -838,17 +838,18 @@ function renderPriceGuard(pg) {
     : 'Not enough data yet - needs at least one real served request and a live electricity price reading.';
   const explainLine = `<span title="Break-even = the electricity price at which an hour of serving costs exactly what it earns, from this Mac's own measured pay rate and power draw. Only serving income is counted - not the base reward for being online - so it's deliberately cautious. Margin: how far past break-even before acting. Min running / Min stopped: how long to wait between actions so it doesn't flip back and forth. Auto uses the real darkbloom start/stop commands, so the network sees a clean disconnect."><strong>Manual</strong> just shows the numbers. <strong>Auto</strong> pauses the provider when electricity costs more than serving earns, and resumes when it doesn't. <span style="opacity:.6">(hover for details)</span></span>`;
 
+  const sourceTag = pg.last_action_source ? ` <span style="color:var(--text-muted)">(${pg.last_action_source})</span>` : '';
   const lastActionLine = pg.last_action
-    ? `Last action: <strong>${pg.last_action}</strong>${lastActionAge ? ' ' + lastActionAge : ''} — ${pg.last_reason || ''}`
+    ? `Last action: <strong>${pg.last_action}</strong>${sourceTag}${lastActionAge ? ' ' + lastActionAge : ''} — ${pg.last_reason || ''}`
     : 'No action taken yet.';
 
   el.innerHTML = `
     <div class="warmup-row">
-      <label class="warmup-toggle" style="font-weight:400">
-        <input type="radio" name="price-guard-mode" value="manual" ${pg.mode === 'manual' ? 'checked' : ''}> Manual
+      <label class="warmup-toggle" style="font-weight:400" title="Nothing here starts or stops the provider on its own - you use the Start now / Stop now buttons below. If price previously stopped it, it STAYS stopped until you click Start.">
+        <input type="radio" name="price-guard-mode" value="manual" ${pg.mode === 'manual' ? 'checked' : ''}> Manual (you use Start/Stop)
       </label>
-      <label class="warmup-toggle" style="font-weight:400">
-        <input type="radio" name="price-guard-mode" value="auto" ${pg.mode === 'auto' ? 'checked' : ''}> Auto
+      <label class="warmup-toggle" style="font-weight:400" title="Stops the provider when price is above break-even, and resumes it automatically once price drops back below - no clicking needed either way.">
+        <input type="radio" name="price-guard-mode" value="auto" ${pg.mode === 'auto' ? 'checked' : ''}> Auto (pauses & resumes with price)
       </label>
       <span class="warmup-status" style="margin:0">Provider: ${daemonRunning ? '<span style="color:var(--status-good)">running</span>' : '<span style="color:var(--status-warning)">stopped</span>'}</span>
     </div>
@@ -1602,14 +1603,23 @@ function renderBanners(status, energy, doctor, daemonState) {
     banners.push(banner('warning', status.last_error));
   }
 
-  if (lastPriceGuard && lastPriceGuard.mode === 'auto' && !lastPriceGuard.daemon_running) {
+  if (lastPriceGuard && !lastPriceGuard.daemon_running && lastPriceGuard.last_action === 'stop' && lastPriceGuard.last_action_source === 'auto') {
     // An intentional, price-driven pause looks identical to a real outage in
-    // every other status on this page ("Daemon: not running") - say why.
+    // every other status on this page ("Provider: Not running"). This used to
+    // only fire while still in Auto mode - so switching to Manual right after
+    // an auto-stop made the reason vanish while the provider stayed stopped,
+    // which is exactly what happened live once (see CHANGELOG v19). Now it
+    // fires regardless of the CURRENT mode, keyed off who actually issued the
+    // last stop, and the wording changes to match what will/won't happen next.
     const live = lastPriceGuard.live;
     const priceNote = live
       ? ` (${live.price_per_kwh.toFixed(3)} vs break-even ${live.break_even_per_kwh.toFixed(3)} ${live.currency || ''}/kWh)`
       : '';
-    banners.push(banner('warning', `Price Guard has paused serving — not profitable at the current electricity price${priceNote}. Re-evaluates every 5 min; will resume automatically once profitable again.`));
+    if (lastPriceGuard.mode === 'auto') {
+      banners.push(banner('warning', `Price Guard has paused serving — not profitable at the current electricity price${priceNote}. Re-evaluates every 5 min; will resume automatically once profitable again.`));
+    } else {
+      banners.push(banner('warning', `<strong>Provider is stopped.</strong> Auto paused it${priceNote} before you switched to Manual mode — Manual doesn't resume it for you. <a href="#" onclick="postPriceGuardAction('start'); return false;">Start now</a>, or switch back to Auto to let it resume on its own once profitable.`));
+    }
   }
   if (!energy.power_monitoring_active) {
     banners.push(banner('warning', `Power monitoring inactive — the powermetrics service isn't running, so electricity cost is not being counted right now. <strong>Fix:</strong> run the one-time <code>setup-powermetrics-sudoers.sh</code> step from the README, then <code>launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.darkbloom.powermetrics.plist</code>.`));
