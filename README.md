@@ -32,6 +32,8 @@ trusted, not from serving).
 
 ![status](https://img.shields.io/badge/status-community%20project-blue)
 
+![Dashboard screenshot](docs/screenshot.png)
+
 ## What it looks like
 
 A single-page dashboard at `http://127.0.0.1:8787`, only reachable from the
