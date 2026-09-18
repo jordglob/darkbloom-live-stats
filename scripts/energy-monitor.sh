@@ -58,10 +58,14 @@ BLENDED_USD_PER_TOKEN=$(echo "scale=12; 0.048/1000000" | bc 2>/dev/null)
 [ -z "$BLENDED_USD_PER_TOKEN" ] && BLENDED_USD_PER_TOKEN=0.000000048
 
 mkdir -p "$DIR"
-[ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w,avg_gpu_active_pct,power_method" > "$CSV"
+[ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w,avg_gpu_active_pct,power_method,gpu_temp_c,fan_rpm,fan_max_rpm" > "$CSV"
 # Pre-v14 files have a 15-column header; add the column name so readers see it.
 if ! head -1 "$CSV" | grep -q ',power_method'; then
   sed -i '' '1s/$/,power_method/' "$CSV"
+fi
+# Pre-v20 files are missing the fan/temp columns; same header-only migration.
+if ! head -1 "$CSV" | grep -q ',gpu_temp_c'; then
+  sed -i '' '1s/$/,gpu_temp_c,fan_rpm,fan_max_rpm/' "$CSV"
 fi
 
 # Whole-system power sampler: macmon reads the SMC every 5s into a JSONL log
@@ -220,6 +224,16 @@ while true; do
   INTERVAL_COST=$(calc "scale=6; ($INTERVAL_WH/1000) * $ELPRIS_VAL")
   CUM_COST=$(calc "scale=6; $CUM_COST + $INTERVAL_COST")
 
+  # --- GPU temp / fan speed, via the same `darkbloom fan status` the dashboard's
+  # live gauge already shells out to - Apple Silicon exposes neither through
+  # powermetrics. One extra process per 5-min tick, cheap enough here. ---
+  FAN_STATUS=$("$DARKBLOOM" fan status 2>/dev/null || true)
+  # Same figure the live gauge shows: average of every "name=X C" reading on
+  # the "GPU sensors:" line (mirrors server.py's GPU_SENSOR_TEMP_RE regex).
+  GPU_TEMP_C=$(printf '%s\n' "$FAN_STATUS" | grep -oE '=[0-9.]+ ?C' | grep -oE '[0-9.]+' | awk '{s+=$1; n++} END{if(n>0) printf "%.1f", s/n}')
+  FAN_RPM=$(printf '%s\n' "$FAN_STATUS" | sed -nE 's/.*Fan [0-9]+: actual ([0-9]+),.*/\1/p' | head -1)
+  FAN_MAX_RPM=$(printf '%s\n' "$FAN_STATUS" | sed -nE 's/.*range ([0-9]+)-([0-9]+).*/\2/p' | head -1)
+
   STATUS=$("$DARKBLOOM" status 2>/dev/null || true)
   REQS=$(echo "$STATUS" | grep -o 'Requests served: [0-9]*' | grep -o '[0-9]*' || true)
   TOKENS=$(echo "$STATUS" | grep -oE 'tokens: [0-9]+' | grep -o '[0-9]*' || true)
@@ -247,7 +261,7 @@ while true; do
   EST_REV_SEK=$(calc "scale=6; $EST_REV_USD * $USDSEK_VAL")
   NET_SEK=$(calc "scale=6; $EST_REV_SEK - $CUM_COST")
 
-  echo "$NOW_ISO,$AVG_W,$INTERVAL_WH,$CUM_WH,$ELPRIS_VAL,$INTERVAL_COST,$CUM_COST,$USDSEK_VAL,$REQS,$TOKENS,$EST_REV_USD,$EST_REV_SEK,$NET_SEK,$TOTAL_W,$AVG_GPU_ACTIVE_PCT,$POWER_METHOD" >> "$CSV"
+  echo "$NOW_ISO,$AVG_W,$INTERVAL_WH,$CUM_WH,$ELPRIS_VAL,$INTERVAL_COST,$CUM_COST,$USDSEK_VAL,$REQS,$TOKENS,$EST_REV_USD,$EST_REV_SEK,$NET_SEK,$TOTAL_W,$AVG_GPU_ACTIVE_PCT,$POWER_METHOD,$GPU_TEMP_C,$FAN_RPM,$FAN_MAX_RPM" >> "$CSV"
 
   {
     echo "LAST_OFFSET=$LAST_OFFSET"

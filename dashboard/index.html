@@ -146,6 +146,9 @@
   .line-revenue { fill: none; stroke: var(--series-revenue); stroke-width: 2; stroke-linecap: round; }
   .line-power { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
   .line-power-peak { fill: none; stroke: var(--series-cost); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
+  .line-temp { fill: none; stroke: var(--gauge-gpu); stroke-width: 2; stroke-linecap: round; }
+  .line-temp-peak { fill: none; stroke: var(--gauge-gpu); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
+  .line-fan { fill: none; stroke: var(--gauge-cpu); stroke-width: 1.5; stroke-linecap: round; opacity: 0.85; }
   .line-net { fill: none; stroke: var(--gauge-total); stroke-width: 2; stroke-linecap: round; }
   .line-elpris { fill: none; stroke: var(--series-elpris); stroke-width: 2; stroke-linecap: round; }
   .line-elpris-total { fill: none; stroke: var(--series-elpris-total); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 5 3; }
@@ -290,6 +293,7 @@
       <div class="explainer-section">
         <h4>Charts</h4>
         <p><strong>Power history</strong> — the same wattage as the live gauges, logged every 5 minutes so you can see trends over hours/days. Once there's enough history to need downsampling, a faint dashed "peak" line appears alongside the average — the highest single reading inside each plotted bucket, so brief spikes stay visible even when hundreds of raw samples are compressed into one line.</p>
+        <p><strong>GPU Temp &amp; Fan history</strong> — the same GPU Temp gauge value, logged every 5 minutes, with fan speed (% of max RPM) overlaid on the right axis. This is the chart to check after a Running Hot banner: if the temp line climbs while the fan line stays flat, the fan-control helper wasn't responding during that stretch, not just right now. No data before this chart was added - older history just shows a gap.</p>
         <p><strong>Real Earnings vs. Electricity Cost (last 48h)</strong> — the one chart to trust for "am I making money": every real ledger entry Darkbloom paid (including the base reward) added up, against the measured electricity cost added up, over the last two days. Both real, both USD. Builds up locally over ~2 days of dashboard uptime because Darkbloom's API only returns the most recent batch of entries.</p>
         <p><strong>Estimated cost vs. revenue (folded away, nerdy)</strong> — two older charts using a rough local revenue guess (tokens × a flat rate) over the full logged history. They ignore the base reward, so they look far worse than reality; kept only for the long-range token-earnings trend.</p>
         <p><strong>Electricity Price &amp; Profitability</strong> — the actual price per kWh, yesterday through tomorrow, from the source you pick (Sweden, Norway, any European bidding zone, UK Octopus Agile, US ComEd, or a flat rate). The right-axis "Net" overlay is real earnings minus real cost per 15-minute slot - so you can see which hours of the day are actually worth running. Picking a source/zone here changes every price-related number on the page, including cost tracking from that moment on.</p>
@@ -339,6 +343,15 @@
     <div class="chart-wrap">
       <svg class="chart" id="chart-power"></svg>
       <div class="tooltip" id="tooltip-power"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 title="GPU temperature over time (average and peak per bucket), same source as the live GPU Temp gauge - darkbloom fan status, since Apple Silicon doesn't expose this via powermetrics. Fan speed (% of this Mac's max RPM) is overlaid on the right axis so you can see whether the fan is actually responding to temperature - see the Running Hot banner if it isn't.">GPU Temp &amp; Fan — history <span id="temp-chart-stats" class="gauge-time"></span></h2>
+    <div class="legend" id="temp-legend"></div>
+    <div class="chart-wrap">
+      <svg class="chart" id="chart-temp"></svg>
+      <div class="tooltip" id="tooltip-temp"></div>
     </div>
   </div>
 
@@ -1985,6 +1998,22 @@ async function refresh() {
     const nowW = (rows.total_power_w || []).at(-1);
     const maxW = Math.max(...(hasPeak ? rows.peak_total_power_w : (rows.total_power_w || [0])));
     document.getElementById('power-chart-stats').textContent = nowW != null ? `now: ${fmtW(nowW)} · max: ${fmtW(maxW)}` : '';
+
+    const hasTempPeak = !!(rows.peak_gpu_temp_c && rows.peak_gpu_temp_c.length);
+    document.getElementById('temp-legend').innerHTML =
+      `<span title="Each plotted point averages several 5-minute readings; the faint line is the highest single reading in that stretch, so brief spikes stay visible."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg${hasTempPeak ? ' / peak' : ''})</span>` +
+      `<span title="Fan speed as % of this Mac's max RPM, right axis. If temp climbs but this stays flat, the fan-control helper isn't responding - see the Running Hot banner."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
+    const tempSeries = [{name: 'GPU Temp', values: rows.gpu_temp_c || []}];
+    const tempColors = ['line-temp'];
+    if (hasTempPeak) { tempSeries.push({name: 'Peak', values: rows.peak_gpu_temp_c}); tempColors.push('line-temp-peak'); }
+    renderLineChart('chart-temp', 'tooltip-temp', rows.timestamps, tempSeries, tempColors, v => `${v.toFixed(1)}°C`, {
+      rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct || [], colorClass: 'line-fan' }],
+      rightValueFmt: v => `${v.toFixed(0)}%`,
+    });
+    const realTemps = (rows.gpu_temp_c || []).filter(v => v != null);
+    const nowTemp = realTemps.at(-1);
+    const maxTemp = Math.max(...(hasTempPeak ? rows.peak_gpu_temp_c.filter(v => v != null) : realTemps));
+    document.getElementById('temp-chart-stats').textContent = nowTemp != null ? `now: ${nowTemp.toFixed(1)}°C · max: ${maxTemp.toFixed(1)}°C` : 'no data yet';
 
     renderLineChart('chart-money', 'tooltip-money',
       rows.timestamps,

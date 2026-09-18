@@ -1,5 +1,9 @@
 # Changelog
 
+## v20
+
+**GPU Temp & Fan history.** New chart logging GPU temperature and fan speed every 5 minutes (same source as the live gauges - `darkbloom fan status`, since Apple Silicon exposes neither through powermetrics), with average/peak temp on the left axis and fan speed (% of max RPM) on the right - so a Running Hot banner from earlier can be checked against the actual trend instead of just the live snapshot: if temp climbs while the fan line stays flat, that's the fan-control helper not responding, visible after the fact. Existing history before this change shows as a gap, not a false 0°C dip - missing temp readings are excluded from bucket averages rather than counted as zero.
+
 ## v19
 
 **Fixed: switching Price Guard from Auto to Manual made an auto-stop invisible while the provider stayed stopped.** Caught live: Auto paused the provider at 08:14 (price above break-even), the mode was switched to Manual soon after expecting that to mean "just keep it running" - but Manual doesn't restart anything, and the one banner that explained why the provider was down only rendered `if (mode === 'auto')`, so it vanished the moment the mode changed even though nothing about the actual stopped state did. The provider sat idle for over 30 minutes with no on-page explanation.
