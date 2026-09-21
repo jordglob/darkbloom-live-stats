@@ -1665,7 +1665,7 @@ function renderBanners(status, energy, doctor, daemonState) {
         const installTip = fr && !fr.available
           ? ` Install a small independent fan-control helper to fix this automatically going forward - see the README's "Automatic fan recovery" section.`
           : '';
-        const tip = `Darkbloom installs its own fan-control helper; right now it isn't taking control of the fan${ft.fan_error ? ` (its status says: ${ft.fan_error})` : ''}, so macOS's default fan curve is all that's running. macOS throttles the chip before any damage, so this is lost performance, not a safety issue.${installTip} If it keeps reporting an error, mention it in the Darkbloom Slack - it's their helper, not this dashboard.`;
+        const tip = `Darkbloom installs its own fan-control helper; right now it isn't taking control of the fan${ft.fan_error ? ` (its status says: ${ft.fan_error})` : ''}, so macOS's default fan curve is all that's running. macOS throttles the chip before any damage, so this is lost performance, not a safety issue - and it's avoidable: the fix has been reviewed and sitting unmerged since July 15 (github.com/Layr-Labs/d-inference/pull/599), blocked on a GitHub permissions checkbox for their review agent, not a technical problem.${installTip}`;
         banners.push(banner('warning', `<span title="${tip.replace(/"/g, '&quot;')}"><strong>Running hot:</strong> GPU ${ft.gpu_temp_c.toFixed(0)}°C, fan only ${(fanFrac * 100).toFixed(0)}% — Darkbloom's fan control isn't engaging. Not dangerous, but slower.${installTip ? ' Auto-recovery available - see README.' : ' Check: <code>darkbloom fan status</code>.'} <span style="opacity:.6">(hover for details)</span></span>`));
       }
     }
