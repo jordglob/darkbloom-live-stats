@@ -453,6 +453,7 @@ let lastUtilization = null;
 let lastRam = null;
 let lastOllama = null;
 let lastFanTemp = null;
+let lastFanRecovery = null;
 let lastPowerMethod = null;
 let lastPriceGuard = null;
 let lastConfiguredModels = [];
@@ -625,6 +626,7 @@ async function refreshLivePower() {
     lastRam = data.ram;
     lastOllama = data.ollama;
     lastFanTemp = data.fan_temp;
+    lastFanRecovery = data.fan_recovery;
     // utilization is 5-min/60-min-resolution data from /api/data (10s poll), not
     // part of this endpoint - carry the last known value across so the
     // gauge doesn't flicker to "no data" between the two polling cadences.
@@ -1652,8 +1654,20 @@ function renderBanners(status, energy, doctor, daemonState) {
     const hot = ft.gpu_temp_c >= 85;
     const helperFailing = ft.fan_mode === 'error' || (ft.fan_error && ft.fan_service_running);
     if ((hot && fanFrac < 0.5) || (helperFailing && hot)) {
-      const tip = `Darkbloom installs its own fan-control helper; right now it isn't taking control of the fan${ft.fan_error ? ` (its status says: ${ft.fan_error})` : ''}, so macOS's default fan curve is all that's running. macOS throttles the chip before any damage, so this is lost performance, not a safety issue. Run: darkbloom fan status. If it keeps reporting an error, mention it in the Darkbloom Slack - it's their helper, not this dashboard.`;
-      banners.push(banner('warning', `<span title="${tip.replace(/"/g, '&quot;')}"><strong>Running hot:</strong> GPU ${ft.gpu_temp_c.toFixed(0)}°C, fan only ${(fanFrac * 100).toFixed(0)}% — Darkbloom's fan control isn't engaging. Not dangerous, but slower. Check: <code>darkbloom fan status</code> <span style="opacity:.6">(hover for details)</span></span>`));
+      const fr = lastFanRecovery;
+      if (fr && fr.active) {
+        // The optional external helper (see README "Automatic fan recovery")
+        // is already driving the fan directly via SMC, bypassing Darkbloom's
+        // stuck helper - this is being handled, not an open problem.
+        const engagedAgo = fr.last_action_at ? fmtAgeShort(Date.now() / 1000 - fr.last_action_at) : null;
+        banners.push(banner('info', `<strong>Running hot, auto-recovery engaged:</strong> GPU ${ft.gpu_temp_c.toFixed(0)}°C — Darkbloom's fan control isn't responding, but the backup fan controller is actively cooling${engagedAgo ? ` (since ${engagedAgo})` : ''}. Fan: ${ft.fan_rpm} rpm.`));
+      } else {
+        const installTip = fr && !fr.available
+          ? ` Install a small independent fan-control helper to fix this automatically going forward - see the README's "Automatic fan recovery" section.`
+          : '';
+        const tip = `Darkbloom installs its own fan-control helper; right now it isn't taking control of the fan${ft.fan_error ? ` (its status says: ${ft.fan_error})` : ''}, so macOS's default fan curve is all that's running. macOS throttles the chip before any damage, so this is lost performance, not a safety issue.${installTip} If it keeps reporting an error, mention it in the Darkbloom Slack - it's their helper, not this dashboard.`;
+        banners.push(banner('warning', `<span title="${tip.replace(/"/g, '&quot;')}"><strong>Running hot:</strong> GPU ${ft.gpu_temp_c.toFixed(0)}°C, fan only ${(fanFrac * 100).toFixed(0)}% — Darkbloom's fan control isn't engaging. Not dangerous, but slower.${installTip ? ' Auto-recovery available - see README.' : ' Check: <code>darkbloom fan status</code>.'} <span style="opacity:.6">(hover for details)</span></span>`));
+      }
     }
   }
 

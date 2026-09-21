@@ -194,6 +194,74 @@ footer says which method is in use, and the CSV logs it per row
 (`power_method`: `smc` or `soc+baseline`). A smart plug is still the only
 way to pin down your own unit's PSU losses.
 
+## Optional: automatic fan recovery
+
+Darkbloom's own fan-control helper has a known, well-documented bug: one
+implausible GPU sensor reading (seen in the wild: a transient `-4.0 C`) can
+leave it permanently stuck reporting an error while the fan sits near its
+floor RPM regardless of real temperature - macOS's own thermal management
+still protects the chip, but you lose the cooling and, under sustained load,
+performance. It's filed upstream as
+[Layr-Labs/d-inference#551](https://github.com/Layr-Labs/d-inference/issues/551)
+with a reviewed fix in [PR #599](https://github.com/Layr-Labs/d-inference/pull/599),
+open and unmerged since 2026-07-15 - a GitHub permissions issue with their
+review agent, not a technical one, going by the PR thread.
+
+This dashboard flags the symptom (the "Running hot" banner) but doesn't fix
+it - vendoring a privileged SMC helper into a monitoring dashboard is out of
+scope, and no other party's fan-control code here has a license that allows
+redistributing it anyway. Instead, exactly like `macmon` above, the energy
+monitor looks for an **independent, separately-installed** helper and uses
+it automatically if present:
+
+```bash
+git clone https://github.com/justin-schroeder/darkbloom-monitor.git /tmp/dbm
+cd /tmp/dbm && swift build -c release --product DarkbloomFanHelper
+mkdir -p ~/.darkbloom/bin
+cp .build/release/DarkbloomFanHelper ~/.darkbloom/bin/darkbloom-fan-helper
+```
+
+Writing to the SMC needs root. Re-run `./install.sh` (it detects the binary
+and writes one more script for you), then run it once:
+
+```bash
+bash ~/.darkbloom/setup-fan-helper-sudoers.sh
+```
+
+Same pattern as the `powermetrics` sudoers rule: scoped to this one binary
+only (`sudo visudo -c` validates it before touching the real sudoers config),
+nothing else gains root access. Without this step the recovery loop detects
+the missing authorization, logs it once, and leaves the banner exactly as it
+was - it never falls back to a password prompt.
+
+That's it - no daemon of its own beyond what the dashboard already runs. When
+the dashboard
+detects the same "hot GPU, unresponsive fan" condition as the banner, it
+calls `darkbloom-fan-helper apply gpu 45 85` (ramps 0-100% between 45°C and
+85°C, matching Darkbloom's own stated "80% at 45°C" policy with headroom
+under the ~100-105°C throttle point) every 30 seconds, and calls `... 
+automatic` to hand control back once the GPU cools or Darkbloom's own helper
+recovers on its own. Actions are logged to `~/.darkbloom/fan-recovery.log`
+and a macOS notification fires the first time it engages. Without the binary
+present, nothing changes - the banner still tells you to check
+`darkbloom fan status` yourself.
+
+**Why this tool and not another one:** three fan-control projects were
+evaluated. [MacFanControl](https://github.com/raminsharifi/MacFanControl)
+independently confirms the underlying fix (the M3/M4 "Ftst unlock" retry
+sequence) but only exposes it through an interactive TUI - no scriptable way
+to set a temperature policy, so it can't be automated here. It's also a
+single, unmaintained commit from June 2026.
+[ThermalForge](https://github.com/ProducerGuy/ThermalForge) is the most
+mature of the three (126 commits, active within the last few days) with a
+real continuous auto-adjust mode, but it's general-purpose (not Darkbloom-
+aware) and installs its own persistent daemon - a bigger footprint than this
+one bug is worth. Justin Schroeder's helper is purpose-built for Darkbloom
+providers, reads the SMC directly via the same `IOServiceOpen`/
+`IOConnectCallStructMethod` approach every tool here uses, and - checked
+directly in its source - fails closed to macOS's automatic control if any
+SMC write is rejected, so the worst case is never worse than today's bug.
+
 ## Live account data (Darkbloom's own API)
 
 The "Darkbloom Account" panel is a real live connection - no browser step, no
@@ -211,6 +279,11 @@ this just works out of the box - nothing to configure.
 - The sudoers rule installed by `setup-powermetrics-sudoers.sh` is scoped to
   `/usr/bin/powermetrics` **only**. It cannot be used to run any other command
   as root.
+- Likewise, `setup-fan-helper-sudoers.sh` (only relevant if you've installed
+  the optional fan-recovery helper) scopes NOPASSWD to that one binary path
+  only. This tool never has your password and never prompts for one - if the
+  rule isn't installed, the recovery loop just logs that it can't act and
+  leaves everything as-is.
 - No credentials are ever created or duplicated by this tool. It only *reads*
   the device token `darkbloom login` already wrote to
   `~/.darkbloom/auth_token` (server-side, never sent to the browser or logged)

@@ -987,6 +987,105 @@ def trust_monitor_loop():
         time.sleep(60)
 
 
+# ---------------------------------------------------------------------------
+# Fan recovery (optional, external tool)
+#
+# Darkbloom's own fan-control helper has a known, well-documented bug (see
+# Layr-Labs/d-inference issue #551, open since 2026-07-15, fix reviewed and
+# unmerged in PR #599): one implausible sensor reading can leave it
+# permanently stuck reporting an error while the fan sits near its floor RPM
+# regardless of real GPU temperature - observed live on this machine.
+#
+# We don't vendor a fix (no license to redistribute one, and duplicating a
+# privileged SMC helper inside a monitoring dashboard is out of scope). If
+# Justin Schroeder's darkbloom-monitor fan helper - a separately-built,
+# independent tool that talks to the SMC directly and never touches
+# Darkbloom's own broken code path - is present at FAN_HELPER_BIN, we call it
+# the same way energy-monitor.sh already treats macmon: optional, detected,
+# graceful no-op if absent. See README "Optional: automatic fan recovery".
+# ---------------------------------------------------------------------------
+FAN_HELPER_BIN = HOME / ".darkbloom" / "bin" / "darkbloom-fan-helper"
+FAN_RECOVERY_LOG = HOME / ".darkbloom" / "fan-recovery.log"
+FAN_RECOVERY_START_C = 45  # matches Darkbloom's own stated policy ("80.0% at 45.0 C")
+FAN_RECOVERY_FULL_C = 85  # ramps to 100% by here - real headroom under the ~100-105C throttle point
+FAN_RECOVERY_POLL_SEC = 30
+_fan_recovery_state = {"active": False, "last_action_at": None, "last_status": None}
+
+
+def log_fan_recovery(line):
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with open(FAN_RECOVERY_LOG, "a") as f:
+        f.write(f"[{ts}] {line}\n")
+
+
+def get_fan_recovery_status():
+    """Exposed to the frontend so the Running Hot banner can say whether
+    auto-recovery is installed/active instead of just pointing at the CLI."""
+    s = dict(_fan_recovery_state)
+    s["available"] = FAN_HELPER_BIN.exists()
+    return s
+
+
+def _is_running_hot(ft):
+    """Same condition the dashboard's own Running Hot banner uses (see
+    index.html renderBanners): a hot GPU with the fan nowhere near responding,
+    or the helper's own status explicitly reporting an error while hot."""
+    if not ft or ft.get("gpu_temp_c") is None or not ft.get("fan_rpm") or not ft.get("fan_max_rpm"):
+        return False
+    hot = ft["gpu_temp_c"] >= 85
+    fan_frac = ft["fan_rpm"] / ft["fan_max_rpm"]
+    helper_failing = ft.get("fan_mode") == "error" or (ft.get("fan_error") and ft.get("fan_service_running"))
+    return (hot and fan_frac < 0.5) or (helper_failing and hot)
+
+
+def _run_fan_helper(*args):
+    """SMC writes need root - `sudo -n` (never interactive; we will never
+    prompt for or handle a password) against the scoped NOPASSWD rule
+    setup-fan-helper-sudoers.sh installs. Without that rule this fails
+    immediately with a clear stderr message rather than hanging."""
+    return subprocess.run(
+        ["sudo", "-n", str(FAN_HELPER_BIN), *args],
+        capture_output=True, text=True, timeout=15,
+    )
+
+
+def fan_recovery_loop():
+    warned_no_sudo = False
+    while True:
+        try:
+            if not FAN_HELPER_BIN.exists():
+                time.sleep(FAN_RECOVERY_POLL_SEC)
+                continue
+            ft = get_fan_temp()
+            hot = _is_running_hot(ft)
+            if hot:
+                r = _run_fan_helper("apply", "gpu", str(FAN_RECOVERY_START_C), str(FAN_RECOVERY_FULL_C))
+                status_line = (r.stdout or r.stderr or "").strip()
+                if r.returncode != 0 and "a password is required" in status_line.lower():
+                    if not warned_no_sudo:
+                        log_fan_recovery("ERROR: darkbloom-fan-helper is installed but not authorized for passwordless sudo - run setup-fan-helper-sudoers.sh")
+                        warned_no_sudo = True
+                    time.sleep(FAN_RECOVERY_POLL_SEC)
+                    continue
+                warned_no_sudo = False
+                if not _fan_recovery_state["active"]:
+                    log_fan_recovery(f"ENGAGED at GPU {ft['gpu_temp_c']}C, fan {ft['fan_rpm']}/{ft['fan_max_rpm']} rpm - {status_line}")
+                    notify_mac("Darkbloom Live & Stats", f"Fan-control bug detected (GPU {ft['gpu_temp_c']:.0f}C) - engaged backup cooling")
+                _fan_recovery_state["active"] = True
+                _fan_recovery_state["last_action_at"] = time.time()
+                _fan_recovery_state["last_status"] = status_line
+            elif _fan_recovery_state["active"]:
+                # Recovered (or Darkbloom's own helper is responding again) -
+                # hand control back rather than fighting it indefinitely.
+                r = _run_fan_helper("automatic")
+                log_fan_recovery(f"RELEASED - GPU back to {ft['gpu_temp_c'] if ft else '?'}C - {(r.stdout or r.stderr or '').strip()}")
+                _fan_recovery_state["active"] = False
+                _fan_recovery_state["last_action_at"] = time.time()
+        except Exception as e:
+            log_fan_recovery(f"ERROR: {e}")
+        time.sleep(FAN_RECOVERY_POLL_SEC)
+
+
 def warmup_loop():
     while True:
         cfg = read_warmup_config()
@@ -2122,6 +2221,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "ram": get_ram_status(),
                 "ollama": get_ollama_status(),
                 "fan_temp": get_fan_temp(),
+                "fan_recovery": get_fan_recovery_status(),
             })
         elif self.path == "/api/warmup":
             cfg = read_warmup_config()
@@ -2239,6 +2339,7 @@ class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 if __name__ == "__main__":
     threading.Thread(target=warmup_loop, daemon=True).start()
     threading.Thread(target=trust_monitor_loop, daemon=True).start()
+    threading.Thread(target=fan_recovery_loop, daemon=True).start()
     threading.Thread(target=inference_duration_tracker_loop, daemon=True).start()
     threading.Thread(target=price_guard_loop, daemon=True).start()
     with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:

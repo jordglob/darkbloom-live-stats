@@ -10,6 +10,10 @@
 # see README "Security notes"):
 #   - A scoped sudoers rule + LaunchAgent for `powermetrics` (CPU/GPU power
 #     sampling needs root). You run one short script yourself, once.
+#   - A second, equally scoped sudoers rule for the optional fan-recovery
+#     helper (see README "Optional: automatic fan recovery") - only written
+#     if you've already built and installed that binary yourself; otherwise
+#     skipped entirely, and the dashboard's fan-recovery loop just no-ops.
 
 set -euo pipefail
 
@@ -75,6 +79,30 @@ rm -f "\$RULE_FILE"
 echo "SUDOERS_INSTALLED_OK"
 SETUP
 chmod +x "$TARGET/setup-powermetrics-sudoers.sh"
+
+# Same pattern, for the optional fan-recovery helper - only relevant if you've
+# already built it (see README), so only offered when the binary exists.
+if [ -x "$TARGET/bin/darkbloom-fan-helper" ]; then
+  cat > "$TARGET/setup-fan-helper-sudoers.sh" <<SETUP
+#!/bin/bash
+set -euo pipefail
+RULE_FILE=/tmp/darkbloom-fan-sudoers-tmp
+DEST=/etc/sudoers.d/darkbloom-fan-helper
+
+cat > "\$RULE_FILE" <<'EOF'
+$CURRENT_USER ALL=(root) NOPASSWD: $TARGET/bin/darkbloom-fan-helper *
+EOF
+
+sudo visudo -c -f "\$RULE_FILE"
+sudo cp "\$RULE_FILE" "\$DEST"
+sudo chmod 440 "\$DEST"
+sudo chown root:wheel "\$DEST"
+rm -f "\$RULE_FILE"
+echo "SUDOERS_INSTALLED_OK"
+SETUP
+  chmod +x "$TARGET/setup-fan-helper-sudoers.sh"
+  echo "Found $TARGET/bin/darkbloom-fan-helper - run setup-fan-helper-sudoers.sh to enable automatic fan recovery."
+fi
 
 # Start the 2 services that don't need root right away.
 for svc in dashboard energy-monitor; do
