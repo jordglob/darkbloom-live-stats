@@ -147,8 +147,12 @@
   .line-power { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
   .line-power-peak { fill: none; stroke: var(--series-cost); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
   .line-temp { fill: none; stroke: var(--gauge-gpu); stroke-width: 2; stroke-linecap: round; }
-  .line-temp-peak { fill: none; stroke: var(--gauge-gpu); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
+  .line-temp-peak { fill: none; stroke: var(--gauge-gpu); stroke-width: 1; opacity: 0.45; }
+  .band-temp { fill: var(--gauge-gpu); opacity: 0.09; stroke: none; }
+  .threshold-line { stroke: var(--status-critical); stroke-width: 1; stroke-dasharray: 4 3; opacity: 0.7; }
+  .threshold-label { fill: var(--status-critical); font-size: 9px; opacity: 0.8; }
   .line-fan { fill: none; stroke: var(--gauge-cpu); stroke-width: 1.5; stroke-linecap: round; opacity: 0.85; }
+  .area-fan { fill: var(--gauge-cpu); fill-opacity: 0.14; stroke: var(--gauge-cpu); stroke-width: 1.25; opacity: 0.8; }
   .line-net { fill: none; stroke: var(--gauge-total); stroke-width: 2; stroke-linecap: round; }
   .line-elpris { fill: none; stroke: var(--series-elpris); stroke-width: 2; stroke-linecap: round; }
   .line-elpris-total { fill: none; stroke: var(--series-elpris-total); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 5 3; }
@@ -1728,8 +1732,14 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   }
 
   const allValues = series.flatMap(s => s.values).filter(v => v != null);
-  const yMax = Math.max(opts.allowNegative ? 0 : -Infinity, ...allValues, 0.0001);
-  const yMin = opts.allowNegative ? Math.min(0, ...allValues) : 0;
+  // opts.yDomain pins the axis to a fixed range instead of scaling to the data.
+  // Worth it for temperature: a 0-based auto-scaled axis spends half its height
+  // on a range this GPU never enters, and an axis that moves between refreshes
+  // means the same line height doesn't mean the same thing twice.
+  const yMax = opts.yDomain ? opts.yDomain[1]
+    : Math.max(opts.allowNegative ? 0 : -Infinity, ...allValues, 0.0001);
+  const yMin = opts.yDomain ? opts.yDomain[0]
+    : (opts.allowNegative ? Math.min(0, ...allValues) : 0);
   const yRange = (yMax - yMin) || 0.0001;
   const innerW = w - padL - padR;
   const innerH = h - padT - padB;
@@ -1760,6 +1770,15 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   } else {
     xForIndex = (i) => padL + (tsCount === 1 ? 0 : (i / (tsCount - 1)) * innerW);
   }
+  const xPositions = Array.from({length: tsCount}, (_, i) => xForIndex(i));
+  const nearestIdxToX = (targetX) => {
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < tsCount; i++) {
+      const d = Math.abs(xPositions[i] - targetX);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  };
 
   // Right axis gets its own independent domain - it shares the same 3
   // gridline y-positions as the left axis (standard dual-axis convention)
@@ -1767,8 +1786,10 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   let yMinR, yMaxR, yRangeR, yToPixelR;
   if (hasRight) {
     const allValuesR = opts.rightSeries.flatMap(s => s.values).filter(v => v != null);
-    yMaxR = Math.max(opts.allowNegativeRight ? 0 : -Infinity, ...allValuesR, 0.0001);
-    yMinR = opts.allowNegativeRight ? Math.min(0, ...allValuesR) : 0;
+    yMaxR = opts.yDomainRight ? opts.yDomainRight[1]
+      : Math.max(opts.allowNegativeRight ? 0 : -Infinity, ...allValuesR, 0.0001);
+    yMinR = opts.yDomainRight ? opts.yDomainRight[0]
+      : (opts.allowNegativeRight ? Math.min(0, ...allValuesR) : 0);
     yRangeR = (yMaxR - yMinR) || 0.0001;
     yToPixelR = (v) => padT + innerH - ((v - yMinR) / yRangeR) * innerH;
   }
@@ -1786,7 +1807,10 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     label.setAttribute('x', padL - 6); label.setAttribute('y', y + 3);
     label.setAttribute('text-anchor', 'end');
     label.setAttribute('class', 'axis-label');
-    label.textContent = valueFmt(val);
+    // Axis ticks can want coarser formatting than the tooltip: on a fixed
+    // domain "105.0°C" carries a decimal that never varies, while the
+    // tooltip still wants the real precision.
+    label.textContent = (opts.axisValueFmt || valueFmt)(val);
     svg.appendChild(label);
   });
 
@@ -1802,6 +1826,27 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
       svg.appendChild(label);
     });
   }
+
+  // Named threshold lines are drawn later (after the envelope band), so a
+  // translucent band can't wash out the one line you most need to read.
+  const drawHLines = () => (opts.hLines || []).forEach(hl => {
+    if (hl.value < yMin || hl.value > yMax) return;
+    const y = yToPixel(hl.value);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', padL); line.setAttribute('x2', w - padR);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('class', hl.className || 'threshold-line');
+    svg.appendChild(line);
+    if (hl.label) {
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', padL + 4);
+      label.setAttribute('y', y - 3);
+      label.setAttribute('text-anchor', 'start');
+      label.setAttribute('class', 'threshold-label');
+      label.textContent = hl.label;
+      svg.appendChild(label);
+    }
+  });
 
   // zero-line reference, only meaningful when the domain actually crosses zero
   if (yMin < 0 && yMax > 0) {
@@ -1832,16 +1877,7 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   // "middle" landed a few px from "start" and the text overlapped into
   // gibberish). Pick by target PIXEL position instead, snapping each to
   // its nearest actual point.
-  const n0 = timestamps.length;
-  const xPositions = Array.from({length: n0}, (_, i) => xForIndex(i));
-  const nearestIdxToX = (targetX) => {
-    let best = 0, bestD = Infinity;
-    for (let i = 0; i < n0; i++) {
-      const d = Math.abs(xPositions[i] - targetX);
-      if (d < bestD) { bestD = d; best = i; }
-    }
-    return best;
-  };
+  const n0 = tsCount;
   const labelIdxs = opts.logTime
     ? [nearestIdxToX(padL), nearestIdxToX(padL + innerW / 2), nearestIdxToX(padL + innerW)]
     : [0, Math.floor((n0 - 1) / 2), n0 - 1];
@@ -1860,6 +1896,34 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     label.textContent = fmtTime(timestamps[idx]);
     svg.appendChild(label);
   });
+
+  // Fill the band between two left-axis series (average and peak) instead of
+  // drawing the peak as its own dashed line. A dashed line above the data
+  // reads as a limit or a target; a filled band reads as what it is - the
+  // spread between the typical and the worst reading in each bucket.
+  if (opts.envelope) {
+    const lower = series[opts.envelope.lower].values;
+    const upper = series[opts.envelope.upper].values;
+    let path = '';
+    let run = [];
+    const flushRun = () => {
+      if (run.length < 2) { run = []; return; }
+      path += 'M' + run.map(i => `${xPositions[i].toFixed(2)},${yToPixel(upper[i]).toFixed(2)}`).join(' L');
+      path += ' L' + run.slice().reverse().map(i => `${xPositions[i].toFixed(2)},${yToPixel(lower[i]).toFixed(2)}`).join(' L');
+      path += ' Z ';
+      run = [];
+    };
+    for (let i = 0; i < tsCount; i++) {
+      if (lower[i] == null || upper[i] == null) flushRun();
+      else run.push(i);
+    }
+    flushRun();
+    const bandEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    bandEl.setAttribute('d', path);
+    bandEl.setAttribute('class', opts.envelope.className || 'band-temp');
+    svg.appendChild(bandEl);
+  }
+  drawHLines();
 
   const allPoints = [];
   const pathEls = [];
@@ -1896,18 +1960,45 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
       const points = s.values.map((v, i) => (v == null ? null : [xForIndex(i), yToPixelR(v)]));
       rightPoints.push(points);
       let path = '';
-      let segStarted = false;
-      points.forEach((p) => {
-        if (p == null) { segStarted = false; return; }
-        path += (segStarted ? 'L' : 'M') + p[0].toFixed(2) + ',' + p[1].toFixed(2) + ' ';
-        segStarted = true;
-      });
+      if (opts.rightAsArea) {
+        // Drawn as an area anchored to the baseline rather than a second
+        // line. Two lines sharing one plot area weave through each other and
+        // become genuinely hard to read (the temp and fan lines did exactly
+        // that); a line over a filled region separates instantly, because
+        // they're different kinds of mark rather than two of the same.
+        const baseY = yToPixelR(yMinR);
+        let run = [];
+        const flushRun = () => {
+          if (run.length >= 2) {
+            path += `M${xPositions[run[0]].toFixed(2)},${baseY.toFixed(2)} L`;
+            path += run.map(i => `${xPositions[i].toFixed(2)},${yToPixelR(s.values[i]).toFixed(2)}`).join(' L');
+            path += ` L${xPositions[run[run.length - 1]].toFixed(2)},${baseY.toFixed(2)} Z `;
+          }
+          run = [];
+        };
+        for (let i = 0; i < tsCount; i++) {
+          if (s.values[i] == null) flushRun(); else run.push(i);
+        }
+        flushRun();
+      } else {
+        let segStarted = false;
+        points.forEach((p) => {
+          if (p == null) { segStarted = false; return; }
+          path += (segStarted ? 'L' : 'M') + p[0].toFixed(2) + ',' + p[1].toFixed(2) + ' ';
+          segStarted = true;
+        });
+      }
       const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       pathEl.setAttribute('d', path);
       pathEl.setAttribute('class', s.colorClass);
       svg.appendChild(pathEl);
       rightPathEls.push(pathEl);
     });
+    // Re-append the left-axis lines so they sit above the right-axis area
+    // fill. SVG has no z-index - document order is paint order - and a
+    // filled right-axis series would otherwise bury the primary line
+    // wherever the two cross.
+    pathEls.forEach(el => svg.appendChild(el));
   }
 
   // "now" marker - only meaningful when the visible range actually spans it
@@ -2083,15 +2174,26 @@ async function refresh() {
 
     const hasTempPeak = !!(rows.peak_gpu_temp_c && rows.peak_gpu_temp_c.length);
     document.getElementById('temp-legend').innerHTML =
-      `<span title="Each plotted point averages several 5-minute readings; the faint line is the highest single reading in that stretch, so brief spikes stay visible."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg${hasTempPeak ? ' / peak' : ''})</span>` +
-      `<span title="Fan speed as % of this Mac's max RPM, right axis. If temp climbs but this stays flat, the fan-control helper isn't responding - see the Running Hot banner."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
+      `<span title="The solid line is the average of several 5-minute readings; the shaded band reaches up to the hottest single reading in that same stretch, so brief spikes stay visible instead of being averaged away."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg${hasTempPeak ? ', band to peak' : ''})</span>` +
+      `<span title="Fan speed as % of this Mac's max RPM, right axis, on a fixed 0-100% scale so you can see how much headroom is left. If temp climbs but this stays low, the fan isn't responding - see the Running Hot banner."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
     const tempSeries = [{name: 'GPU Temp', values: rows.gpu_temp_c || []}];
     const tempColors = ['line-temp'];
     if (hasTempPeak) { tempSeries.push({name: 'Peak', values: rows.peak_gpu_temp_c}); tempColors.push('line-temp-peak'); }
-    renderLineChart('chart-temp', 'tooltip-temp', rows.temp_timestamps || rows.timestamps, tempSeries, tempColors, v => `${v.toFixed(1)}°C`, {
-      rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct || [], colorClass: 'line-fan' }],
+    // Shared settings for both temp charts: a fixed temperature window (so the
+    // same line height always means the same heat, and 85C never moves), a
+    // fixed 0-100% fan scale (so "barely trying" reads differently from
+    // "maxed out"), and the 85C line the Running Hot banner triggers on.
+    const tempChartOpts = {
+      rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct || [], colorClass: 'area-fan' }],
       rightValueFmt: v => `${v.toFixed(0)}%`,
-    });
+      yDomain: [35, 105],
+      yDomainRight: [0, 100],
+      axisValueFmt: v => `${v.toFixed(0)}°C`,
+      rightAsArea: true,
+      hLines: [{ value: 85, label: '85°C — running hot' }],
+    };
+    if (hasTempPeak) tempChartOpts.envelope = { lower: 0, upper: 1, className: 'band-temp' };
+    renderLineChart('chart-temp', 'tooltip-temp', rows.temp_timestamps || rows.timestamps, tempSeries, tempColors, v => `${v.toFixed(1)}°C`, tempChartOpts);
     const realTemps = (rows.gpu_temp_c || []).filter(v => v != null);
     const nowTemp = realTemps.at(-1);
     const maxTemp = Math.max(...(hasTempPeak ? rows.peak_gpu_temp_c.filter(v => v != null) : realTemps));
@@ -2099,16 +2201,23 @@ async function refresh() {
 
     const hasTempPeakFull = !!(rows.peak_gpu_temp_c_full && rows.peak_gpu_temp_c_full.length);
     document.getElementById('temp-log-legend').innerHTML =
-      `<span title="Same average/peak split as the chart above, just over the full CSV history instead of only since temp/fan logging started."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg${hasTempPeakFull ? ' / peak' : ''})</span>` +
+      `<span title="Same average/peak split as the chart above, just over the full CSV history instead of only since temp/fan logging started."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg${hasTempPeakFull ? ', band to peak' : ''})</span>` +
       `<span title="Fan speed %, right axis - same data as the chart above, unclipped to the full history."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
     const tempSeriesLog = [{name: 'GPU Temp', values: rows.gpu_temp_c_full || []}];
     const tempColorsLog = ['line-temp'];
     if (hasTempPeakFull) { tempSeriesLog.push({name: 'Peak', values: rows.peak_gpu_temp_c_full}); tempColorsLog.push('line-temp-peak'); }
-    renderLineChart('chart-temp-log', 'tooltip-temp-log', rows.timestamps, tempSeriesLog, tempColorsLog, v => `${v.toFixed(1)}°C`, {
-      rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct_full || [], colorClass: 'line-fan' }],
+    const tempLogOpts = {
+      rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct_full || [], colorClass: 'area-fan' }],
       rightValueFmt: v => `${v.toFixed(0)}%`,
+      yDomain: [35, 105],
+      yDomainRight: [0, 100],
+      axisValueFmt: v => `${v.toFixed(0)}°C`,
+      rightAsArea: true,
+      hLines: [{ value: 85, label: '85°C — running hot' }],
       logTime: true,
-    });
+    };
+    if (hasTempPeakFull) tempLogOpts.envelope = { lower: 0, upper: 1, className: 'band-temp' };
+    renderLineChart('chart-temp-log', 'tooltip-temp-log', rows.timestamps, tempSeriesLog, tempColorsLog, v => `${v.toFixed(1)}°C`, tempLogOpts);
 
     renderLineChart('chart-money', 'tooltip-money',
       rows.timestamps,

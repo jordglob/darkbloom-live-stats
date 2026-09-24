@@ -1,5 +1,19 @@
 # Changelog
 
+## v24
+
+**GPU Temp & Fan chart, redrawn.** The data was right after v22; how it was drawn wasn't. Five changes, each checked against the rendered chart rather than reasoned about:
+
+- **The temperature axis no longer starts at 0°C.** It's pinned to a fixed 35–105°C. An auto-scaled 0-based axis spent half its height on a range this GPU never enters, squashing the entire real signal into the top band. A *fixed* range also means a given line height always means the same heat, and the 85°C mark never moves between refreshes.
+- **Fan speed is on a fixed 0–100% axis** instead of auto-scaling to whatever the observed maximum happened to be (63%). Auto-scaling made a fan loafing at a third of capacity look like it was working hard; the fixed scale shows the headroom that's actually left.
+- **Peak temperature is a shaded band up from the average line**, not a dashed line above it. A dashed line above the data reads as a limit or a target; a band reads as what it is - the spread between the typical and the worst reading in each bucket.
+- **The 85°C "running hot" threshold is drawn on the chart**, the same number `_is_running_hot()` and the fan-recovery loop actually trigger on. A chart about overheating should say where too hot is.
+- **Fan speed is a filled area rather than a second line.** Two lines sharing one plot area wove through each other and were genuinely hard to trace apart; a line over a filled region separates instantly because they're different kinds of mark.
+
+Plus the layering fixes those exposed: the threshold line now draws above the band instead of being washed out by it, and the left-axis lines are re-appended above any right-axis area fill (SVG has no z-index - document order is paint order), so the primary line can't be buried where the two cross. Axis ticks take an optional coarser format than the tooltip, so a fixed axis stops printing a decimal that never varies.
+
+One idea was built and then cut: shading the stretches where the data said "hot while the fan stayed low". Checked against the real history first, and 91% of buckets matched - a chart tinted end to end says nothing. The per-bucket approximation (a 2-hour peak against a 2-hour average fan) simply can't separate "brief spike, fan ramping fine" from "sustained heat, fan dead", so it was dropped rather than shipped as a misleading alarm.
+
 ## v23
 
 **Experimental log-time comparison chart for GPU Temp & Fan.** A second panel, "GPU Temp & Fan — full history, log time", sits right below the fixed chart from v22 - same data, but plotted over the *entire* CSV history (not the trimmed window) with the x-axis spaced by `log(time since now)` instead of evenly by index. The ~21-day stretch before temp/fan logging existed compresses into a small sliver on the left instead of being cut off, while the recent, data-dense days get most of the chart's width - and within that recent stretch, the very latest points get progressively more room than older ones (verified: pixel gaps between adjacent points grow from ~0.5px five days back to ~109px for the most recent pair, out of a ~700px plot area). The original linear chart is untouched and unaffected - this is a side-by-side comparison, not a replacement, since a log-time x-axis is a real design tradeoff (harder to read at a glance) that's worth evaluating before deciding whether to keep it, drop it, or use it elsewhere.
