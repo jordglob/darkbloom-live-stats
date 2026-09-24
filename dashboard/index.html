@@ -1744,10 +1744,19 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const tsCount = timestamps.length;
   let xForIndex;
   if (opts.logTime && tsCount > 1) {
+    // Normalize by MIN and MAX log-age, not just max - dividing by max alone
+    // (as a first version of this did) assumes the most recent point's age
+    // is ~0, but log1p(age) of even a "fresh" point (tens of seconds old)
+    // isn't actually close to 0 on this scale, so "now" landed near the
+    // middle of the chart instead of at the right edge. Anchoring both ends
+    // to the data's own actual min/max age guarantees the newest point
+    // lands exactly at the right edge and the oldest exactly at the left,
+    // same as the plain index-based axis does.
     const nowMs = Date.now();
     const logAges = timestamps.map(t => Math.log1p(Math.max(0, nowMs - new Date(t).getTime())));
-    const logAgeMax = Math.max(...logAges, 1e-9);
-    xForIndex = (i) => padL + (1 - logAges[i] / logAgeMax) * innerW;
+    const logAgeMin = Math.min(...logAges);
+    const logAgeMax = Math.max(...logAges, logAgeMin + 1e-9);
+    xForIndex = (i) => padL + (1 - (logAges[i] - logAgeMin) / (logAgeMax - logAgeMin)) * innerW;
   } else {
     xForIndex = (i) => padL + (tsCount === 1 ? 0 : (i / (tsCount - 1)) * innerW);
   }
@@ -1817,10 +1826,32 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
     }
   }
 
-  // x-axis time labels: first / middle / last
+  // x-axis time labels: first / middle / last by INDEX normally - but in
+  // log-time mode most indices are crammed into a narrow pixel range, so
+  // picking by index can put two labels on top of each other (seen live:
+  // "middle" landed a few px from "start" and the text overlapped into
+  // gibberish). Pick by target PIXEL position instead, snapping each to
+  // its nearest actual point.
   const n0 = timestamps.length;
-  [[0, 'start'], [Math.floor((n0 - 1) / 2), 'middle'], [n0 - 1, 'end']].forEach(([idx, anchor]) => {
-    const x = xForIndex(idx);
+  const xPositions = Array.from({length: n0}, (_, i) => xForIndex(i));
+  const nearestIdxToX = (targetX) => {
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < n0; i++) {
+      const d = Math.abs(xPositions[i] - targetX);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  };
+  const labelIdxs = opts.logTime
+    ? [nearestIdxToX(padL), nearestIdxToX(padL + innerW / 2), nearestIdxToX(padL + innerW)]
+    : [0, Math.floor((n0 - 1) / 2), n0 - 1];
+  const labelAnchors = ['start', 'middle', 'end'];
+  const seenIdxs = new Set();
+  labelIdxs.forEach((idx, li) => {
+    if (seenIdxs.has(idx)) return; // skip a duplicate pick to avoid stacking two identical labels
+    seenIdxs.add(idx);
+    const anchor = labelAnchors[li];
+    const x = xPositions[idx];
     const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     label.setAttribute('x', Math.min(w - padR, Math.max(padL, x)));
     label.setAttribute('y', h - 4);
@@ -1942,23 +1973,18 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   overlay.setAttribute('fill', 'transparent');
   svg.appendChild(overlay);
 
-  const n = timestamps.length;
+  const n = n0;
   // Point x-positions aren't evenly spaced in log-time mode, so finding the
   // nearest index to the mouse has to search actual positions rather than
-  // solving the (no longer valid) even-spacing formula directly.
-  const xPositions = Array.from({length: n}, (_, i) => xForIndex(i));
+  // solving the (no longer valid) even-spacing formula directly - reuses
+  // the xPositions/nearestIdxToX built for the axis labels above.
   overlay.addEventListener('mousemove', (e) => {
     const rect = svg.getBoundingClientRect();
     const scaleX = w / rect.width;
     const mx = (e.clientX - rect.left) * scaleX;
     let idx;
     if (opts.logTime) {
-      idx = 0;
-      let best = Infinity;
-      for (let i = 0; i < n; i++) {
-        const d = Math.abs(xPositions[i] - mx);
-        if (d < best) { best = d; idx = i; }
-      }
+      idx = nearestIdxToX(mx);
     } else {
       idx = Math.round(((mx - padL) / innerW) * (n - 1));
       idx = Math.max(0, Math.min(n - 1, idx));

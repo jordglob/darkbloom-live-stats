@@ -6,6 +6,8 @@
 
 `renderLineChart()` gained a `logTime` option; hover/tooltip index lookup was updated to find the nearest point by actual pixel position instead of assuming even spacing, and the right-axis series (fan%) got the same null-breaks-the-line handling the left axis already had - needed once a right series could carry real historical gaps, not just gaps from downsampling.
 
+Caught two more bugs by actually looking at the rendered chart (screenshots were unreliable earlier in this work, so the log-time math had only been checked numerically until now): the log-age normalization divided by the max only, not min-to-max, so "now" landed around the chart's midpoint instead of the right edge; and the x-axis's fixed first/middle/last-by-*index* label picks put two labels on top of each other (readable as literal garbled text) once most indices got crammed into a narrow pixel band. Both fixed: log-age is now normalized so the newest point is pinned to the right edge and the oldest to the left, and label positions are chosen by target pixel position (deduping if two land on the same point) instead of by array index.
+
 ## v22
 
 **Fixed: GPU Temp & Fan chart was misleading in three separate ways.** Found while re-checking it after the v21 fan-recovery fix landed:
