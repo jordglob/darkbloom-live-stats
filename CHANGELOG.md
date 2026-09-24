@@ -1,5 +1,13 @@
 # Changelog
 
+## v22
+
+**Fixed: GPU Temp & Fan chart was misleading in three separate ways.** Found while re-checking it after the v21 fan-recovery fix landed:
+
+- **Fan speed % could read over 100%** (a transient SMC RPM reading briefly above the reported max during a fan-mode transition) - now clamped to `[0, 100]`.
+- **Fan speed was the bucket's last raw sample, not an average** - each of the chart's ~300 buckets spans roughly 2 hours of history, so a bucket where the fan was stuck low for 110 minutes but happened to recover in the final sample showed 100%, same as one where it never recovered at all. It's now bucket-averaged the same way GPU temp already was, excluding missing readings rather than treating them as 0.
+- **67 of 300 points had any data at all** - temp/fan logging only started 2026-09-18, but the chart's x-axis went all the way back to when energy logging itself began (2026-08-29), squeezing the only informative ~6 days into the rightmost fifth of the chart. This one chart now gets its own trimmed timestamp axis (`temp_timestamps`), starting at the first real reading, instead of sharing the full-history axis used by the power/cost charts.
+
 ## v21
 
 **Automatic fan recovery (optional, external tool).** Traced the "Running hot" bug to a real, well-documented upstream defect: [Layr-Labs/d-inference#551](https://github.com/Layr-Labs/d-inference/issues/551), open since 2026-07-15 with a reviewed fix ([PR #599](https://github.com/Layr-Labs/d-inference/pull/599)) that's never been merged - a GitHub permissions snag with their review agent, not a technical blocker. One implausible GPU sensor reading permanently wedges Darkbloom's own fan helper; the fan sits near its floor regardless of real temperature.

@@ -2020,7 +2020,7 @@ async function refresh() {
     const tempSeries = [{name: 'GPU Temp', values: rows.gpu_temp_c || []}];
     const tempColors = ['line-temp'];
     if (hasTempPeak) { tempSeries.push({name: 'Peak', values: rows.peak_gpu_temp_c}); tempColors.push('line-temp-peak'); }
-    renderLineChart('chart-temp', 'tooltip-temp', rows.timestamps, tempSeries, tempColors, v => `${v.toFixed(1)}°C`, {
+    renderLineChart('chart-temp', 'tooltip-temp', rows.temp_timestamps || rows.timestamps, tempSeries, tempColors, v => `${v.toFixed(1)}°C`, {
       rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct || [], colorClass: 'line-fan' }],
       rightValueFmt: v => `${v.toFixed(0)}%`,
     });

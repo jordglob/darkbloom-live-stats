@@ -1541,7 +1541,7 @@ def _bucket_downsample(rows, max_points):
     # for as long as old rows dominate a bucket.
     numeric_keys = ["avg_power_w", "total_power_w", "cum_wh", "cum_cost_sek",
                      "elpris_sek_kwh", "usd_sek", "est_revenue_usd_approx"]
-    sparse_keys = ["gpu_temp_c"]
+    sparse_keys = ["gpu_temp_c", "fan_pct"]
     out_rows = []
     peak_total_power_w = []
     peak_gpu_temp_c = []
@@ -2109,6 +2109,16 @@ def get_energy_series():
             extra = r.pop(None, None)
             if extra and not r.get("power_method"):
                 r["power_method"] = extra[0]
+            # Computed once per raw row (not post-downsampling) so
+            # _bucket_downsample can average it like any other sparse value
+            # instead of a bucket just carrying its last raw sample - a
+            # transient SMC read during a fan-mode transition can put rpm
+            # briefly above max, so the result is clamped to a sane percent.
+            rpm, max_rpm = r.get("fan_rpm"), r.get("fan_max_rpm")
+            if rpm not in (None, "") and max_rpm not in (None, "", "0"):
+                r["fan_pct"] = max(0.0, min(100.0, float(rpm) / float(max_rpm) * 100))
+            else:
+                r["fan_pct"] = None
             rows.append(r)
 
     if not rows:
@@ -2134,24 +2144,31 @@ def get_energy_series():
     cum_cost_usd = [float(r.get("cum_cost_sek", 0) or 0) / usd_rate(r) for r in rows]
     est_revenue_usd = [float(r.get("est_revenue_usd_approx", 0) or 0) for r in rows]
     gpu_temp_c = [float(r["gpu_temp_c"]) if r.get("gpu_temp_c") not in (None, "") else None for r in rows]
-    # After downsampling, fan_rpm/fan_max_rpm aren't in _bucket_downsample's
-    # own averaging keys, so each bucket just carries its last raw sample's
-    # values here - close enough for a percentage that doesn't spike the way
-    # power/temp do, without needing a third averaging path.
-    fan_pct = [
-        (float(r["fan_rpm"]) / float(r["fan_max_rpm"]) * 100)
-        if r.get("fan_rpm") not in (None, "") and r.get("fan_max_rpm") not in (None, "0", "")
-        else None
-        for r in rows
-    ]
+    fan_pct = [r.get("fan_pct") for r in rows]
+    timestamps = [r["timestamp"] for r in rows]
+
+    # Temp/fan logging was added long after this CSV started, so most of the
+    # chart's history has nothing to show for either series - trim the empty
+    # leading stretch just for this pair, on their own timestamp axis, rather
+    # than cramming the only real data into a sliver on the right.
+    temp_start_idx = next(
+        (i for i, (t, f) in enumerate(zip(gpu_temp_c, fan_pct)) if t is not None or f is not None),
+        len(gpu_temp_c),
+    )
+    temp_timestamps = timestamps[temp_start_idx:]
+    gpu_temp_c_trimmed = gpu_temp_c[temp_start_idx:]
+    fan_pct_trimmed = fan_pct[temp_start_idx:]
+    peak_gpu_temp_c_trimmed = peak_gpu_temp_c[temp_start_idx:] if peak_gpu_temp_c else peak_gpu_temp_c
+
     series = {
-        "timestamps": [r["timestamp"] for r in rows],
+        "timestamps": timestamps,
         "avg_power_w": [float(r.get("avg_power_w", 0) or 0) for r in rows],
         "total_power_w": [float(r.get("total_power_w", 0) or 0) for r in rows],
         "peak_total_power_w": peak_total_power_w,
-        "gpu_temp_c": gpu_temp_c,
-        "peak_gpu_temp_c": peak_gpu_temp_c,
-        "fan_pct": fan_pct,
+        "temp_timestamps": temp_timestamps,
+        "gpu_temp_c": gpu_temp_c_trimmed,
+        "peak_gpu_temp_c": peak_gpu_temp_c_trimmed,
+        "fan_pct": fan_pct_trimmed,
         "cum_wh": [float(r.get("cum_wh", 0) or 0) for r in rows],
         "cum_cost_usd": cum_cost_usd,
         "est_revenue_usd": est_revenue_usd,
