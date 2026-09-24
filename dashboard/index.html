@@ -356,6 +356,15 @@
   </div>
 
   <div class="panel">
+    <h2 title="Experimental comparison chart: same GPU temp/fan data, but the full CSV history (not just since temp/fan logging started) with the x-axis spaced by log(time since now) instead of evenly - so the ~20-day stretch before this logging existed compresses toward the left instead of being cut off, while the recent, data-dense days keep most of the chart's width. Sitting next to the plain version above for comparison, not replacing it.">GPU Temp &amp; Fan — full history, log time (experimental)</h2>
+    <div class="legend" id="temp-log-legend"></div>
+    <div class="chart-wrap">
+      <svg class="chart" id="chart-temp-log"></svg>
+      <div class="tooltip" id="tooltip-temp-log"></div>
+    </div>
+  </div>
+
+  <div class="panel">
     <h2 title="What Darkbloom actually paid this account (every ledger entry, including the base reward for being online) versus what this Mac's electricity actually cost, both added up over the last two days. Real numbers on both sides - the one chart here that should line up with the Net card at the top.">Real Earnings vs. Electricity Cost — last 48h (USD) <span id="real48-chart-stats" class="gauge-time"></span></h2>
     <div class="legend">
       <span><i style="background:var(--series-revenue)"></i>Real earnings (incl. base reward)</span>
@@ -1726,6 +1735,23 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const innerH = h - padT - padB;
   const yToPixel = (v) => padT + innerH - ((v - yMin) / yRange) * innerH;
 
+  // Normal mode spaces points evenly by index. Log-time mode instead spaces
+  // them by log(time since now) - so a long, mostly-empty stretch of history
+  // compresses toward the left instead of eating most of the chart's width,
+  // while the recent, data-dense stretch gets most of the horizontal room.
+  // Experimental: compared side-by-side against the plain linear chart for
+  // the same data rather than replacing it outright.
+  const tsCount = timestamps.length;
+  let xForIndex;
+  if (opts.logTime && tsCount > 1) {
+    const nowMs = Date.now();
+    const logAges = timestamps.map(t => Math.log1p(Math.max(0, nowMs - new Date(t).getTime())));
+    const logAgeMax = Math.max(...logAges, 1e-9);
+    xForIndex = (i) => padL + (1 - logAges[i] / logAgeMax) * innerW;
+  } else {
+    xForIndex = (i) => padL + (tsCount === 1 ? 0 : (i / (tsCount - 1)) * innerW);
+  }
+
   // Right axis gets its own independent domain - it shares the same 3
   // gridline y-positions as the left axis (standard dual-axis convention)
   // but labels them with its own values.
@@ -1794,7 +1820,7 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   // x-axis time labels: first / middle / last
   const n0 = timestamps.length;
   [[0, 'start'], [Math.floor((n0 - 1) / 2), 'middle'], [n0 - 1, 'end']].forEach(([idx, anchor]) => {
-    const x = padL + (n0 === 1 ? 0 : (idx / (n0 - 1)) * innerW);
+    const x = xForIndex(idx);
     const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     label.setAttribute('x', Math.min(w - padR, Math.max(padL, x)));
     label.setAttribute('y', h - 4);
@@ -1807,14 +1833,12 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const allPoints = [];
   const pathEls = [];
   series.forEach((s, si) => {
-    const n = s.values.length;
     // null/undefined values (e.g. tomorrow's not-yet-published price) are
     // kept as null in allPoints (so hover/index alignment stays correct)
     // but break the drawn line into a gap instead of plotting a bogus point.
     const points = s.values.map((v, i) => {
       if (v == null) return null;
-      const x = padL + (n === 1 ? 0 : (i / (n - 1)) * innerW);
-      return [x, yToPixel(v)];
+      return [xForIndex(i), yToPixel(v)];
     });
     allPoints.push(points);
     let path = '';
@@ -1835,14 +1859,18 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const rightPathEls = [];
   if (hasRight) {
     opts.rightSeries.forEach((s) => {
-      const n = s.values.length;
-      const points = s.values.map((v, i) => {
-        const x = padL + (n === 1 ? 0 : (i / (n - 1)) * innerW);
-        const y = yToPixelR(v);
-        return [x, y];
-      });
+      // Same null-breaks-the-line handling as the left series - matters here
+      // now that a right series (fan_pct_full) can carry real leading gaps
+      // from before that column existed, not just from downsampling.
+      const points = s.values.map((v, i) => (v == null ? null : [xForIndex(i), yToPixelR(v)]));
       rightPoints.push(points);
-      const path = points.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2)).join(' ');
+      let path = '';
+      let segStarted = false;
+      points.forEach((p) => {
+        if (p == null) { segStarted = false; return; }
+        path += (segStarted ? 'L' : 'M') + p[0].toFixed(2) + ',' + p[1].toFixed(2) + ' ';
+        segStarted = true;
+      });
       const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       pathEl.setAttribute('d', path);
       pathEl.setAttribute('class', s.colorClass);
@@ -1915,16 +1943,30 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   svg.appendChild(overlay);
 
   const n = timestamps.length;
+  // Point x-positions aren't evenly spaced in log-time mode, so finding the
+  // nearest index to the mouse has to search actual positions rather than
+  // solving the (no longer valid) even-spacing formula directly.
+  const xPositions = Array.from({length: n}, (_, i) => xForIndex(i));
   overlay.addEventListener('mousemove', (e) => {
     const rect = svg.getBoundingClientRect();
     const scaleX = w / rect.width;
     const mx = (e.clientX - rect.left) * scaleX;
-    let idx = Math.round(((mx - padL) / innerW) * (n - 1));
-    idx = Math.max(0, Math.min(n - 1, idx));
+    let idx;
+    if (opts.logTime) {
+      idx = 0;
+      let best = Infinity;
+      for (let i = 0; i < n; i++) {
+        const d = Math.abs(xPositions[i] - mx);
+        if (d < best) { best = d; idx = i; }
+      }
+    } else {
+      idx = Math.round(((mx - padL) / innerW) * (n - 1));
+      idx = Math.max(0, Math.min(n - 1, idx));
+    }
     // x from the timestamp grid directly, not any one series' point - a
     // series can be null at this index (e.g. tomorrow's unpublished price)
     // while the crosshair itself should still track the mouse normally.
-    const x = padL + (n === 1 ? 0 : (idx / (n - 1)) * innerW);
+    const x = xPositions[idx];
     hoverLine.setAttribute('x1', x); hoverLine.setAttribute('x2', x);
     hoverLine.style.display = 'block';
     dots.forEach((dot, si) => {
@@ -2028,6 +2070,19 @@ async function refresh() {
     const nowTemp = realTemps.at(-1);
     const maxTemp = Math.max(...(hasTempPeak ? rows.peak_gpu_temp_c.filter(v => v != null) : realTemps));
     document.getElementById('temp-chart-stats').textContent = nowTemp != null ? `now: ${nowTemp.toFixed(1)}°C · max: ${maxTemp.toFixed(1)}°C` : 'no data yet';
+
+    const hasTempPeakFull = !!(rows.peak_gpu_temp_c_full && rows.peak_gpu_temp_c_full.length);
+    document.getElementById('temp-log-legend').innerHTML =
+      `<span title="Same average/peak split as the chart above, just over the full CSV history instead of only since temp/fan logging started."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg${hasTempPeakFull ? ' / peak' : ''})</span>` +
+      `<span title="Fan speed %, right axis - same data as the chart above, unclipped to the full history."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
+    const tempSeriesLog = [{name: 'GPU Temp', values: rows.gpu_temp_c_full || []}];
+    const tempColorsLog = ['line-temp'];
+    if (hasTempPeakFull) { tempSeriesLog.push({name: 'Peak', values: rows.peak_gpu_temp_c_full}); tempColorsLog.push('line-temp-peak'); }
+    renderLineChart('chart-temp-log', 'tooltip-temp-log', rows.timestamps, tempSeriesLog, tempColorsLog, v => `${v.toFixed(1)}°C`, {
+      rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct_full || [], colorClass: 'line-fan' }],
+      rightValueFmt: v => `${v.toFixed(0)}%`,
+      logTime: true,
+    });
 
     renderLineChart('chart-money', 'tooltip-money',
       rows.timestamps,

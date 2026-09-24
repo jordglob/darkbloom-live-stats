@@ -1,5 +1,11 @@
 # Changelog
 
+## v23
+
+**Experimental log-time comparison chart for GPU Temp & Fan.** A second panel, "GPU Temp & Fan — full history, log time", sits right below the fixed chart from v22 - same data, but plotted over the *entire* CSV history (not the trimmed window) with the x-axis spaced by `log(time since now)` instead of evenly by index. The ~21-day stretch before temp/fan logging existed compresses into a small sliver on the left instead of being cut off, while the recent, data-dense days get most of the chart's width - and within that recent stretch, the very latest points get progressively more room than older ones (verified: pixel gaps between adjacent points grow from ~0.5px five days back to ~109px for the most recent pair, out of a ~700px plot area). The original linear chart is untouched and unaffected - this is a side-by-side comparison, not a replacement, since a log-time x-axis is a real design tradeoff (harder to read at a glance) that's worth evaluating before deciding whether to keep it, drop it, or use it elsewhere.
+
+`renderLineChart()` gained a `logTime` option; hover/tooltip index lookup was updated to find the nearest point by actual pixel position instead of assuming even spacing, and the right-axis series (fan%) got the same null-breaks-the-line handling the left axis already had - needed once a right series could carry real historical gaps, not just gaps from downsampling.
+
 ## v22
 
 **Fixed: GPU Temp & Fan chart was misleading in three separate ways.** Found while re-checking it after the v21 fan-recovery fix landed:

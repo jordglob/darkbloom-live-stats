@@ -2169,6 +2169,13 @@ def get_energy_series():
         "gpu_temp_c": gpu_temp_c_trimmed,
         "peak_gpu_temp_c": peak_gpu_temp_c_trimmed,
         "fan_pct": fan_pct_trimmed,
+        # Untrimmed, full-history versions of the same three - kept alongside
+        # the trimmed ones so the log-time comparison chart can show the
+        # whole CSV span (compressing the empty pre-logging stretch instead
+        # of cutting it off) side by side with the linear, trimmed original.
+        "gpu_temp_c_full": gpu_temp_c,
+        "peak_gpu_temp_c_full": peak_gpu_temp_c,
+        "fan_pct_full": fan_pct,
         "cum_wh": [float(r.get("cum_wh", 0) or 0) for r in rows],
         "cum_cost_usd": cum_cost_usd,
         "est_revenue_usd": est_revenue_usd,
