@@ -1010,7 +1010,17 @@ FAN_RECOVERY_LOG = HOME / ".darkbloom" / "fan-recovery.log"
 FAN_RECOVERY_START_C = 45  # matches Darkbloom's own stated policy ("80.0% at 45.0 C")
 FAN_RECOVERY_FULL_C = 85  # ramps to 100% by here - real headroom under the ~100-105C throttle point
 FAN_RECOVERY_POLL_SEC = 30
-_fan_recovery_state = {"active": False, "last_action_at": None, "last_status": None}
+# Release well below the engage point, and never immediately. Engaging and
+# releasing on the same condition made this oscillate: _is_running_hot() needs
+# the fan to be LOW, so the moment recovery spun the fan up the condition it
+# was holding on went false and it let go on the very next poll - handing
+# control back to a fan controller already proven broken, whereupon the GPU
+# reheated and it engaged again. Measured over 3.1 days of real log: 1517
+# cycles (488/day), median hold 30s - exactly one poll - and 74% of releases
+# happened with the GPU still above 70C, 30% still above 80C, one at 100.5C.
+FAN_RECOVERY_RELEASE_C = 70
+FAN_RECOVERY_MIN_HOLD_SEC = 180
+_fan_recovery_state = {"active": False, "last_action_at": None, "last_status": None, "engaged_at": None}
 
 
 def log_fan_recovery(line):
@@ -1039,6 +1049,23 @@ def _is_running_hot(ft):
     return (hot and fan_frac < 0.5) or (helper_failing and hot)
 
 
+def _fan_recovery_decision(active, temp_c, held_sec, hot):
+    """Pure state-machine step for fan_recovery_loop: "engage" | "hold" |
+    "release" | "idle".
+
+    Separated out because the engage and release conditions being the same
+    expression is exactly what caused this to oscillate 488 times a day, and
+    that's a mistake worth being able to test rather than re-reason about.
+    `hot` is the engage condition (hot GPU + fan not responding); it is
+    deliberately not consulted while active, because recovery itself holds the
+    fan up and so falsifies it."""
+    if active:
+        if temp_c is not None and temp_c <= FAN_RECOVERY_RELEASE_C and held_sec >= FAN_RECOVERY_MIN_HOLD_SEC:
+            return "release"
+        return "hold"
+    return "engage" if hot else "idle"
+
+
 def _run_fan_helper(*args):
     """SMC writes need root - `sudo -n` (never interactive; we will never
     prompt for or handle a password) against the scoped NOPASSWD rule
@@ -1058,8 +1085,29 @@ def fan_recovery_loop():
                 time.sleep(FAN_RECOVERY_POLL_SEC)
                 continue
             ft = get_fan_temp()
-            hot = _is_running_hot(ft)
-            if hot:
+            temp = ft.get("gpu_temp_c") if ft else None
+            now_t = time.time()
+
+            held = now_t - (_fan_recovery_state["engaged_at"] or now_t)
+            action = _fan_recovery_decision(
+                _fan_recovery_state["active"], temp, held, _is_running_hot(ft))
+
+            if _fan_recovery_state["active"]:
+                if action == "release":
+                    r = _run_fan_helper("automatic")
+                    log_fan_recovery(
+                        f"RELEASED - GPU down to {temp}C after {held / 60:.1f} min held "
+                        f"- {(r.stdout or r.stderr or '').strip()}")
+                    _fan_recovery_state["active"] = False
+                    _fan_recovery_state["engaged_at"] = None
+                    _fan_recovery_state["last_action_at"] = now_t
+                else:
+                    # Keep the curve in force - re-applying each poll is cheap
+                    # and means a competing writer can't quietly take the fan
+                    # back while we still think we're holding it.
+                    r = _run_fan_helper("apply", "gpu", str(FAN_RECOVERY_START_C), str(FAN_RECOVERY_FULL_C))
+                    _fan_recovery_state["last_status"] = (r.stdout or r.stderr or "").strip()
+            elif action == "engage":
                 r = _run_fan_helper("apply", "gpu", str(FAN_RECOVERY_START_C), str(FAN_RECOVERY_FULL_C))
                 status_line = (r.stdout or r.stderr or "").strip()
                 if r.returncode != 0 and "a password is required" in status_line.lower():
@@ -1069,19 +1117,12 @@ def fan_recovery_loop():
                     time.sleep(FAN_RECOVERY_POLL_SEC)
                     continue
                 warned_no_sudo = False
-                if not _fan_recovery_state["active"]:
-                    log_fan_recovery(f"ENGAGED at GPU {ft['gpu_temp_c']}C, fan {ft['fan_rpm']}/{ft['fan_max_rpm']} rpm - {status_line}")
-                    notify_mac("Darkbloom Live & Stats", f"Fan-control bug detected (GPU {ft['gpu_temp_c']:.0f}C) - engaged backup cooling")
+                log_fan_recovery(f"ENGAGED at GPU {ft['gpu_temp_c']}C, fan {ft['fan_rpm']}/{ft['fan_max_rpm']} rpm - {status_line}")
+                notify_mac("Darkbloom Live & Stats", f"Fan-control bug detected (GPU {ft['gpu_temp_c']:.0f}C) - engaged backup cooling")
                 _fan_recovery_state["active"] = True
-                _fan_recovery_state["last_action_at"] = time.time()
+                _fan_recovery_state["engaged_at"] = now_t
+                _fan_recovery_state["last_action_at"] = now_t
                 _fan_recovery_state["last_status"] = status_line
-            elif _fan_recovery_state["active"]:
-                # Recovered (or Darkbloom's own helper is responding again) -
-                # hand control back rather than fighting it indefinitely.
-                r = _run_fan_helper("automatic")
-                log_fan_recovery(f"RELEASED - GPU back to {ft['gpu_temp_c'] if ft else '?'}C - {(r.stdout or r.stderr or '').strip()}")
-                _fan_recovery_state["active"] = False
-                _fan_recovery_state["last_action_at"] = time.time()
         except Exception as e:
             log_fan_recovery(f"ERROR: {e}")
         time.sleep(FAN_RECOVERY_POLL_SEC)

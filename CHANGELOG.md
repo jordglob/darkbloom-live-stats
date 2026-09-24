@@ -1,5 +1,19 @@
 # Changelog
 
+## v27
+
+**Fixed: fan recovery was oscillating 488 times a day.** The loop engaged and released on the *same* condition — `_is_running_hot()`, which requires a hot GPU **and** a fan that isn't responding. But engaging drives the fan up, which falsifies the second half of that condition immediately. So recovery let go on the very next poll and handed the fan back to a controller already proven broken; the GPU reheated, and it engaged again.
+
+Measured across 3.1 days of `fan-recovery.log`: **1517 engage/release cycles, 488 per day**, median hold **30 seconds** (exactly one poll interval, 95% of holds ≤35s), median gap 31s. **74% of releases happened with the GPU still above 70°C, 30% still above 80°C — and one at 100.5°C.** The loop was releasing at full throttle temperature because its own intervention had made the release condition true.
+
+This is also what made the fan line look like noise in every chart: the 5-minute CSV was sampling a ~30-second square wave. The v25 log-age chart, at macmon's 5s resolution, was the first view that showed the oscillation directly.
+
+Fix: engage and release are now separate conditions with a real dead band.
+- **Engage** unchanged: GPU ≥85°C and fan below 50%.
+- **Release** on temperature alone — ≤70°C — and never within 180s of engaging. `_is_running_hot()` is deliberately not consulted while active, since recovery itself holds the fan up and so can't be used to judge whether letting go is safe. A missing temperature reading holds rather than releases blind.
+
+The decision is now a pure function, `_fan_recovery_decision()`, rather than inline branching — two conditions accidentally being one expression is a subtle enough mistake to be worth testing instead of re-reasoning about. Eight cases cover it, including the exact historical failure (active, 100.5°C, held 30s → hold, not release).
+
 ## v26
 
 **Log-age chart, second pass.** Six changes, all driven by looking at the rendered result:
