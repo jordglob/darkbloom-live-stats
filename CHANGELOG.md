@@ -1,5 +1,18 @@
 # Changelog
 
+## v29
+
+**Fixed: a dashboard restart while holding the fan left it pinned at full speed indefinitely.** `_fan_recovery_state` lived only in memory, and the release branch only runs when the loop believes it is holding. So restarting the dashboard mid-hold reset `active` to `False` while the fan stayed in SMC manual mode — nothing ever handed it back, whatever the temperature.
+
+This happened for real tonight, caused by deploying the other fixes in this session: `ENGAGED at GPU 99.5C` at 20:46:49 with no matching `RELEASED`, then roughly **55 minutes at 4900 rpm with the GPU at 29–34°C**. `darkbloom fan status` confirmed it: `Fan 0: actual 4903, target 4900, manual` against `GPU: 34.1 C`. Full blast, on a cold machine, for no reason.
+
+Worth stating plainly: **pausing serving would not have fixed this.** The fan was pinned at the SMC level, independent of whether the provider was serving anything — a paused Mac would have been exactly as loud.
+
+Three changes:
+- **The hold is persisted** to `fan-recovery-state.json` on every engage and release, so a restart doesn't lose the fact that we have the fan.
+- **Startup reconciles.** A hold found in the state file is resumed only if the fan is genuinely still in manual, so the normal release logic can finish the job; otherwise the stale flag is cleared (and the cleared state is written back, rather than left on disk).
+- **Clean shutdown releases the fan.** `launchctl kickstart -k` — which is how this gets redeployed — sends SIGTERM, exactly the case that stranded it. A signal handler plus `atexit` now hands the fan back before exiting, so the situation doesn't arise in the first place.
+
 ## v28
 
 **Pause serving.** A deliberate, time-boxed stop — 1h / 4h / 8h / 24h, or until you resume — in its own panel, because "stop renting this out for a bit" previously meant knowing that you had to switch Price Guard to Manual *first* and only then press Stop. Pressing Stop while in Auto isn't a pause at all: Auto starts back up as soon as the price drops below break-even.

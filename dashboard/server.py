@@ -3,6 +3,7 @@
 Reads ~/.darkbloom/energy-log.csv and runs `darkbloom status` on demand.
 Binds to 127.0.0.1 (this machine only) on port 8787.
 """
+import atexit
 import csv
 import http.server
 import json
@@ -11,8 +12,10 @@ import os
 import plistlib
 import re
 import shutil
+import signal
 import socketserver
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -1046,6 +1049,63 @@ FAN_RECOVERY_POLL_SEC = 30
 FAN_RECOVERY_RELEASE_C = 70
 FAN_RECOVERY_MIN_HOLD_SEC = 180
 _fan_recovery_state = {"active": False, "last_action_at": None, "last_status": None, "engaged_at": None}
+# Persisted, because this state means "we have the fan pinned in manual mode".
+# Kept only in memory it was lost on every restart, and the release branch
+# only runs when we believe we're holding - so a restart mid-hold orphaned the
+# fan at full speed indefinitely, whatever the temperature. That happened for
+# real: ENGAGED at 20:46:49 with no matching RELEASE, then ~55 minutes at
+# 4900rpm with the GPU at 29-34C, purely because the dashboard was restarted
+# while holding.
+FAN_RECOVERY_STATE_FILE = HOME / ".darkbloom" / "fan-recovery-state.json"
+
+
+def _save_fan_recovery_state():
+    try:
+        FAN_RECOVERY_STATE_FILE.write_text(json.dumps(_fan_recovery_state))
+    except Exception:
+        pass
+
+
+def _restore_fan_recovery_state():
+    """Reloads a hold that was in force when the process last stopped, so the
+    normal release logic can finish the job. If the fan isn't actually in
+    manual any more (someone released it by hand, or Darkbloom's own helper
+    took it back) the stale hold is dropped rather than re-asserted."""
+    try:
+        if not FAN_RECOVERY_STATE_FILE.exists():
+            return
+        saved = json.loads(FAN_RECOVERY_STATE_FILE.read_text())
+        if not isinstance(saved, dict) or not saved.get("active"):
+            return
+        ft = get_fan_temp()
+        still_manual = bool(ft and (ft.get("fan_mode") or "").strip() == "manual")
+        if not still_manual:
+            log_fan_recovery("STARTUP: stale hold in state file, but fan is no longer in manual - clearing")
+            _save_fan_recovery_state()  # persist the cleared state, don't leave the stale flag on disk
+            return
+        _fan_recovery_state.update({
+            "active": True,
+            "engaged_at": saved.get("engaged_at"),
+            "last_action_at": saved.get("last_action_at"),
+            "last_status": saved.get("last_status"),
+        })
+        log_fan_recovery("STARTUP: resumed an in-force fan hold from the previous run")
+    except Exception as e:
+        log_fan_recovery(f"STARTUP: could not restore fan state: {e}")
+
+
+def release_fan_on_shutdown():
+    """Hands the fan back on a clean exit. `launchctl kickstart -k` (how this
+    gets redeployed) sends SIGTERM, which is exactly the case that stranded
+    the fan at full speed."""
+    if _fan_recovery_state.get("active"):
+        try:
+            _run_fan_helper("automatic")
+            log_fan_recovery("SHUTDOWN: released fan back to automatic before exiting")
+            _fan_recovery_state["active"] = False
+            _save_fan_recovery_state()
+        except Exception:
+            pass
 
 
 def log_fan_recovery(line):
@@ -1104,6 +1164,8 @@ def _run_fan_helper(*args):
 
 def fan_recovery_loop():
     warned_no_sudo = False
+    if FAN_HELPER_BIN.exists():
+        _restore_fan_recovery_state()
     while True:
         try:
             if not FAN_HELPER_BIN.exists():
@@ -1126,6 +1188,7 @@ def fan_recovery_loop():
                     _fan_recovery_state["active"] = False
                     _fan_recovery_state["engaged_at"] = None
                     _fan_recovery_state["last_action_at"] = now_t
+                    _save_fan_recovery_state()
                 else:
                     # Keep the curve in force - re-applying each poll is cheap
                     # and means a competing writer can't quietly take the fan
@@ -1148,6 +1211,7 @@ def fan_recovery_loop():
                 _fan_recovery_state["engaged_at"] = now_t
                 _fan_recovery_state["last_action_at"] = now_t
                 _fan_recovery_state["last_status"] = status_line
+                _save_fan_recovery_state()
         except Exception as e:
             log_fan_recovery(f"ERROR: {e}")
         time.sleep(FAN_RECOVERY_POLL_SEC)
@@ -2748,6 +2812,9 @@ class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 
 if __name__ == "__main__":
+    atexit.register(release_fan_on_shutdown)
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, lambda *_: sys.exit(0))
     threading.Thread(target=warmup_loop, daemon=True).start()
     threading.Thread(target=pause_loop, daemon=True).start()
     threading.Thread(target=trust_monitor_loop, daemon=True).start()
