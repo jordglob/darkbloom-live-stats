@@ -6,6 +6,7 @@ Binds to 127.0.0.1 (this machine only) on port 8787.
 import csv
 import http.server
 import json
+import math
 import os
 import plistlib
 import re
@@ -2096,72 +2097,176 @@ def get_price_now():
     }
 
 
-# Where real samples hand over to bucketed summaries on the log-age chart.
-# Below this age you're looking at macmon's own ~5s readings; above it, at
-# CSV buckets - so the axis only starts showing summaries once it's showing
-# hours, and zooming toward "now" reveals actual data instead of one
-# bucket-average stretched across half the chart.
-FINE_TEMP_MAX_AGE_SEC = 3600
-FINE_TEMP_MAX_POINTS = 600
-_fine_temp_cache = {"data": None, "at": 0.0}
-_fine_temp_lock = threading.Lock()
+# Log-age chart data. Real macmon samples (~5s) carry the curve back this far;
+# beyond it, 5-minute CSV rows do. Set to a full day so the fine detail covers
+# everything the axis shows in minutes and hours, and summaries only take over
+# once the axis is genuinely into days.
+TEMP_AGE_FINE_MAX_SEC = 24 * 3600
+TEMP_AGE_BINS = 340
+TEMP_AGE_FLOOR_MS = 200  # never claim resolution finer than this
+MACMON_TS_RE = re.compile(r'"timestamp":\s*"([^"]+)"')
+MACMON_GPU_TEMP_RE = re.compile(r'"gpu_temp_avg":\s*([0-9.]+)')
+_temp_age_cache = {"data": None, "at": 0.0}
+_temp_age_lock = threading.Lock()
 
 
-def get_fine_temp_samples():
-    """GPU temperature at macmon's own ~5s cadence for the last hour, oldest
-    first, as [{t: unix_seconds, temp: C}].
+def _log_bin(samples, now, frame_min_ms, frame_max_ms, nbins):
+    """Averages (unix_ts, value) samples into log-spaced age bins.
 
-    energy-monitor.sh already runs `macmon pipe -i 5000`, so this costs no new
-    sampling - it just reads the tail of a log that's being written anyway.
-    That log is ~12MB and gets truncated whenever macmon restarts, so this
-    seeks from the end rather than reading the whole file. Note macmon reports
-    no fan RPM, so this is temperature only; fan speed stays on the 5-minute
-    CSV cadence."""
-    now = time.time()
-    with _fine_temp_lock:
-        if _fine_temp_cache["data"] is not None and now - _fine_temp_cache["at"] < 10:
-            return _fine_temp_cache["data"]
+    Empty bins are skipped rather than emitted as nulls, which is what keeps
+    the drawn curve continuous: on a log axis the bins near "now" are
+    inevitably narrower than the sampling interval, so a null-per-empty-bin
+    scheme would shred the recent end of the line into disconnected specks.
+    Binning in log space (not linear) also keeps the plotted density even
+    across the whole axis instead of piling thousands of points into the
+    compressed old end and starving the stretched recent end."""
+    if not samples or frame_max_ms <= frame_min_ms:
+        return []
+    lo, hi = math.log10(frame_min_ms), math.log10(frame_max_ms)
+    acc = {}
+    for t, v in samples:
+        age_ms = (now - t) * 1000.0
+        if age_ms > frame_max_ms:
+            continue
+        # A sample newer than the frame's right edge (the live reading, which
+        # is fresher than the sampling interval the edge is set from) belongs
+        # in the newest bin, not in the bin. Dropping it would leave the curve
+        # ending short of "now" by the whole width of the last decade.
+        age_ms = max(frame_min_ms, age_ms)
+        idx = int((math.log10(age_ms) - lo) / (hi - lo) * nbins)
+        idx = max(0, min(nbins - 1, idx))
+        a = acc.setdefault(idx, [0.0, 0.0, 0])
+        a[0] += age_ms
+        a[1] += v
+        a[2] += 1
+    out = [{"age_ms": round(s_age / n, 1), "v": round(s_v / n, 2)}
+           for s_age, s_v, n in (acc[i] for i in sorted(acc))]
+    out.sort(key=lambda p: -p["age_ms"])  # oldest first, so the line draws left to right
+    return out
 
+
+def _read_macmon_samples(now, max_age_sec):
+    """(unix_ts, gpu_temp_C) from macmon's log, newest-biased, for the last
+    max_age_sec. Regex rather than json.loads per line - this reads most of a
+    ~12MB file and only needs two fields out of fourteen."""
     out = []
     try:
-        if MACMON_LOG.exists():
-            size = MACMON_LOG.stat().st_size
-            # ~570 bytes per record in practice; read a generous window so an
-            # hour's worth is comfortably inside it even if records grow.
-            want = min(size, FINE_TEMP_MAX_POINTS * 1200 + 65536)
-            with open(MACMON_LOG, "rb") as f:
-                f.seek(max(0, size - want))
-                chunk = f.read().decode("utf-8", errors="ignore")
-            cutoff = now - FINE_TEMP_MAX_AGE_SEC
-            lines = chunk.splitlines()
-            # Seeking mid-file almost always lands mid-record; drop that one.
-            if len(lines) > 1 and size > want:
-                lines = lines[1:]
-            for line in lines:
-                line = line.strip()
-                if not line:
+        if not MACMON_LOG.exists():
+            return out
+        cutoff = now - max_age_sec
+        with open(MACMON_LOG, "r", errors="ignore") as f:
+            for line in f:
+                m_t = MACMON_TS_RE.search(line)
+                m_v = MACMON_GPU_TEMP_RE.search(line)
+                if not m_t or not m_v:
                     continue
                 try:
-                    d = json.loads(line)
-                    t = _parse_iso_ts(d["timestamp"])
-                    temp = d["temp"]["gpu_temp_avg"]
+                    t = _parse_iso_ts(m_t.group(1))
                 except Exception:
                     continue
-                if temp is None or t < cutoff:
+                if t < cutoff:
                     continue
-                out.append({"t": round(t, 1), "temp": round(float(temp), 2)})
+                out.append((t, float(m_v.group(1))))
     except Exception:
-        out = []
-
-    # Thin evenly rather than truncating, so the whole hour stays represented.
-    if len(out) > FINE_TEMP_MAX_POINTS:
-        step = len(out) / FINE_TEMP_MAX_POINTS
-        out = [out[int(i * step)] for i in range(FINE_TEMP_MAX_POINTS)]
-
-    with _fine_temp_lock:
-        _fine_temp_cache["data"] = out
-        _fine_temp_cache["at"] = now
+        return []
     return out
+
+
+def get_temp_age_series():
+    """GPU temperature and fan speed as continuous curves on a log-age grid.
+
+    One curve per metric, built from whichever source has the finest data at
+    each age: macmon's ~5s readings out to TEMP_AGE_FINE_MAX_SEC, 5-minute CSV
+    rows beyond that. Both are log-binned onto the same axis, so the handover
+    is a change of source rather than a break in the line.
+
+    The frame runs from the first row ever logged (install date) down to the
+    real measured sampling interval - claiming a finer floor would draw an
+    axis this machine has no way to fill, since nothing here samples faster
+    than macmon's 5s and a thermal sensor doesn't move meaningfully below it.
+
+    macmon reports no fan RPM, so fan speed comes from the CSV at every age -
+    it's the same curve, just coarser than temperature near "now"."""
+    now = time.time()
+    with _temp_age_lock:
+        if _temp_age_cache["data"] is not None and now - _temp_age_cache["at"] < 20:
+            return _temp_age_cache["data"]
+
+    csv_temp, csv_fan = [], []
+    install_ts = None
+    try:
+        if CSV_PATH.exists():
+            with open(CSV_PATH, newline="") as f:
+                for r in csv.DictReader(f):
+                    try:
+                        t = _parse_iso_ts(r["timestamp"])
+                    except Exception:
+                        continue
+                    if install_ts is None:
+                        install_ts = t
+                    gt = r.get("gpu_temp_c")
+                    if gt not in (None, ""):
+                        try:
+                            csv_temp.append((t, float(gt)))
+                        except ValueError:
+                            pass
+                    rpm, mx = r.get("fan_rpm"), r.get("fan_max_rpm")
+                    if rpm not in (None, "") and mx not in (None, "", "0"):
+                        try:
+                            csv_fan.append((t, max(0.0, min(100.0, float(rpm) / float(mx) * 100))))
+                        except ValueError:
+                            pass
+    except Exception:
+        pass
+
+    # The CSV only gains a fan row every 5 minutes, and on a log axis that
+    # latency is stretched into a large visual gap between where the fan curve
+    # stops and "now". The live reading closes it with an actual measurement
+    # rather than by carrying the last value forward.
+    try:
+        ft = get_fan_temp()
+        if ft and ft.get("fan_rpm") and ft.get("fan_max_rpm"):
+            live_pct = max(0.0, min(100.0, ft["fan_rpm"] / ft["fan_max_rpm"] * 100))
+            csv_fan.append((now, live_pct))
+        if ft and ft.get("gpu_temp_c") is not None:
+            csv_temp.append((now, float(ft["gpu_temp_c"])))
+    except Exception:
+        pass
+
+    fine = _read_macmon_samples(now, TEMP_AGE_FINE_MAX_SEC)
+
+    # Real sampling interval, measured rather than assumed - it sets the
+    # chart's right edge, so a stalled or restarted macmon widens the frame
+    # honestly instead of implying resolution that isn't there.
+    def _median_gap(samples):
+        if len(samples) < 3:
+            return None
+        ts = sorted(t for t, _ in samples)
+        gaps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
+        return gaps[len(gaps) // 2] if gaps else None
+
+    gap_sec = _median_gap(fine) or _median_gap(csv_temp) or 300.0
+    frame_min_ms = max(TEMP_AGE_FLOOR_MS, gap_sec * 1000.0)
+    frame_max_ms = ((now - install_ts) * 1000.0) if install_ts else frame_min_ms * 1000
+
+    fine_cutoff = now - TEMP_AGE_FINE_MAX_SEC
+    temp_samples = [s for s in fine if s[0] >= fine_cutoff] + [s for s in csv_temp if s[0] < fine_cutoff]
+
+    result = {
+        "now": now,
+        "install_ts": datetime.fromtimestamp(install_ts).isoformat() if install_ts else None,
+        "frame_min_ms": round(frame_min_ms, 1),
+        "frame_max_ms": round(frame_max_ms, 1),
+        "sample_interval_sec": round(gap_sec, 2),
+        "fine_handover_sec": TEMP_AGE_FINE_MAX_SEC,
+        "fine_sample_count": len(fine),
+        "temp": _log_bin(temp_samples, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
+        "fan": _log_bin(csv_fan, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
+    }
+    with _temp_age_lock:
+        _temp_age_cache["data"] = result
+        _temp_age_cache["at"] = now
+    return result
 
 
 def get_energy_series():
@@ -2277,7 +2382,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = {
                 "status": get_darkbloom_status(),
                 "energy": get_energy_series(),
-                "fine_temp": get_fine_temp_samples(),
+                "temp_age": get_temp_age_series(),
                 "live_power": get_live_power(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),

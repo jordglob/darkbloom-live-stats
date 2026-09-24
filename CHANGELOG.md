@@ -1,5 +1,18 @@
 # Changelog
 
+## v26
+
+**Log-age chart, second pass.** Six changes, all driven by looking at the rendered result:
+
+- **Fan speed is on it** (right axis, 0-100%, drawn as an area under the temperature line). It was missing entirely in v25.
+- **Buckets moved out to 24h.** Real ~5s macmon readings now carry the curve across everything the axis shows in minutes *and* hours; 5-minute CSV rows only take over beyond a day. A dashed marker shows where the handover happens, since the curve deliberately doesn't break there.
+- **No gap in the curve.** Both metrics are log-binned onto a shared axis by `_log_bin()`, and empty bins are *skipped* rather than emitted as nulls. That detail is the whole fix: on a log axis the bins near "now" are inevitably narrower than the sampling interval, so a null-per-empty-bin scheme shreds the recent end of the line into disconnected specks. Binning in log space also keeps plotted density even instead of piling thousands of points into the compressed old end while starving the stretched recent end.
+- **The axis starts at the install date** - the first row ever logged (`2026-08-29`), read from the CSV rather than hardcoded, so it widens by itself as history accumulates.
+- **The axis ends at the real measured sampling interval**, floored at 200ms. The interval is measured (median gap between actual samples), not assumed, so a stalled or restarted macmon widens the frame honestly instead of implying resolution that isn't there. In practice this reads ~5.6s.
+- **The live fan and temperature readings are appended as the newest points.** The CSV only gains a fan row every 5 minutes, and a log axis stretches that latency into a large visual gap between where the fan curve stops and "now"; `_log_bin` clamps anything fresher than the frame's right edge into the newest bin instead of discarding it.
+
+The title no longer claims "ms → years" - the axis reports what the data actually spans, because the frame is now derived from the data rather than chosen.
+
 ## v25
 
 **Log-age chart with a resolution pyramid.** A third GPU-temperature view: x is `log(age)`, so "now" is the right edge and each vertical gridline is one step further into the past — 1ms, 10ms … 1s, 10s, 1min, 10min, 1h, 6h, 1d, 1w, 30d, 1y — with horizontal steps every 10°C. That grid is the point: on a log axis you can't judge distance by eye, so the decades have to be drawn.
