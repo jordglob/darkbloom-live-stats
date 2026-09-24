@@ -2096,6 +2096,74 @@ def get_price_now():
     }
 
 
+# Where real samples hand over to bucketed summaries on the log-age chart.
+# Below this age you're looking at macmon's own ~5s readings; above it, at
+# CSV buckets - so the axis only starts showing summaries once it's showing
+# hours, and zooming toward "now" reveals actual data instead of one
+# bucket-average stretched across half the chart.
+FINE_TEMP_MAX_AGE_SEC = 3600
+FINE_TEMP_MAX_POINTS = 600
+_fine_temp_cache = {"data": None, "at": 0.0}
+_fine_temp_lock = threading.Lock()
+
+
+def get_fine_temp_samples():
+    """GPU temperature at macmon's own ~5s cadence for the last hour, oldest
+    first, as [{t: unix_seconds, temp: C}].
+
+    energy-monitor.sh already runs `macmon pipe -i 5000`, so this costs no new
+    sampling - it just reads the tail of a log that's being written anyway.
+    That log is ~12MB and gets truncated whenever macmon restarts, so this
+    seeks from the end rather than reading the whole file. Note macmon reports
+    no fan RPM, so this is temperature only; fan speed stays on the 5-minute
+    CSV cadence."""
+    now = time.time()
+    with _fine_temp_lock:
+        if _fine_temp_cache["data"] is not None and now - _fine_temp_cache["at"] < 10:
+            return _fine_temp_cache["data"]
+
+    out = []
+    try:
+        if MACMON_LOG.exists():
+            size = MACMON_LOG.stat().st_size
+            # ~570 bytes per record in practice; read a generous window so an
+            # hour's worth is comfortably inside it even if records grow.
+            want = min(size, FINE_TEMP_MAX_POINTS * 1200 + 65536)
+            with open(MACMON_LOG, "rb") as f:
+                f.seek(max(0, size - want))
+                chunk = f.read().decode("utf-8", errors="ignore")
+            cutoff = now - FINE_TEMP_MAX_AGE_SEC
+            lines = chunk.splitlines()
+            # Seeking mid-file almost always lands mid-record; drop that one.
+            if len(lines) > 1 and size > want:
+                lines = lines[1:]
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    t = _parse_iso_ts(d["timestamp"])
+                    temp = d["temp"]["gpu_temp_avg"]
+                except Exception:
+                    continue
+                if temp is None or t < cutoff:
+                    continue
+                out.append({"t": round(t, 1), "temp": round(float(temp), 2)})
+    except Exception:
+        out = []
+
+    # Thin evenly rather than truncating, so the whole hour stays represented.
+    if len(out) > FINE_TEMP_MAX_POINTS:
+        step = len(out) / FINE_TEMP_MAX_POINTS
+        out = [out[int(i * step)] for i in range(FINE_TEMP_MAX_POINTS)]
+
+    with _fine_temp_lock:
+        _fine_temp_cache["data"] = out
+        _fine_temp_cache["at"] = now
+    return out
+
+
 def get_energy_series():
     if not CSV_PATH.exists():
         return {"rows": [], "latest": None, "power_monitoring_active": False}
@@ -2209,6 +2277,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = {
                 "status": get_darkbloom_status(),
                 "energy": get_energy_series(),
+                "fine_temp": get_fine_temp_samples(),
                 "live_power": get_live_power(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),

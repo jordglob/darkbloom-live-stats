@@ -1,5 +1,17 @@
 # Changelog
 
+## v25
+
+**Log-age chart with a resolution pyramid.** A third GPU-temperature view: x is `log(age)`, so "now" is the right edge and each vertical gridline is one step further into the past — 1ms, 10ms … 1s, 10s, 1min, 10min, 1h, 6h, 1d, 1w, 30d, 1y — with horizontal steps every 10°C. That grid is the point: on a log axis you can't judge distance by eye, so the decades have to be drawn.
+
+What makes it worth having isn't the axis, it's the data behind it. The earlier log-time experiment (v23) stretched recent time across half the chart and revealed nothing, because `_bucket_downsample()` produces buckets of *equal* duration — bucket #299 summarises exactly as much time as bucket #1, so zooming into "now" was stretching a single number. This chart is fed two resolutions instead: **macmon's own ~5s SMC readings for the last hour** (600 unbucketed samples, via the new `get_fine_temp_samples()`), then **5-minute CSV buckets beyond that**. Buckets only take over once the axis is showing hours; below that you're looking at real readings.
+
+That immediately showed something no bucketed chart could: between roughly 1h and 10min ago, GPU temperature oscillates violently between ~40°C and ~100°C, over and over. That's the fan-recovery loop thrashing (`fan-recovery.log` has ~1500 engage/release cycles on a ~30s period), and at 5-minute sampling it was invisible — the 5-min CSV aliases a 30-second oscillation, which is also why the fan line looked so jagged in the other charts.
+
+Reading the fine layer costs nothing new: `energy-monitor.sh` already runs `macmon pipe -i 5000`, so this just tails a log that's being written anyway (seeking from the end — it's ~12MB and truncated on every macmon restart), cached 10s. macmon reports no fan RPM, so the fine layer is temperature only; fan speed stays on the 5-minute cadence.
+
+Note on the frame: it spans 1ms to 1 year as specified, and roughly 60% of that is structurally empty — nothing on this machine samples faster than ~5s (and a thermal sensor doesn't meaningfully change at millisecond scale), while the 1y/30d end is empty simply because the log is 26 days old. The left end fills in with time; the right end can't.
+
 ## v24
 
 **GPU Temp & Fan chart, redrawn.** The data was right after v22; how it was drawn wasn't. Five changes, each checked against the rendered chart rather than reasoned about:

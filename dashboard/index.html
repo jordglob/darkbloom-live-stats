@@ -140,6 +140,9 @@
   .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 
   svg.chart { width: 100%; height: 180px; overflow: visible; }
+  svg.chart-tall { height: 200px; }
+  .line-temp-fine { fill: none; stroke: var(--gauge-gpu); stroke-width: 1.25; stroke-linejoin: round; }
+  .line-temp-coarse { fill: none; stroke: var(--gauge-gpu); stroke-width: 2; stroke-linecap: round; opacity: 0.55; }
   .gridline { stroke: var(--border); stroke-width: 1; }
   .axis-label { fill: var(--text-muted); font-size: 10px; }
   .line-cost { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
@@ -365,6 +368,15 @@
     <div class="chart-wrap">
       <svg class="chart" id="chart-temp-log"></svg>
       <div class="tooltip" id="tooltip-temp-log"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 title="Same GPU temperature, on a logarithmic AGE axis: 'now' is the right edge and each vertical gridline is a step further into the past. Fed by two resolutions - macmon's ~5s readings for the last hour, then 5-minute CSV buckets beyond that - so zooming toward now shows real samples rather than one bucket average stretched wide.">GPU Temp — log age, ms → years <span id="temp-age-stats" class="gauge-time"></span></h2>
+    <div class="legend" id="temp-age-legend"></div>
+    <div class="chart-wrap">
+      <svg class="chart chart-tall" id="chart-temp-age"></svg>
+      <div class="tooltip" id="tooltip-temp-age"></div>
     </div>
   </div>
 
@@ -2116,6 +2128,160 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   });
 }
 
+// Decade ladder for the log-age axis, in human units rather than raw powers
+// of ten - "10min" is readable in a way "6e5 ms" is not.
+const AGE_GRID = [
+  {ms: 1, label: '1ms'}, {ms: 10, label: '10ms'}, {ms: 100, label: '100ms'},
+  {ms: 1e3, label: '1s'}, {ms: 10e3, label: '10s'},
+  {ms: 60e3, label: '1min'}, {ms: 600e3, label: '10min'},
+  {ms: 3.6e6, label: '1h'}, {ms: 21.6e6, label: '6h'},
+  {ms: 86.4e6, label: '1d'}, {ms: 6.048e8, label: '1w'},
+  {ms: 2.592e9, label: '30d'}, {ms: 3.1536e10, label: '1y'},
+];
+
+// Plots real timestamps against log(age), so "now" sits at the right edge and
+// history compresses leftward one decade at a time. Unlike the index-based
+// charts, this one is fed a resolution pyramid: macmon's ~5s samples near
+// now, bucketed CSV history further back. That's what makes the log axis
+// worth anything - stretching recent time only helps if there's finer data
+// there to reveal, which equal-time buckets alone never have.
+function renderLogAgeChart(svgId, tooltipId, layers, opts = {}) {
+  const svg = document.getElementById(svgId);
+  const tooltip = document.getElementById(tooltipId);
+  const w = svg.clientWidth || 900;
+  const h = opts.height || 200;
+  const padL = 46, padR = 20, padT = 10, padB = 30;
+  const innerW = w - padL - padR, innerH = h - padT - padB;
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.innerHTML = '';
+
+  const frameMin = opts.frameMinMs || 1;
+  const frameMax = opts.frameMaxMs || 3.1536e10;
+  const lgMin = Math.log10(frameMin), lgMax = Math.log10(frameMax);
+  const xForAge = (ageMs) => {
+    const lg = Math.log10(Math.min(frameMax, Math.max(frameMin, ageMs)));
+    return padL + innerW * (1 - (lg - lgMin) / (lgMax - lgMin));
+  };
+  const [yMin, yMax] = opts.yDomain || [35, 105];
+  const yToPixel = (v) => padT + innerH - ((v - yMin) / (yMax - yMin)) * innerH;
+
+  // --- grid: vertical decade lines + horizontal temperature steps ---
+  AGE_GRID.forEach(g => {
+    if (g.ms < frameMin || g.ms > frameMax) return;
+    const x = xForAge(g.ms);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x); line.setAttribute('x2', x);
+    line.setAttribute('y1', padT); line.setAttribute('y2', padT + innerH);
+    line.setAttribute('class', 'gridline');
+    svg.appendChild(line);
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', x); label.setAttribute('y', h - 8);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('class', 'axis-label');
+    label.textContent = g.label;
+    svg.appendChild(label);
+  });
+  for (let v = Math.ceil(yMin / 10) * 10; v <= yMax; v += 10) {
+    const y = yToPixel(v);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', padL); line.setAttribute('x2', w - padR);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('class', 'gridline');
+    svg.appendChild(line);
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', padL - 6); label.setAttribute('y', y + 3);
+    label.setAttribute('text-anchor', 'end');
+    label.setAttribute('class', 'axis-label');
+    label.textContent = `${v}°`;
+    svg.appendChild(label);
+  }
+
+  (opts.hLines || []).forEach(hl => {
+    if (hl.value < yMin || hl.value > yMax) return;
+    const y = yToPixel(hl.value);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', padL); line.setAttribute('x2', w - padR);
+    line.setAttribute('y1', y); line.setAttribute('y2', y);
+    line.setAttribute('class', 'threshold-line');
+    svg.appendChild(line);
+    if (hl.label) {
+      const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      t.setAttribute('x', padL + 4); t.setAttribute('y', y - 3);
+      t.setAttribute('class', 'threshold-label');
+      t.textContent = hl.label;
+      svg.appendChild(t);
+    }
+  });
+
+  // --- data, one path per resolution layer so the handover stays visible ---
+  const nowMs = Date.now();
+  const allPts = [];
+  layers.forEach(layer => {
+    const pts = layer.points
+      .map(p => ({ x: xForAge(nowMs - p.t * 1000), y: yToPixel(p.temp), t: p.t, temp: p.temp, layer: layer.name }))
+      .sort((a, b) => a.x - b.x);
+    if (!pts.length) return;
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', pts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(2) + ',' + p.y.toFixed(2)).join(' '));
+    path.setAttribute('class', layer.className);
+    svg.appendChild(path);
+    allPts.push(...pts);
+  });
+  allPts.sort((a, b) => a.x - b.x);
+
+  if (!allPts.length) {
+    svg.innerHTML += `<text x="${w / 2}" y="${h / 2}" text-anchor="middle" class="axis-label">No data yet</text>`;
+    return;
+  }
+
+  // --- hover ---
+  const hoverLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  hoverLine.setAttribute('class', 'crosshair');
+  hoverLine.setAttribute('y1', padT); hoverLine.setAttribute('y2', padT + innerH);
+  hoverLine.style.display = 'none';
+  svg.appendChild(hoverLine);
+  const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  dot.setAttribute('class', 'hover-dot');
+  dot.setAttribute('fill', 'currentColor');
+  dot.style.display = 'none';
+  svg.appendChild(dot);
+  const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  overlay.setAttribute('x', 0); overlay.setAttribute('y', 0);
+  overlay.setAttribute('width', w); overlay.setAttribute('height', h);
+  overlay.setAttribute('fill', 'transparent');
+  svg.appendChild(overlay);
+
+  overlay.addEventListener('mousemove', (e) => {
+    const rect = svg.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (w / rect.width);
+    let best = allPts[0], bestD = Infinity;
+    for (const p of allPts) {
+      const d = Math.abs(p.x - mx);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    hoverLine.setAttribute('x1', best.x); hoverLine.setAttribute('x2', best.x);
+    hoverLine.style.display = 'block';
+    dot.setAttribute('cx', best.x); dot.setAttribute('cy', best.y);
+    dot.style.display = 'block';
+    const ageSec = (nowMs - best.t * 1000) / 1000;
+    const ageTxt = ageSec < 90 ? `${ageSec.toFixed(0)}s ago`
+      : ageSec < 5400 ? `${(ageSec / 60).toFixed(0)} min ago`
+      : ageSec < 172800 ? `${(ageSec / 3600).toFixed(1)} h ago`
+      : `${(ageSec / 86400).toFixed(1)} days ago`;
+    tooltip.style.display = 'block';
+    tooltip.style.left = Math.min(rect.width - 170, Math.max(0, best.x / (w / rect.width) + 10)) + 'px';
+    tooltip.style.top = '0px';
+    tooltip.innerHTML = `<div class="t-time">${ageTxt} · ${fmtTime(new Date(best.t * 1000).toISOString())}</div>` +
+      `<div class="t-row"><span>GPU Temp</span><strong>${best.temp.toFixed(1)}°C</strong></div>` +
+      `<div class="t-row"><span>Source</span><strong>${best.layer}</strong></div>`;
+  });
+  overlay.addEventListener('mouseleave', () => {
+    hoverLine.style.display = 'none';
+    dot.style.display = 'none';
+    tooltip.style.display = 'none';
+  });
+}
+
 function updateFavicon(status) {
   // Small color-coded status indicator, visible in the browser tab even when
   // this isn't the active tab - green = online and trusted (eligible for
@@ -2218,6 +2384,39 @@ async function refresh() {
     };
     if (hasTempPeakFull) tempLogOpts.envelope = { lower: 0, upper: 1, className: 'band-temp' };
     renderLineChart('chart-temp-log', 'tooltip-temp-log', rows.timestamps, tempSeriesLog, tempColorsLog, v => `${v.toFixed(1)}°C`, tempLogOpts);
+
+    // Resolution pyramid for the log-age chart: macmon's ~5s samples for the
+    // last hour, CSV buckets beyond it. The handover is at an hour because
+    // that's where the axis starts showing hours - below it you want real
+    // readings, above it a bucket average is the honest summary anyway.
+    const HANDOVER_SEC = 3600;
+    const nowSec = Date.now() / 1000;
+    const finePts = (data.fine_temp || []).filter(p => nowSec - p.t <= HANDOVER_SEC);
+    const coarsePts = [];
+    (rows.timestamps || []).forEach((ts, i) => {
+      const v = (rows.gpu_temp_c_full || [])[i];
+      if (v == null) return;
+      const t = new Date(ts).getTime() / 1000;
+      if (nowSec - t > HANDOVER_SEC) coarsePts.push({ t, temp: v });
+    });
+    const oldestSec = coarsePts.length ? nowSec - coarsePts[0].t : (finePts.length ? nowSec - finePts[0].t : 0);
+    const fmtSpan = s => s > 86400 ? `${(s / 86400).toFixed(1)} days` : `${(s / 3600).toFixed(1)} h`;
+    document.getElementById('temp-age-stats').textContent =
+      finePts.length || coarsePts.length
+        ? `${finePts.length} live samples (≤1h) + ${coarsePts.length} buckets · history spans ${fmtSpan(oldestSec)}`
+        : 'no data yet';
+    document.getElementById('temp-age-legend').innerHTML =
+      `<span title="macmon's own ~5s SMC readings, unbucketed - the last hour at full sampling resolution."><i style="background:var(--gauge-gpu)"></i>~5s samples (last hour)</span>` +
+      `<span title="5-minute CSV rows grouped into ~2h buckets, each plotted at its own age."><i style="background:var(--gauge-gpu);opacity:0.55"></i>~2h buckets (older)</span>`;
+    renderLogAgeChart('chart-temp-age', 'tooltip-temp-age', [
+      { name: '~2h bucket', points: coarsePts, className: 'line-temp-coarse' },
+      { name: '~5s sample', points: finePts, className: 'line-temp-fine' },
+    ], {
+      frameMinMs: 1,
+      frameMaxMs: 3.1536e10,
+      yDomain: [35, 105],
+      hLines: [{ value: 85, label: '85°C — running hot' }],
+    });
 
     renderLineChart('chart-money', 'tooltip-money',
       rows.timestamps,
