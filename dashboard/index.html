@@ -334,6 +334,11 @@
   </div>
 
   <div class="panel">
+    <h2 title="Stops serving on purpose, for a set time or until you resume. Uses darkbloom's own stop command, so the coordinator sees a clean intentional disconnect rather than a crash - your hardware-trust level is not affected. Price Guard's Auto mode will not start back into a pause.">Pause serving <span class="gauge-time">(temporarily stop renting out this Mac)</span></h2>
+    <div id="pause-panel"></div>
+  </div>
+
+  <div class="panel">
     <h2 title="Compares the current electricity price against this account's own measured $/hr active pay rate, converted to a break-even price per kWh in your configured currency. Auto mode calls the real darkbloom start/stop CLI commands - Manual mode just shows the numbers and lets you trigger start/stop yourself.">Price Guard <span class="gauge-time">(optional: pause serving when electricity costs more than serving earns)</span></h2>
     <div id="price-guard"></div>
   </div>
@@ -480,6 +485,8 @@ let lastFanTemp = null;
 let lastFanRecovery = null;
 let lastPowerMethod = null;
 let lastPriceGuard = null;
+let lastAccount = null;
+let lastPause = null;
 let lastConfiguredModels = [];
 let chatMessages = [];
 let chatModel = null;
@@ -860,6 +867,102 @@ async function refreshWarmup() {
     renderWarmup(warmup);
     lastConfiguredModels = warmup.configured_models || [];
     renderChat();
+  } catch (e) { /* silent */ }
+}
+
+let tempAgeTimer = null;
+function renderTempAge(ta) {
+  if (!ta) return;
+  const spanDays = ta.frame_max_ms / 86400000;
+  const installTxt = ta.install_ts ? fmtTime(ta.install_ts) : '?';
+  document.getElementById('temp-age-stats').textContent =
+    `${ta.fine_sample_count.toLocaleString()} live samples \u00B7 axis ${ta.sample_interval_sec.toFixed(1)}s \u2192 ${spanDays.toFixed(1)} days (since ${installTxt})`;
+  document.getElementById('temp-age-legend').innerHTML =
+    `<span title="One continuous curve. Out to 24h it's macmon's own ~${ta.sample_interval_sec.toFixed(0)}s SMC readings; beyond that, 5-minute CSV rows. Log-binned onto the same axis so the handover isn't a break in the line."><i style="background:var(--gauge-gpu)"></i>GPU Temp</span>` +
+    `<span title="Fan speed as % of max RPM, right axis. Only the 5-minute CSV has fan RPM - macmon doesn't report it - so this curve is coarser than temperature, topped up with the live reading."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
+  renderLogAgeChart('chart-temp-age', 'tooltip-temp-age', ta, {
+    yDomain: [35, 105],
+    hLines: [{ value: 85, label: '85\u00B0C \u2014 running hot' }],
+  });
+  // Re-poll at the machine's own sampling cadence rather than the page's
+  // general refresh interval - a chart whose right edge is live readings
+  // should move when they do, not 10s later.
+  const ms = Math.max(1000, Math.round((ta.sample_interval_sec || 5) * 1000));
+  if (!tempAgeTimer || tempAgeTimer.ms !== ms) {
+    if (tempAgeTimer) clearInterval(tempAgeTimer.id);
+    tempAgeTimer = { ms, id: setInterval(refreshTempAge, ms) };
+  }
+}
+
+async function refreshTempAge() {
+  try {
+    const res = await fetch('/api/temp_age');
+    renderTempAge(await res.json());
+  } catch (e) { /* silent */ }
+}
+
+function renderPause(pause, account) {
+  const el = document.getElementById('pause-panel');
+  if (!el) return;
+  const hr = (account && account.hourly_rate_comparison) || null;
+  const floorRate = hr && hr.floor_rate_per_hour_usd;
+  const activeRate = hr && hr.active_rate_per_hour_usd;
+
+  // The warning is built from this account's own measured rates, not a quoted
+  // figure. The base reward is the part people don't expect to lose: it's paid
+  // for being online and trusted at all, so an idle-but-connected Mac still
+  // earns it and a paused one doesn't.
+  let warn = 'Pausing stops all earnings, including the base reward paid just for being online and trusted.';
+  if (floorRate != null && activeRate != null) {
+    const total = floorRate + activeRate;
+    const share = total > 0 ? (floorRate / total) * 100 : 0;
+    warn = `<strong>Pausing gives up the base reward too.</strong> This account earns <strong>$${floorRate.toFixed(4)}/h</strong> ` +
+      `just for being online and trusted — that's <strong>${share.toFixed(0)}%</strong> of its hourly income, and it does not depend on ` +
+      `serving any requests. Actually serving adds $${activeRate.toFixed(4)}/h on top. A 24h pause costs roughly ` +
+      `<strong>$${(total * 24).toFixed(2)}</strong>.`;
+  }
+
+  if (pause && pause.active) {
+    const left = pause.indefinite ? null : pause.remaining_sec;
+    const leftTxt = pause.indefinite
+      ? 'until you resume'
+      : `resumes in ${left > 3600 ? (left / 3600).toFixed(1) + ' h' : Math.max(0, Math.round(left / 60)) + ' min'}`;
+    el.innerHTML = `
+      <div class="warmup-row">
+        <span class="warmup-status" style="margin:0"><strong style="color:var(--status-warning)">Serving paused</strong> — ${leftTxt}.</span>
+        <button class="copy-cmd-btn" id="pause-resume-btn">Resume now</button>
+      </div>
+      <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${warn}</div>`;
+    const btn = document.getElementById('pause-resume-btn');
+    if (btn) btn.addEventListener('click', () => postPause({ action: 'resume' }));
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="warmup-row">
+      <span class="warmup-status" style="margin:0">Pause for:</span>
+      <button class="copy-cmd-btn pause-btn" data-hours="1">1 h</button>
+      <button class="copy-cmd-btn pause-btn" data-hours="4">4 h</button>
+      <button class="copy-cmd-btn pause-btn" data-hours="8">8 h</button>
+      <button class="copy-cmd-btn pause-btn" data-hours="24">24 h</button>
+      <button class="copy-cmd-btn pause-btn" data-hours="">Until I resume</button>
+    </div>
+    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${warn}</div>
+    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">Uses darkbloom's own stop command, so this counts as a clean intentional disconnect — it does not affect your hardware-trust level, and Darkbloom's watchdog leaves a deliberate stop alone. Price Guard keeps its current mode and will not start back into a pause.</div>`;
+  document.querySelectorAll('.pause-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      const h = b.dataset.hours;
+      postPause({ action: 'pause', hours: h ? parseFloat(h) : null });
+    });
+  });
+}
+
+async function postPause(body) {
+  try {
+    const res = await fetch('/api/pause', { method: 'POST', body: JSON.stringify(body) });
+    const out = await res.json();
+    renderPause(out.pause, lastAccount);
+    refresh();
   } catch (e) { /* silent */ }
 }
 
@@ -1642,7 +1745,16 @@ function renderBanners(status, energy, doctor, daemonState) {
     banners.push(banner('warning', status.last_error));
   }
 
-  if (lastPriceGuard && !lastPriceGuard.daemon_running && lastPriceGuard.last_action === 'stop' && lastPriceGuard.last_action_source === 'auto') {
+  // A user pause takes priority over the price-guard banner below: both would
+  // otherwise fire for the same stopped provider, and only one of them is the
+  // reason the user is actually looking for.
+  if (lastPause && lastPause.active) {
+    const left = lastPause.remaining_sec;
+    const leftTxt = lastPause.indefinite
+      ? 'It stays paused until you resume it.'
+      : `Resumes automatically in ${left > 3600 ? (left / 3600).toFixed(1) + ' h' : Math.max(0, Math.round(left / 60)) + ' min'}.`;
+    banners.push(banner('warning', `<strong>Serving is paused.</strong> ${leftTxt} No earnings while paused — including the base reward for being online. <a href="#" onclick="postPause({action:'resume'}); return false;">Resume now</a>`));
+  } else if (lastPriceGuard && !lastPriceGuard.daemon_running && lastPriceGuard.last_action === 'stop' && lastPriceGuard.last_action_source === 'auto') {
     // An intentional, price-driven pause looks identical to a real outage in
     // every other status on this page ("Provider: Not running"). This used to
     // only fire while still in Auto mode - so switching to Manual right after
@@ -2389,6 +2501,9 @@ async function refresh() {
     const data = await res.json();
     const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations, price_48h } = data;
     lastUtilization = utilization || null;
+    lastAccount = account || null;
+    lastPause = data.pause || null;
+    renderPause(data.pause, account);
 
     renderCards(status, energy, account, daemon_state);
     renderBanners(status, energy, doctor, daemon_state);
@@ -2463,20 +2578,7 @@ async function refresh() {
 
     // Log-age chart: the server does the pyramid (macmon ~5s out to 24h,
     // 5-minute CSV rows beyond) and hands back two already-binned curves.
-    const ta = data.temp_age;
-    if (ta) {
-      const spanDays = ta.frame_max_ms / 86400000;
-      const installTxt = ta.install_ts ? fmtTime(ta.install_ts) : '?';
-      document.getElementById('temp-age-stats').textContent =
-        `${ta.fine_sample_count.toLocaleString()} live samples · axis ${ta.sample_interval_sec.toFixed(1)}s \u2192 ${spanDays.toFixed(1)} days (since ${installTxt})`;
-      document.getElementById('temp-age-legend').innerHTML =
-        `<span title="One continuous curve. Out to 24h it's macmon's own ~${ta.sample_interval_sec.toFixed(0)}s SMC readings; beyond that, 5-minute CSV rows. Log-binned onto the same axis so the handover isn't a break in the line."><i style="background:var(--gauge-gpu)"></i>GPU Temp</span>` +
-        `<span title="Fan speed as % of max RPM, right axis. Only the 5-minute CSV has fan RPM - macmon doesn't report it - so this curve is coarser than temperature near 'now'."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
-      renderLogAgeChart('chart-temp-age', 'tooltip-temp-age', ta, {
-        yDomain: [35, 105],
-        hLines: [{ value: 85, label: '85\u00B0C \u2014 running hot' }],
-      });
-    }
+    if (data.temp_age) renderTempAge(data.temp_age);
 
     renderLineChart('chart-money', 'tooltip-money',
       rows.timestamps,

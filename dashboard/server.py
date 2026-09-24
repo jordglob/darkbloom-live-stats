@@ -312,12 +312,26 @@ FAN_POLICY_RE = re.compile(r"^Policy:\s*(.+)$", re.MULTILINE)
 FAN_SERVICE_RE = re.compile(r"^Service:\s*(\S+)", re.MULTILINE)
 
 
+_fan_temp_cache = {"data": None, "at": 0.0}
+_fan_temp_lock = threading.Lock()
+FAN_TEMP_CACHE_SEC = 2
+
+
 def get_fan_temp():
     """Fan RPM and GPU temperature, read via `darkbloom fan status` - a
     read-only report that does NOT enable Darkbloom's fan-control helper,
     just reads the same hardware sensors it would use. Apple Silicon doesn't
     expose fan speed or die temperature through powermetrics at all, so this
-    is the only practical source without writing a native SMC-reading helper."""
+    is the only practical source without writing a native SMC-reading helper.
+
+    Cached briefly because every call spawns a subprocess and three separate
+    callers want it on their own schedules. Two seconds is well under the
+    fan-recovery loop's 30s cadence and under the chart's sampling interval,
+    so no caller sees a reading it would have read differently."""
+    now = time.time()
+    with _fan_temp_lock:
+        if _fan_temp_cache["data"] is not None and now - _fan_temp_cache["at"] < FAN_TEMP_CACHE_SEC:
+            return _fan_temp_cache["data"]
     try:
         out = subprocess.run(
             [str(DARKBLOOM_BIN), "fan", "status"],
@@ -340,7 +354,7 @@ def get_fan_temp():
     error_match = FAN_ERROR_RE.search(out)
     policy_match = FAN_POLICY_RE.search(out)
     service_match = FAN_SERVICE_RE.search(out)
-    return {
+    result = {
         "fan_rpm": fan_rpm,
         "fan_max_rpm": fan_max_rpm,
         "gpu_temp_c": gpu_temp_c,
@@ -350,6 +364,10 @@ def get_fan_temp():
         "fan_policy": policy_match.group(1).strip() if policy_match else None,
         "fan_service_running": (service_match.group(1) == "running") if service_match else None,
     }
+    with _fan_temp_lock:
+        _fan_temp_cache["data"] = result
+        _fan_temp_cache["at"] = time.time()
+    return result
 
 
 def get_ollama_status():
@@ -846,6 +864,13 @@ def price_guard_loop():
                 cfg["last_evaluated_at"] = time.time()
                 cfg["last_price_per_kwh"] = decision["price_per_kwh"]
                 cfg["last_break_even_per_kwh"] = decision["break_even_per_kwh"]
+                # A user pause outranks Auto. Auto may still issue a stop while
+                # paused (a harmless no-op, the daemon is already down), but it
+                # must never start back into a deliberate pause.
+                paused = read_pause_config().get("active")
+                if decision["action"] == "start" and paused:
+                    decision["action"] = None
+                    decision["reason"] = "would start, but serving is paused"
                 if decision["action"] and cfg.get("mode") == "auto":
                     ok = _apply_price_guard_action(decision["action"], decision["reason"])
                     if ok:
@@ -1126,6 +1151,79 @@ def fan_recovery_loop():
         except Exception as e:
             log_fan_recovery(f"ERROR: {e}")
         time.sleep(FAN_RECOVERY_POLL_SEC)
+
+
+# ---------------------------------------------------------------------------
+# Pause serving
+#
+# A deliberate, time-boxed stop that survives everything else on this machine
+# that has an opinion about whether the provider should be running: Price
+# Guard's Auto mode won't start back into it, and it doesn't touch the Price
+# Guard mode itself, so whatever was configured there resumes working
+# untouched once the pause ends. Darkbloom's own watchdog already leaves a
+# CLI-issued stop alone (it only restarts on an unexpected drop), so nothing
+# further is needed to make it stick.
+# ---------------------------------------------------------------------------
+PAUSE_CONFIG = HOME / ".darkbloom" / "pause.json"
+PAUSE_POLL_SEC = 20
+
+
+def read_pause_config():
+    try:
+        if PAUSE_CONFIG.exists():
+            d = json.loads(PAUSE_CONFIG.read_text())
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {"active": False, "until": None, "started_at": None}
+
+
+def write_pause_config(cfg):
+    PAUSE_CONFIG.write_text(json.dumps(cfg))
+
+
+def get_pause_status():
+    cfg = read_pause_config()
+    if not cfg.get("active"):
+        return {"active": False}
+    until = cfg.get("until")
+    return {
+        "active": True,
+        "until": until,
+        "indefinite": until is None,
+        "started_at": cfg.get("started_at"),
+        "remaining_sec": max(0, until - time.time()) if until else None,
+    }
+
+
+def start_pause(hours=None):
+    """Stops serving now. hours=None pauses until explicitly resumed."""
+    until = (time.time() + float(hours) * 3600) if hours else None
+    label = f"{float(hours):g}h" if hours else "until resumed"
+    ok = _apply_price_guard_action("stop", f"paused from dashboard ({label})")
+    if ok:
+        write_pause_config({"active": True, "until": until, "started_at": time.time()})
+        log_price_guard(f"PAUSED: serving paused ({label})")
+    return ok
+
+
+def end_pause(reason):
+    ok = _apply_price_guard_action("start", reason)
+    write_pause_config({"active": False, "until": None, "started_at": None})
+    log_price_guard(f"PAUSE ENDED: {reason}")
+    return ok
+
+
+def pause_loop():
+    while True:
+        try:
+            cfg = read_pause_config()
+            if cfg.get("active") and cfg.get("until") and time.time() >= cfg["until"]:
+                end_pause("scheduled pause expired")
+        except Exception as e:
+            log_price_guard(f"ERROR: pause loop failed: {e}")
+        time.sleep(PAUSE_POLL_SEC)
 
 
 def warmup_loop():
@@ -2147,7 +2245,14 @@ TEMP_AGE_BINS = 340
 TEMP_AGE_FLOOR_MS = 200  # never claim resolution finer than this
 MACMON_TS_RE = re.compile(r'"timestamp":\s*"([^"]+)"')
 MACMON_GPU_TEMP_RE = re.compile(r'"gpu_temp_avg":\s*([0-9.]+)')
-_temp_age_cache = {"data": None, "at": 0.0}
+# The full history (12MB of macmon + the whole CSV) is expensive to parse and
+# barely changes, while the right-hand edge of the chart changes every ~5s.
+# So the parsed SAMPLES are cached and only topped up from the tail of the log,
+# and the binning - which is cheap - is redone against a fresh "now" on every
+# request. That's what lets the chart refresh at the sampling rate instead of
+# at whatever interval a full re-parse could afford.
+TEMP_AGE_FULL_RELOAD_SEC = 120
+_temp_age_samples = {"fine": [], "csv_temp": [], "csv_fan": [], "install_ts": None, "loaded_at": 0.0}
 _temp_age_lock = threading.Lock()
 
 
@@ -2213,6 +2318,38 @@ def _read_macmon_samples(now, max_age_sec):
     return out
 
 
+def _read_macmon_tail_since(since_ts, max_bytes=262144):
+    """Just the newest macmon records, by seeking from the end - the cheap
+    top-up that keeps the chart's right edge live between full reloads. The
+    window covers ~40 minutes at macmon's cadence, far more than any refresh
+    gap, so nothing is missed between calls."""
+    out = []
+    try:
+        if not MACMON_LOG.exists():
+            return out
+        size = MACMON_LOG.stat().st_size
+        with open(MACMON_LOG, "rb") as f:
+            f.seek(max(0, size - max_bytes))
+            chunk = f.read().decode("utf-8", errors="ignore")
+        lines = chunk.splitlines()
+        if size > max_bytes and lines:
+            lines = lines[1:]  # seeking mid-file lands mid-record
+        for line in lines:
+            m_t = MACMON_TS_RE.search(line)
+            m_v = MACMON_GPU_TEMP_RE.search(line)
+            if not m_t or not m_v:
+                continue
+            try:
+                t = _parse_iso_ts(m_t.group(1))
+            except Exception:
+                continue
+            if t > since_ts:
+                out.append((t, float(m_v.group(1))))
+    except Exception:
+        return []
+    return out
+
+
 def get_temp_age_series():
     """GPU temperature and fan speed as continuous curves on a log-age grid.
 
@@ -2230,51 +2367,54 @@ def get_temp_age_series():
     it's the same curve, just coarser than temperature near "now"."""
     now = time.time()
     with _temp_age_lock:
-        if _temp_age_cache["data"] is not None and now - _temp_age_cache["at"] < 20:
-            return _temp_age_cache["data"]
+        stale = now - _temp_age_samples["loaded_at"] > TEMP_AGE_FULL_RELOAD_SEC
+        if stale:
+            csv_temp, csv_fan = [], []
+            install_ts = None
+            try:
+                if CSV_PATH.exists():
+                    with open(CSV_PATH, newline="") as f:
+                        for r in csv.DictReader(f):
+                            try:
+                                t = _parse_iso_ts(r["timestamp"])
+                            except Exception:
+                                continue
+                            if install_ts is None:
+                                install_ts = t
+                            gt = r.get("gpu_temp_c")
+                            if gt not in (None, ""):
+                                try:
+                                    csv_temp.append((t, float(gt)))
+                                except ValueError:
+                                    pass
+                            rpm, mx = r.get("fan_rpm"), r.get("fan_max_rpm")
+                            if rpm not in (None, "") and mx not in (None, "", "0"):
+                                try:
+                                    csv_fan.append((t, max(0.0, min(100.0, float(rpm) / float(mx) * 100))))
+                                except ValueError:
+                                    pass
+            except Exception:
+                pass
+            _temp_age_samples.update({
+                "fine": _read_macmon_samples(now, TEMP_AGE_FINE_MAX_SEC),
+                "csv_temp": csv_temp,
+                "csv_fan": csv_fan,
+                "install_ts": install_ts,
+                "loaded_at": now,
+            })
+        else:
+            # Cheap top-up: only what macmon has written since we last looked.
+            newest = _temp_age_samples["fine"][-1][0] if _temp_age_samples["fine"] else 0
+            fresh = _read_macmon_tail_since(newest)
+            if fresh:
+                cutoff = now - TEMP_AGE_FINE_MAX_SEC
+                _temp_age_samples["fine"] = [
+                    s2 for s2 in _temp_age_samples["fine"] if s2[0] >= cutoff] + fresh
 
-    csv_temp, csv_fan = [], []
-    install_ts = None
-    try:
-        if CSV_PATH.exists():
-            with open(CSV_PATH, newline="") as f:
-                for r in csv.DictReader(f):
-                    try:
-                        t = _parse_iso_ts(r["timestamp"])
-                    except Exception:
-                        continue
-                    if install_ts is None:
-                        install_ts = t
-                    gt = r.get("gpu_temp_c")
-                    if gt not in (None, ""):
-                        try:
-                            csv_temp.append((t, float(gt)))
-                        except ValueError:
-                            pass
-                    rpm, mx = r.get("fan_rpm"), r.get("fan_max_rpm")
-                    if rpm not in (None, "") and mx not in (None, "", "0"):
-                        try:
-                            csv_fan.append((t, max(0.0, min(100.0, float(rpm) / float(mx) * 100))))
-                        except ValueError:
-                            pass
-    except Exception:
-        pass
-
-    # The CSV only gains a fan row every 5 minutes, and on a log axis that
-    # latency is stretched into a large visual gap between where the fan curve
-    # stops and "now". The live reading closes it with an actual measurement
-    # rather than by carrying the last value forward.
-    try:
-        ft = get_fan_temp()
-        if ft and ft.get("fan_rpm") and ft.get("fan_max_rpm"):
-            live_pct = max(0.0, min(100.0, ft["fan_rpm"] / ft["fan_max_rpm"] * 100))
-            csv_fan.append((now, live_pct))
-        if ft and ft.get("gpu_temp_c") is not None:
-            csv_temp.append((now, float(ft["gpu_temp_c"])))
-    except Exception:
-        pass
-
-    fine = _read_macmon_samples(now, TEMP_AGE_FINE_MAX_SEC)
+        fine = list(_temp_age_samples["fine"])
+        csv_temp = list(_temp_age_samples["csv_temp"])
+        csv_fan = list(_temp_age_samples["csv_fan"])
+        install_ts = _temp_age_samples["install_ts"]
 
     # Real sampling interval, measured rather than assumed - it sets the
     # chart's right edge, so a stalled or restarted macmon widens the frame
@@ -2290,6 +2430,20 @@ def get_temp_age_series():
     frame_min_ms = max(TEMP_AGE_FLOOR_MS, gap_sec * 1000.0)
     frame_max_ms = ((now - install_ts) * 1000.0) if install_ts else frame_min_ms * 1000
 
+    # The CSV only gains a fan row every 5 minutes, and a log axis stretches
+    # that latency into a large visual gap short of "now". The live reading
+    # closes it with an actual measurement rather than by carrying the last
+    # value forward. Appended to the local copies, not the cache, so it's
+    # re-read fresh on every request instead of going stale in there.
+    try:
+        ft = get_fan_temp()
+        if ft and ft.get("fan_rpm") and ft.get("fan_max_rpm"):
+            csv_fan.append((now, max(0.0, min(100.0, ft["fan_rpm"] / ft["fan_max_rpm"] * 100))))
+        if ft and ft.get("gpu_temp_c") is not None:
+            csv_temp.append((now, float(ft["gpu_temp_c"])))
+    except Exception:
+        pass
+
     fine_cutoff = now - TEMP_AGE_FINE_MAX_SEC
     temp_samples = [s for s in fine if s[0] >= fine_cutoff] + [s for s in csv_temp if s[0] < fine_cutoff]
 
@@ -2304,9 +2458,6 @@ def get_temp_age_series():
         "temp": _log_bin(temp_samples, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
         "fan": _log_bin(csv_fan, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
     }
-    with _temp_age_lock:
-        _temp_age_cache["data"] = result
-        _temp_age_cache["at"] = now
     return result
 
 
@@ -2424,6 +2575,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "status": get_darkbloom_status(),
                 "energy": get_energy_series(),
                 "temp_age": get_temp_age_series(),
+                "pause": get_pause_status(),
                 "live_power": get_live_power(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),
@@ -2467,6 +2619,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cfg["log_tail"] = WARMUP_LOG.read_text().splitlines()[-10:] if WARMUP_LOG.exists() else []
             cfg["configured_models"] = get_configured_models()
             self._send_json(cfg)
+        elif self.path == "/api/temp_age":
+            # Its own endpoint so the log-age chart can poll at the sampling
+            # rate without dragging the whole /api/data payload with it.
+            self._send_json(get_temp_age_series())
+
         elif self.path == "/api/price_guard":
             cfg = read_price_guard_config()
             live = _evaluate_price_guard(cfg)
@@ -2516,6 +2673,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cfg["min_stopped_min"] = max(0, float(body["min_stopped_min"]))
             write_price_guard_config(cfg)
             self._send_json(cfg)
+        elif self.path == "/api/pause":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            action = body.get("action")
+            if action == "resume":
+                ok = end_pause("resumed from dashboard")
+            elif action == "pause":
+                hours = body.get("hours")
+                ok = start_pause(float(hours) if hours else None)
+            else:
+                self.send_response(400)
+                self.end_headers()
+                return
+            self._send_json({"ok": ok, "pause": get_pause_status()})
+
         elif self.path == "/api/price_guard/action":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -2577,6 +2749,7 @@ class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 if __name__ == "__main__":
     threading.Thread(target=warmup_loop, daemon=True).start()
+    threading.Thread(target=pause_loop, daemon=True).start()
     threading.Thread(target=trust_monitor_loop, daemon=True).start()
     threading.Thread(target=fan_recovery_loop, daemon=True).start()
     threading.Thread(target=inference_duration_tracker_loop, daemon=True).start()

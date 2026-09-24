@@ -1,5 +1,15 @@
 # Changelog
 
+## v28
+
+**Pause serving.** A deliberate, time-boxed stop — 1h / 4h / 8h / 24h, or until you resume — in its own panel, because "stop renting this out for a bit" previously meant knowing that you had to switch Price Guard to Manual *first* and only then press Stop. Pressing Stop while in Auto isn't a pause at all: Auto starts back up as soon as the price drops below break-even.
+
+A pause now outranks everything else on the machine that has an opinion about whether the provider should run. Price Guard's Auto mode may still issue a stop while paused (a no-op, it's already down) but is explicitly blocked from starting back into one, and the pause doesn't touch the Price Guard mode, so whatever was configured there resumes working untouched afterwards. Darkbloom's own watchdog already leaves a CLI-issued stop alone — it only restarts on an unexpected drop (three times ever in this log, all early September), which is why the Price Guard's own auto-stop on 16 Sep held for 48 minutes untouched.
+
+**The earnings warning is the point of the panel**, and it's computed from this account's own measured rates rather than a quoted figure: *"This account earns $0.0222/h just for being online and trusted — that's 82% of its hourly income, and it does not depend on serving any requests. Actually serving adds $0.0049/h on top. A 24h pause costs roughly $0.65."* The base reward is the part that surprises people: an idle-but-connected Mac still earns it, a paused one doesn't, and it's four times the serving income per hour on this account.
+
+**Log-age chart now refreshes at the sampling rate** (~5.6s) instead of the page's general 10s cycle — a chart whose right edge is live readings should move when they do. Getting there meant not re-reading 12MB of macmon log per poll: the parsed samples are cached and only topped up from the tail of the log, while the binning (cheap) is redone against a fresh `now` on every request. It has its own `/api/temp_age` endpoint so it isn't dragging the whole `/api/data` payload along at that cadence, and `get_fan_temp()` picked up a 2s cache since it spawns a subprocess and now has three callers on three different schedules. Request time: ~40ms.
+
 ## v27
 
 **Fixed: fan recovery was oscillating 488 times a day.** The loop engaged and released on the *same* condition — `_is_running_hot()`, which requires a hot GPU **and** a fan that isn't responding. But engaging drives the fan up, which falsifies the second half of that condition immediately. So recovery let go on the very next poll and handed the fan back to a controller already proven broken; the GPU reheated, and it engaged again.
