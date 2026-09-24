@@ -1,5 +1,22 @@
 # Changelog
 
+## v30
+
+**A third, live tier on the log-age chart, collected in the browser.** The same 2s poll that already drives the live gauges now also feeds a ring buffer, spliced onto the right edge of the chart. So the newest stretch is real live readings rather than the server's coarsest-available summary, and the chart moves when the gauges do.
+
+The real gain here is **fan speed, not temperature**. macmon carries no fan RPM at all, so server-side the fan curve is 5-minute CSV rows plus a single live point — this is roughly 150× finer, and that resolution exists nowhere else on the machine. For temperature the improvement is 5.6s → 2s, which is mostly about feel: both already sample the ~30s fan oscillation comfortably.
+
+**2s is the floor, not 200ms.** The 200ms power poll carries watts only — it deliberately reuses the last fan/temp values rather than re-fetching, because those need a `darkbloom fan status` subprocess. Spawning one five times a second on a machine whose whole purpose is selling compute would be a poor trade. `/api/live_power` at 2s is the finest honest source for these two metrics.
+
+Details that matter:
+- **The tiers have an explicit handover.** Server points are kept only where the live buffer doesn't reach; without that the two overlap and the curve doubles up across the whole buffered window.
+- **The live tier is log-binned too**, the same way the server bins, so raw 2s samples don't pile into the compressed end of the axis and starve the stretched one.
+- **Redraw and fetch are decoupled.** The chart redraws at the live cadence against the cached server payload — no extra requests — while the server data is still fetched at its own ~5.6s rate. Redrawing at 2s by re-fetching would have meant 30 requests/minute for data that changes 10 times a minute.
+- **The axis floor follows the live cadence** (2s instead of 5.6s), so those samples get their own room rather than being clamped into the server's last bin. The right edge is now labelled with the actual finest resolution being sampled, mirroring the install-date label on the left, since that value rarely lands on a decade tick.
+- **Per-tab and lost on reload, by design** — it's a buffer, not a store. After a refresh the chart draws from the server's tiers and this refills as you watch.
+
+Verified live: both curves reach the plot's exact right edge (x=754 of 754), fan point count rose from 137 to 152, newest sample 1.9s old.
+
 ## v29
 
 **Fixed: a dashboard restart while holding the fan left it pinned at full speed indefinitely.** `_fan_recovery_state` lived only in memory, and the release branch only runs when the loop believes it is holding. So restarting the dashboard mid-hold reset `active` to `False` while the fan stayed in SMC manual mode — nothing ever handed it back, whatever the temperature.

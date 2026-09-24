@@ -658,6 +658,10 @@ async function refreshLivePower() {
     lastOllama = data.ollama;
     lastFanTemp = data.fan_temp;
     lastFanRecovery = data.fan_recovery;
+    recordLiveSample(data.fan_temp);
+    // Redraw at the live cadence against the cached server payload - the new
+    // sample is already in liveTier, so this costs one render and no request.
+    if (lastTempAge) renderTempAge(lastTempAge);
     // utilization is 5-min/60-min-resolution data from /api/data (10s poll), not
     // part of this endpoint - carry the last known value across so the
     // gauge doesn't flicker to "no data" between the two polling cadences.
@@ -870,9 +874,73 @@ async function refreshWarmup() {
   } catch (e) { /* silent */ }
 }
 
+// Finest tier of the log-age chart, collected in the browser from the same 2s
+// poll that drives the live gauges. Worth doing mainly for the fan: macmon
+// carries no fan RPM at all, so server-side the fan curve is 5-minute CSV rows
+// plus a single live point - this is ~150x finer, and it exists nowhere else.
+// For temperature the gain is smaller (5.6s -> 2s) and mostly about feel.
+//
+// Deliberately per-tab and lost on reload: it's a buffer, not a store. After a
+// refresh the chart draws from the server's tiers and this refills as you
+// watch. 2s is the floor because fan/temp need a `darkbloom fan status`
+// subprocess - the 200ms power poll carries watts only, by design.
+const LIVE_TIER_MAX_AGE_SEC = 1800;
+const LIVE_TIER_CADENCE_MS = LIVE_POWER_REFRESH_MS;
+let liveTier = [];
+
+function recordLiveSample(ft) {
+  if (!ft) return;
+  const t = Date.now() / 1000;
+  const temp = ft.gpu_temp_c;
+  const fan = (ft.fan_rpm && ft.fan_max_rpm)
+    ? Math.max(0, Math.min(100, (ft.fan_rpm / ft.fan_max_rpm) * 100))
+    : null;
+  if (temp == null && fan == null) return;
+  liveTier.push({ t, temp, fan });
+  const cutoff = t - LIVE_TIER_MAX_AGE_SEC;
+  if (liveTier.length > 4 && liveTier[0].t < cutoff) {
+    liveTier = liveTier.filter(p => p.t >= cutoff);
+  }
+}
+
+// Same log-spaced binning the server does, for the same reason: on a log axis
+// raw samples pile up in the compressed end and starve the stretched one.
+// Empty bins are skipped, never nulled, so the curve stays unbroken.
+function logBinAges(points, key, nowMs, frameMinMs, frameMaxMs, nbins) {
+  const lo = Math.log10(frameMinMs), hi = Math.log10(frameMaxMs);
+  if (!(hi > lo)) return [];
+  const acc = new Map();
+  for (const p of points) {
+    const v = p[key];
+    if (v == null) continue;
+    let age = nowMs - p.t * 1000;
+    if (age > frameMaxMs) continue;
+    age = Math.max(frameMinMs, age);
+    let idx = Math.floor(((Math.log10(age) - lo) / (hi - lo)) * nbins);
+    idx = Math.max(0, Math.min(nbins - 1, idx));
+    const a = acc.get(idx) || [0, 0, 0];
+    a[0] += age; a[1] += v; a[2] += 1;
+    acc.set(idx, a);
+  }
+  return [...acc.values()]
+    .map(([sa, sv, n]) => ({ age_ms: sa / n, v: sv / n }))
+    .sort((a, b) => b.age_ms - a.age_ms);
+}
+
+// Explicit handover: server points are kept only where the live tier doesn't
+// reach. Without this the two tiers overlap and the curve doubles up over the
+// whole window the buffer covers.
+function mergeTiers(serverPts, livePts) {
+  if (!livePts.length) return serverPts || [];
+  const oldestLive = livePts[0].age_ms;
+  return (serverPts || []).filter(p => p.age_ms > oldestLive).concat(livePts);
+}
+
 let tempAgeTimer = null;
+let lastTempAge = null;
 function renderTempAge(ta) {
   if (!ta) return;
+  lastTempAge = ta;
   const spanDays = ta.frame_max_ms / 86400000;
   const installTxt = ta.install_ts ? fmtTime(ta.install_ts) : '?';
   document.getElementById('temp-age-stats').textContent =
@@ -880,13 +948,27 @@ function renderTempAge(ta) {
   document.getElementById('temp-age-legend').innerHTML =
     `<span title="One continuous curve. Out to 24h it's macmon's own ~${ta.sample_interval_sec.toFixed(0)}s SMC readings; beyond that, 5-minute CSV rows. Log-binned onto the same axis so the handover isn't a break in the line."><i style="background:var(--gauge-gpu)"></i>GPU Temp</span>` +
     `<span title="Fan speed as % of max RPM, right axis. Only the 5-minute CSV has fan RPM - macmon doesn't report it - so this curve is coarser than temperature, topped up with the live reading."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
-  renderLogAgeChart('chart-temp-age', 'tooltip-temp-age', ta, {
+  // Splice the browser-side live tier onto the server's, and drop the axis
+  // floor to the live cadence so those samples get their own room instead of
+  // being clamped into the server's last bin.
+  const nowMs = Date.now();
+  const frameMin = liveTier.length ? Math.min(ta.frame_min_ms, LIVE_TIER_CADENCE_MS) : ta.frame_min_ms;
+  const merged = Object.assign({}, ta, { frame_min_ms: frameMin });
+  if (liveTier.length > 1) {
+    merged.temp = mergeTiers(ta.temp, logBinAges(liveTier, 'temp', nowMs, frameMin, ta.frame_max_ms, 90));
+    merged.fan = mergeTiers(ta.fan, logBinAges(liveTier, 'fan', nowMs, frameMin, ta.frame_max_ms, 90));
+    merged.live_tier_points = liveTier.length;
+  }
+  renderLogAgeChart('chart-temp-age', 'tooltip-temp-age', merged, {
     yDomain: [35, 105],
     hLines: [{ value: 85, label: '85\u00B0C \u2014 running hot' }],
   });
   // Re-poll at the machine's own sampling cadence rather than the page's
   // general refresh interval - a chart whose right edge is live readings
   // should move when they do, not 10s later.
+  // Fetch cadence follows the SERVER's data, not the redraw cadence - the
+  // live tier is spliced in browser-side, so redrawing faster than this needs
+  // no extra requests.
   const ms = Math.max(1000, Math.round((ta.sample_interval_sec || 5) * 1000));
   if (!tempAgeTimer || tempAgeTimer.ms !== ms) {
     if (tempAgeTimer) clearInterval(tempAgeTimer.id);
@@ -2317,6 +2399,16 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
   edgeLab.setAttribute('class', 'axis-label');
   edgeLab.textContent = frameLabel;
   svg.appendChild(edgeLab);
+
+  // The right edge is the finest resolution actually being sampled, which
+  // rarely lands on a decade tick - label it explicitly rather than leaving
+  // the newest stretch of the axis unmarked.
+  const nowLab = mk('text');
+  nowLab.setAttribute('x', w - padR); nowLab.setAttribute('y', h - 8);
+  nowLab.setAttribute('text-anchor', 'end');
+  nowLab.setAttribute('class', 'axis-label');
+  nowLab.textContent = frameMin >= 1000 ? `${(frameMin / 1000).toFixed(frameMin < 10000 ? 1 : 0)}s` : `${frameMin.toFixed(0)}ms`;
+  svg.appendChild(nowLab);
 
   for (let v = Math.ceil(yMin / 10) * 10; v <= yMax; v += 10) {
     const y = yToPixel(v);
