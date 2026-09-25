@@ -141,6 +141,7 @@
 
   svg.chart { width: 100%; height: 180px; overflow: visible; }
   svg.chart-tall { height: 200px; }
+  .decade-band { fill: var(--text-primary); opacity: 0.035; }
   .handover-line { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.5; }
   .gridline { stroke: var(--border); stroke-width: 1; }
   .axis-label { fill: var(--text-muted); font-size: 10px; }
@@ -2413,10 +2414,43 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
 
   const mk = (tag) => document.createElementNS('http://www.w3.org/2000/svg', tag);
 
+  // --- decade banding, drawn first so everything sits on top ---
+  // The one thing a reader must grasp here is that equal width is NOT equal
+  // time: near the right edge a centimetre is seconds, near the left it's
+  // weeks. Alternate decades are shaded to make that structural instead of
+  // something to infer from tick labels - same idea as log graph paper.
+  //
+  // Banded on true powers of ten, NOT on the AGE_GRID ticks. Those are chosen
+  // to be human-readable (1h, 6h, 1d, 1w) and are deliberately not uniform
+  // steps - 1h->6h is x6, 1d->1w is x7 - so banding them would produce
+  // unequal bands, disproving the very thing the banding is there to show.
+  // Every interior band below is exactly one factor of ten, and therefore
+  // exactly the same width.
+  const decades = [];
+  for (let e = Math.ceil(Math.log10(frameMin)); Math.pow(10, e) < frameMax; e++) {
+    decades.push(Math.pow(10, e));
+  }
+  const bandEdges = [frameMin, ...decades, frameMax];
+  for (let i = 0; i < bandEdges.length - 1; i += 2) {
+    const x1 = xForAge(bandEdges[i + 1]), x2 = xForAge(bandEdges[i]);
+    const r = mk('rect');
+    r.setAttribute('x', Math.min(x1, x2));
+    r.setAttribute('y', padT);
+    r.setAttribute('width', Math.abs(x2 - x1));
+    r.setAttribute('height', innerH);
+    r.setAttribute('class', 'decade-band');
+    svg.appendChild(r);
+  }
+
   // --- grid: decade verticals + 10°C horizontals ---
+  // The left edge carries a long label ("27d since install"); skip any tick
+  // that would overlap it rather than letting the two render on top of
+  // each other.
+  const EDGE_LABEL_PX = 86;
   AGE_GRID.forEach(g => {
     if (g.ms < frameMin || g.ms > frameMax) return;
     const x = xForAge(g.ms);
+    if (x < padL + EDGE_LABEL_PX) return;
     const line = mk('line');
     line.setAttribute('x1', x); line.setAttribute('x2', x);
     line.setAttribute('y1', padT); line.setAttribute('y2', padT + innerH);

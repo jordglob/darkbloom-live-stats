@@ -1,5 +1,13 @@
 # Changelog
 
+## v34
+
+**Decade banding on the log-age chart.** Alternate decades now carry a faint background tint. The one thing a reader has to grasp about this chart is that equal width is *not* equal time — near the right edge a centimetre is seconds, near the left it's weeks — and shading alternate decades makes that structural rather than something to infer from the tick labels. Same convention as log graph paper.
+
+**Banded on true powers of ten, not on the tick labels.** The first attempt banded between adjacent `AGE_GRID` entries, which was wrong: those ticks are chosen to be human-readable (1h, 6h, 1d, 1w) and are deliberately *not* uniform steps — 1h→6h is ×6, 1d→7d is ×7. Banding them produced visibly unequal bands, which disproves the exact thing the banding exists to demonstrate. Now every interior band is one factor of ten and therefore identical in width: verified against the axis geometry at **126.1 px per decade across all five**.
+
+Also fixes a label collision the banding made obvious: the long left-edge label ("27d since install") was rendering on top of the neighbouring `1w` tick. Ticks falling within the edge label's width are now skipped.
+
 ## v33
 
 Three fixes to the load-test control:
