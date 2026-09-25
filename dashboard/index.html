@@ -373,6 +373,13 @@
   <div class="panel">
     <h2 title="Same GPU temperature, on a logarithmic AGE axis: 'now' is the right edge and each vertical gridline is a step further into the past. Fed by two resolutions - macmon's ~5s readings for the last hour, then 5-minute CSV buckets beyond that - so zooming toward now shows real samples rather than one bucket average stretched wide.">GPU Temp &amp; Fan — log age <span id="temp-age-stats" class="gauge-time"></span></h2>
     <div class="legend" id="temp-age-legend"></div>
+    <div class="warmup-row" style="margin-bottom:4px">
+      <span class="warmup-status" style="margin:0" title="Synthetic CPU + GPU load, so you can watch the fan respond to real heat instead of waiting for paid traffic to produce it. Drag it up and watch the curves move.">Load test:</span>
+      <input type="range" id="max-power-slider" min="0" max="100" step="5" value="0" style="flex:1;max-width:260px">
+      <span class="warmup-status" style="margin:0;min-width:3.5em"><strong id="max-power-value">0%</strong></span>
+      <span class="warmup-status" style="margin:0;font-size:12px;color:var(--text-muted)" id="max-power-cadence" title="Sampling and redraw rate. Rises with the load, because watching the fan respond is the whole reason to turn the load up.">sampling 2.0s</span>
+      <span id="max-power-warning" class="warmup-status" style="margin:0;font-size:12px;color:var(--status-serious)"></span>
+    </div>
     <div class="chart-wrap">
       <svg class="chart chart-tall" id="chart-temp-age"></svg>
       <div class="tooltip" id="tooltip-temp-age"></div>
@@ -477,12 +484,12 @@ let lastUtilization = null;
 let lastRam = null;
 let lastOllama = null;
 let lastFanTemp = null;
+let lastLivePower = null;
+let lastPriceUsdPerKwh = null;
 let lastFanRecovery = null;
 let lastPowerMethod = null;
 let lastPriceGuard = null;
 let lastAccount = null;
-let lastPause = null;
-let lastMaxPower = null;
 let lastConfiguredModels = [];
 let chatMessages = [];
 let chatModel = null;
@@ -653,6 +660,7 @@ async function refreshLivePower() {
     lastRam = data.ram;
     lastOllama = data.ollama;
     lastFanTemp = data.fan_temp;
+    lastLivePower = data;
     lastFanRecovery = data.fan_recovery;
     recordLiveSample(data.fan_temp);
     // Redraw at the live cadence against the cached server payload - the new
@@ -881,7 +889,28 @@ async function refreshWarmup() {
 // watch. 2s is the floor because fan/temp need a `darkbloom fan status`
 // subprocess - the 200ms power poll carries watts only, by design.
 const LIVE_TIER_MAX_AGE_SEC = 1800;
-const LIVE_TIER_CADENCE_MS = LIVE_POWER_REFRESH_MS;
+// Sampling follows the load slider. The point of dragging it up is to watch
+// the fan respond, so that's exactly when you want maximum temporal
+// resolution - and the extra polling cost is acceptable precisely because
+// it's temporary and tied to a deliberate experiment. The chart's axis floor
+// follows it too, so the view zooms into finer time as you crank the load.
+const LIVE_CADENCE_IDLE_MS = LIVE_POWER_REFRESH_MS;   // 2000
+const LIVE_CADENCE_FULL_MS = 400;
+let LIVE_TIER_CADENCE_MS = LIVE_CADENCE_IDLE_MS;
+let livePowerTimer = null;
+
+function cadenceForLevel(level) {
+  const f = Math.max(0, Math.min(100, level)) / 100;
+  return Math.round(LIVE_CADENCE_IDLE_MS + (LIVE_CADENCE_FULL_MS - LIVE_CADENCE_IDLE_MS) * f);
+}
+
+function applyLiveCadence(level) {
+  const ms = cadenceForLevel(level);
+  if (ms === LIVE_TIER_CADENCE_MS && livePowerTimer) return;
+  LIVE_TIER_CADENCE_MS = ms;
+  if (livePowerTimer) clearInterval(livePowerTimer);
+  livePowerTimer = setInterval(refreshLivePower, ms);
+}
 let liveTier = [];
 
 function recordLiveSample(ft) {
@@ -932,6 +961,49 @@ function mergeTiers(serverPts, livePts) {
   return (serverPts || []).filter(p => p.age_ms > oldestLive).concat(livePts);
 }
 
+// Synthetic load control. The warning is deliberately blunt and quantified:
+// this burns electricity on work nobody is paying for, and it shares the GPU
+// with whatever real inference is running. Worth saying in watts and dollars
+// rather than as a vague caution.
+let maxPowerLevel = 0;
+
+function maxPowerWarningHtml(level) {
+  if (level <= 0) return '';
+  const p = (lastLivePower && lastLivePower.power) || null;
+  const idleW = 7;
+  const fullW = 112;   // measured on this Mac at 100% CPU+GPU
+  const estW = idleW + (fullW - idleW) * (level / 100);
+  const extraKw = Math.max(0, estW - idleW) / 1000;
+  const usdPerKwh = lastPriceUsdPerKwh;
+  const costTxt = usdPerKwh
+    ? ` ≈ <strong>$${(extraKw * usdPerKwh).toFixed(3)}/h</strong> in electricity`
+    : '';
+  return `⚠ Burning ~<strong>${estW.toFixed(0)}W</strong> on work nobody is renting${costTxt} — it earns nothing, ` +
+    `and it competes with real paid inference on the same GPU.`;
+}
+
+function renderMaxPower(level) {
+  maxPowerLevel = level;
+  applyLiveCadence(level);
+  const v = document.getElementById('max-power-value');
+  const w = document.getElementById('max-power-warning');
+  const sl = document.getElementById('max-power-slider');
+  if (v) v.textContent = `${Math.round(level)}%`;
+  const c = document.getElementById('max-power-cadence');
+  if (c) c.textContent = `sampling ${(cadenceForLevel(level) / 1000).toFixed(1)}s`;
+  if (w) w.innerHTML = maxPowerWarningHtml(level);
+  if (sl && document.activeElement !== sl) sl.value = level;
+}
+
+async function postMaxPower(level) {
+  renderMaxPower(level);
+  try {
+    const res = await fetch('/api/max_power', { method: 'POST', body: JSON.stringify({ level }) });
+    const out = await res.json();
+    renderMaxPower((out.max_power && out.max_power.level) || 0);
+  } catch (e) { /* silent */ }
+}
+
 let tempAgeTimer = null;
 let lastTempAge = null;
 function renderTempAge(ta) {
@@ -979,93 +1051,9 @@ async function refreshTempAge() {
   } catch (e) { /* silent */ }
 }
 
-function pauseControlsHtml(pause, account) {
-  const hr = (account && account.hourly_rate_comparison) || null;
-  const floorRate = hr && hr.floor_rate_per_hour_usd;
-  const activeRate = hr && hr.active_rate_per_hour_usd;
 
-  // Built from this account's own measured rates, not a quoted figure. The
-  // base reward is the part people don't expect to lose: an idle-but-connected
-  // Mac still earns it, a paused one doesn't.
-  let warn = 'Pausing stops all earnings, including the base reward paid just for being online.';
-  if (floorRate != null && activeRate != null) {
-    const total = floorRate + activeRate;
-    const share = total > 0 ? (floorRate / total) * 100 : 0;
-    warn = `Pausing gives up the base reward too — <strong>$${floorRate.toFixed(4)}/h</strong> just for being online ` +
-      `(${share.toFixed(0)}% of hourly income, and it doesn't depend on serving). A 24h pause ≈ <strong>$${(total * 24).toFixed(2)}</strong>.`;
-  }
 
-  const mp = lastMaxPower;
-  if (mp && mp.running) {
-    const l = mp.remaining_sec;
-    return `
-      <div class="warmup-row">
-        <span class="warmup-status" style="margin:0"><strong style="color:var(--status-serious)">Max power running</strong> — CPU + GPU saturated, ${Math.max(0, Math.round(l))}s left.</span>
-        <button class="copy-cmd-btn" id="max-power-stop-btn">Stop</button>
-      </div>
-      <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">Competing with real paid inference on the same GPU while this runs. Neural Engine not loaded (needs a compiled CoreML model — not installed here); audio untouched.</div>`;
-  }
 
-  if (pause && pause.active) {
-    const left = pause.remaining_sec;
-    const leftTxt = pause.indefinite
-      ? 'until you resume'
-      : `resumes in ${left > 3600 ? (left / 3600).toFixed(1) + ' h' : Math.max(0, Math.round(left / 60)) + ' min'}`;
-    return `
-      <div class="warmup-row">
-        <span class="warmup-status" style="margin:0"><strong style="color:var(--status-warning)">Paused</strong> — ${leftTxt}.</span>
-        <button class="copy-cmd-btn" id="pause-resume-btn">Resume</button>
-      </div>
-      <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${warn}</div>`;
-  }
-
-  return `
-    <div class="warmup-row">
-      <span class="warmup-status" style="margin:0">Serving:</span>
-      <select id="pause-hours" title="How long to stop serving for. Uses darkbloom's own stop command, so it counts as a clean intentional disconnect and doesn't affect hardware trust.">
-        <option value="1">1 h</option>
-        <option value="4">4 h</option>
-        <option value="8">8 h</option>
-        <option value="24">24 h</option>
-        <option value="">until I resume</option>
-      </select>
-      <button class="copy-cmd-btn" id="pause-btn">Pause</button>
-      <button class="copy-cmd-btn" id="max-power-btn" title="Saturates every CPU core and the GPU (via MLX/Metal) for 5 minutes, so you can watch how temperature and the fan actually behave under real heat. The Neural Engine is NOT loaded - that needs a compiled CoreML model and neither coremltools nor Xcode is installed here, and faking it would be worse than leaving it out. Audio is never touched. Note: this competes with real paid inference on the same GPU.">Max power (5 min)</button>
-    </div>
-    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${warn}</div>`;
-}
-
-function wirePauseControls() {
-  const resume = document.getElementById('pause-resume-btn');
-  if (resume) resume.addEventListener('click', () => postPause({ action: 'resume' }));
-  const pauseBtn = document.getElementById('pause-btn');
-  if (pauseBtn) pauseBtn.addEventListener('click', () => {
-    const v = document.getElementById('pause-hours').value;
-    postPause({ action: 'pause', hours: v ? parseFloat(v) : null });
-  });
-  const maxBtn = document.getElementById('max-power-btn');
-  if (maxBtn) maxBtn.addEventListener('click', () => postMaxPower({ seconds: 300 }));
-  const maxStop = document.getElementById('max-power-stop-btn');
-  if (maxStop) maxStop.addEventListener('click', () => postMaxPower({ action: 'stop' }));
-}
-
-async function postMaxPower(body) {
-  try {
-    const res = await fetch('/api/max_power', { method: 'POST', body: JSON.stringify(body) });
-    lastMaxPower = (await res.json()).max_power;
-    refreshPriceGuard();
-  } catch (e) { /* silent */ }
-}
-
-async function postPause(body) {
-  try {
-    const res = await fetch('/api/pause', { method: 'POST', body: JSON.stringify(body) });
-    const out = await res.json();
-    lastPause = out.pause;
-    refreshPriceGuard();
-    refresh();
-  } catch (e) { /* silent */ }
-}
 
 function renderPriceGuard(pg) {
   const el = document.getElementById('price-guard');
@@ -1074,64 +1062,89 @@ function renderPriceGuard(pg) {
   const live = pg.live;
   const daemonRunning = pg.daemon_running;
   const lastActionAge = pg.last_action_at ? fmtAgeShort(Date.now() / 1000 - pg.last_action_at) : null;
-
   const cur = (live && live.currency) || '';
+
+  // Three states, because that's all there actually is: let price decide, keep
+  // it running, or keep it stopped. The old UI split this across a mode pair
+  // plus separate Start/Stop buttons, which made "Manual" read like a state of
+  // its own when it only ever meant "nothing automatic touches this".
+  const sel = pg.mode === 'auto' ? 'auto' : (daemonRunning ? 'manual-start' : 'manual-stop');
+
   const priceLine = live
     ? `<span title="Break-even comes from the measured $${live.active_rate_per_hour_usd.toFixed(4)}/hr active pay rate and ${(live.total_power_w || 0).toFixed(0)}W current draw.">Now <strong>${live.price_per_kwh.toFixed(3)} ${cur}/kWh</strong>, break-even <strong>${live.break_even_per_kwh.toFixed(3)}</strong> — ${live.reason}</span>`
     : 'Not enough data yet - needs at least one real served request and a live electricity price reading.';
-  const explainLine = `<span title="Break-even = the electricity price at which an hour of serving costs exactly what it earns, from this Mac's own measured pay rate and power draw. Only serving income is counted - not the base reward for being online - so it's deliberately cautious. Margin: how far past break-even before acting. Min running / Min stopped: how long to wait between actions so it doesn't flip back and forth. Auto uses the real darkbloom start/stop commands, so the network sees a clean disconnect."><strong>Manual</strong> just shows the numbers. <strong>Auto</strong> pauses the provider when electricity costs more than serving earns, and resumes when it doesn't. <span style="opacity:.6">(hover for details)</span></span>`;
 
   const sourceTag = pg.last_action_source ? ` <span style="color:var(--text-muted)">(${pg.last_action_source})</span>` : '';
   const lastActionLine = pg.last_action
     ? `Last action: <strong>${pg.last_action}</strong>${sourceTag}${lastActionAge ? ' ' + lastActionAge : ''} — ${pg.last_reason || ''}`
     : 'No action taken yet.';
 
-  el.innerHTML = `
-    <div class="warmup-row">
-      <label class="warmup-toggle" style="font-weight:400" title="Nothing here starts or stops the provider on its own - you use the Start now / Stop now buttons below. If price previously stopped it, it STAYS stopped until you click Start.">
-        <input type="radio" name="price-guard-mode" value="manual" ${pg.mode === 'manual' ? 'checked' : ''}> Manual (you use Start/Stop)
-      </label>
-      <label class="warmup-toggle" style="font-weight:400" title="Stops the provider when price is above break-even, and resumes it automatically once price drops back below - no clicking needed either way.">
-        <input type="radio" name="price-guard-mode" value="auto" ${pg.mode === 'auto' ? 'checked' : ''}> Auto (pauses & resumes with price)
-      </label>
-      <span class="warmup-status" style="margin:0">Provider: ${daemonRunning ? '<span style="color:var(--status-good)">running</span>' : '<span style="color:var(--status-warning)">stopped</span>'}</span>
-    </div>
+  // Only meaningful when price is actually allowed to act.
+  const autoTuning = sel === 'auto' ? `
     <div class="warmup-row">
       <span class="warmup-interval" title="Only stop when price is this far above break-even, and only resume when this far below - prevents flapping right at the edge">Margin <input type="number" id="pg-margin-input" min="0" step="1" value="${pg.margin_pct}"> %</span>
       <span class="warmup-interval" title="Minimum time the daemon must have been running before Auto is allowed to stop it again">Min running <input type="number" id="pg-min-running-input" min="0" step="5" value="${pg.min_running_min}"> min</span>
       <span class="warmup-interval" title="Minimum time the daemon must have been stopped before Auto is allowed to start it again">Min stopped <input type="number" id="pg-min-stopped-input" min="0" step="5" value="${pg.min_stopped_min}"> min</span>
+    </div>` : '';
+
+  const stoppedWarning = sel === 'manual-stop' ? `
+    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${earningsWarningHtml(lastAccount)}</div>` : '';
+
+  el.innerHTML = `
+    <div class="warmup-row">
+      <label class="warmup-toggle" style="font-weight:400" title="Price decides: stops the provider when electricity costs more than serving earns, and resumes it once price drops back below. No clicking needed either way.">
+        <input type="radio" name="pg-state" value="auto" ${sel === 'auto' ? 'checked' : ''}> Auto <span style="opacity:.6">(price decides)</span>
+      </label>
+      <label class="warmup-toggle" style="font-weight:400" title="Keep serving, whatever electricity costs. Nothing automatic will stop it.">
+        <input type="radio" name="pg-state" value="manual-start" ${sel === 'manual-start' ? 'checked' : ''}> Manual — start
+      </label>
+      <label class="warmup-toggle" style="font-weight:400" title="Stop serving and stay stopped. This is how you pause: nothing automatic will start it again, and darkbloom's own stop command is used so the coordinator sees a clean intentional disconnect - hardware trust is unaffected.">
+        <input type="radio" name="pg-state" value="manual-stop" ${sel === 'manual-stop' ? 'checked' : ''}> Manual — stop
+      </label>
+      <span class="warmup-status" style="margin:0">Provider: ${daemonRunning ? '<span style="color:var(--status-good)">running</span>' : '<span style="color:var(--status-warning)">stopped</span>'}</span>
     </div>
-    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${explainLine}</div>
+    ${autoTuning}
+    ${stoppedWarning}
     <div class="warmup-status">${priceLine}</div>
     <div class="warmup-status">${lastActionLine}</div>
-    ${pg.mode === 'manual' ? `
-    <div class="warmup-row">
-      <button class="copy-cmd-btn" id="pg-start-btn" ${daemonRunning ? 'disabled' : ''}>Start now</button>
-      <button class="copy-cmd-btn" id="pg-stop-btn" ${!daemonRunning ? 'disabled' : ''}>Stop now</button>
-    </div>` : ''}
-    ${pauseControlsHtml(lastPause, lastAccount)}
     ${pg.log_tail && pg.log_tail.length ? `<div class="warmup-log">${[...pg.log_tail].reverse().join('<br>')}</div>` : ''}
   `;
 
-  document.querySelectorAll('input[name="price-guard-mode"]').forEach(r => {
-    r.addEventListener('change', (e) => {
-      if (e.target.checked) postPriceGuardConfig({ mode: e.target.value });
+  document.querySelectorAll('input[name="pg-state"]').forEach(r => {
+    r.addEventListener('change', async (e) => {
+      if (!e.target.checked) return;
+      const v = e.target.value;
+      if (v === 'auto') {
+        await postPriceGuardConfig({ mode: 'auto' });
+      } else {
+        await postPriceGuardConfig({ mode: 'manual' });
+        await postPriceGuardAction(v === 'manual-start' ? 'start' : 'stop');
+      }
     });
   });
-  document.getElementById('pg-margin-input').addEventListener('change', (e) => {
-    postPriceGuardConfig({ margin_pct: parseFloat(e.target.value) || 0 });
-  });
-  document.getElementById('pg-min-running-input').addEventListener('change', (e) => {
-    postPriceGuardConfig({ min_running_min: parseFloat(e.target.value) || 0 });
-  });
-  document.getElementById('pg-min-stopped-input').addEventListener('change', (e) => {
-    postPriceGuardConfig({ min_stopped_min: parseFloat(e.target.value) || 0 });
-  });
-  const startBtn = document.getElementById('pg-start-btn');
-  const stopBtn = document.getElementById('pg-stop-btn');
-  if (startBtn) startBtn.addEventListener('click', () => postPriceGuardAction('start'));
-  if (stopBtn) stopBtn.addEventListener('click', () => postPriceGuardAction('stop'));
-  wirePauseControls();
+  const bind = (id, key) => {
+    const elx = document.getElementById(id);
+    if (elx) elx.addEventListener('change', (e) => postPriceGuardConfig({ [key]: parseFloat(e.target.value) || 0 }));
+  };
+  bind('pg-margin-input', 'margin_pct');
+  bind('pg-min-running-input', 'min_running_min');
+  bind('pg-min-stopped-input', 'min_stopped_min');
+}
+
+// Built from this account's own measured rates, not a quoted figure. The base
+// reward is the part people don't expect to lose: an idle-but-connected Mac
+// still earns it, a stopped one doesn't.
+function earningsWarningHtml(account) {
+  const hr = (account && account.hourly_rate_comparison) || null;
+  const floorRate = hr && hr.floor_rate_per_hour_usd;
+  const activeRate = hr && hr.active_rate_per_hour_usd;
+  if (floorRate == null || activeRate == null) {
+    return 'Stopped: no earnings, including the base reward paid just for being online.';
+  }
+  const total = floorRate + activeRate;
+  const share = total > 0 ? (floorRate / total) * 100 : 0;
+  return `Stopped means giving up the base reward too — <strong>$${floorRate.toFixed(4)}/h</strong> just for being online ` +
+    `(${share.toFixed(0)}% of hourly income, and it doesn't depend on serving). A day stopped ≈ <strong>$${(total * 24).toFixed(2)}</strong>.`;
 }
 
 async function postPriceGuardConfig(body) {
@@ -1848,16 +1861,7 @@ function renderBanners(status, energy, doctor, daemonState) {
     banners.push(banner('warning', status.last_error));
   }
 
-  // A user pause takes priority over the price-guard banner below: both would
-  // otherwise fire for the same stopped provider, and only one of them is the
-  // reason the user is actually looking for.
-  if (lastPause && lastPause.active) {
-    const left = lastPause.remaining_sec;
-    const leftTxt = lastPause.indefinite
-      ? 'It stays paused until you resume it.'
-      : `Resumes automatically in ${left > 3600 ? (left / 3600).toFixed(1) + ' h' : Math.max(0, Math.round(left / 60)) + ' min'}.`;
-    banners.push(banner('warning', `<strong>Serving is paused.</strong> ${leftTxt} No earnings while paused — including the base reward for being online. <a href="#" onclick="postPause({action:'resume'}); return false;">Resume now</a>`));
-  } else if (lastPriceGuard && !lastPriceGuard.daemon_running && lastPriceGuard.last_action === 'stop' && lastPriceGuard.last_action_source === 'auto') {
+  if (lastPriceGuard && !lastPriceGuard.daemon_running && lastPriceGuard.last_action === 'stop' && lastPriceGuard.last_action_source === 'auto') {
     // An intentional, price-driven pause looks identical to a real outage in
     // every other status on this page ("Provider: Not running"). This used to
     // only fire while still in Auto mode - so switching to Manual right after
@@ -2411,9 +2415,12 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
     label.textContent = g.label;
     svg.appendChild(label);
   });
-  const frameLabel = frameMax >= 86400000
+  // The oldest point isn't an arbitrary window edge - it's the first row ever
+  // logged, so say so rather than leaving a bare duration to interpret.
+  const frameAge = frameMax >= 86400000
     ? `${(frameMax / 86400000).toFixed(0)}d`
     : `${(frameMax / 3600000).toFixed(0)}h`;
+  const frameLabel = `${frameAge} · install`;
   const edgeLab = mk('text');
   edgeLab.setAttribute('x', padL); edgeLab.setAttribute('y', h - 8);
   edgeLab.setAttribute('text-anchor', 'start');
@@ -2614,10 +2621,14 @@ async function refresh() {
     const data = await res.json();
     const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations, price_48h } = data;
     lastUtilization = utilization || null;
+    const nowPrice = (price_48h && price_48h.prices || []).filter(x => x.usd_per_kwh != null);
+    if (nowPrice.length) {
+      const t = Date.now();
+      const cur = nowPrice.find(x => new Date(x.time_start).getTime() <= t && new Date(x.time_end).getTime() > t);
+      if (cur) lastPriceUsdPerKwh = cur.usd_per_kwh;
+    }
     lastAccount = account || null;
-    lastPause = data.pause || null;
-    lastMaxPower = data.max_power || null;
-    if (lastPriceGuard) renderPriceGuard(lastPriceGuard);
+    if (data.max_power) renderMaxPower(data.max_power.level || 0);
 
     renderCards(status, energy, account, daemon_state);
     renderBanners(status, energy, doctor, daemon_state);
@@ -2731,6 +2742,14 @@ initGauges();
 refresh();
 refreshLivePower();
 refreshTempAge();
+(() => {
+  const sl = document.getElementById('max-power-slider');
+  if (!sl) return;
+  // input = live feedback while dragging; change = commit to the server, so a
+  // drag across the range doesn't fire a request per step.
+  sl.addEventListener('input', () => renderMaxPower(parseFloat(sl.value)));
+  sl.addEventListener('change', () => postMaxPower(parseFloat(sl.value)));
+})();
 refreshPowerFast();
 refreshWarmup();
 refreshPriceGuard();
@@ -2738,7 +2757,7 @@ renderChat();
 refreshServingPulse();
 setInterval(refreshServingPulse, 1000);
 setInterval(refresh, REFRESH_MS);
-setInterval(refreshLivePower, LIVE_POWER_REFRESH_MS);
+applyLiveCadence(0);
 setInterval(refreshPowerFast, POWER_FAST_REFRESH_MS);
 setInterval(refreshWarmup, 15000);
 setInterval(refreshPriceGuard, 15000);

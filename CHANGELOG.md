@@ -1,5 +1,32 @@
 # Changelog
 
+## v32
+
+**Price Guard reduced to the three states it actually has.** The old UI split one decision across a mode pair (Manual/Auto) plus separate Start/Stop buttons plus, briefly, a pause panel of its own. That made "Manual" read like a state when it only ever meant "nothing automatic touches this". Now:
+
+- **Auto** — price decides: stops when electricity costs more than serving earns, resumes when it doesn't.
+- **Manual — start** — keep serving, whatever it costs.
+- **Manual — stop** — stop and stay stopped.
+
+The margin / min-running / min-stopped tuning only appears under Auto, since that's the only mode where it does anything.
+
+**The pause feature is gone, and that's the simplification.** "Manual — stop" already is a pause: `price_guard_loop` only acts in Auto mode, so a manual stop is inherently sticky, and Darkbloom's watchdog leaves a CLI-issued stop alone. The separate `pause.json`, `pause_loop`, `/api/pause` and pause banner were all re-implementing something the mode switch gave for free. Deleted. The earnings warning survives, shown under "Manual — stop", still computed from this account's own measured base-reward and serving rates.
+
+**Max power became a 0–100% slider, and moved onto the log-age chart** — where you can watch the result. `max-power.py` replaces the shell version: each worker duty-cycles inside a fixed window (busy for level% of it, asleep for the rest), which gives a smooth range instead of the coarse steps you'd get from varying worker count. The level lives in a file the workers re-read, so dragging the slider steers a running load without restarting anything, and the worker exits on its own when it reads 0.
+
+Measured on this Mac:
+
+| Slider | Power | GPU | GPU temp | Fan |
+|---|---|---|---|---|
+| 60% | 54.8W | 35% | 56.8°C | 2202 rpm (45%) |
+| 100% | 86.9W | 93% | 77.4°C | 4286 rpm (87%) |
+
+**Moving the slider also raises the sampling rate** — 2.0s at idle down to 0.4s at full load, with `get_fan_temp()`'s cache dropping from 2s to 0.35s to match (otherwise a faster client poll just re-reads a stale value), and the chart's axis floor following, so the view zooms into finer time as the load goes up. Watching the fan respond is the entire reason to turn the load up, so that's exactly when the resolution should be highest — and the extra polling cost is acceptable precisely because it's temporary and tied to a deliberate experiment.
+
+**The slider warns, in watts and dollars**, whenever it's above zero: this burns power on work nobody is renting, earns nothing, and shares the GPU with real paid inference.
+
+The log-age chart's left edge now reads "27d · install" rather than a bare duration, since that point is the first row ever logged rather than an arbitrary window edge.
+
 ## v31
 
 **The fan now follows temperature.** This was the point of the whole exercise, and it wasn't fixed by v27 — that fix stopped the *oscillation*, but recovery still only engaged at 85°C. Below that the fan sat flat at its 1000rpm floor no matter how warm the GPU got, then slammed to 100%. Caught live: **GPU 75.3°C with the fan at 1000rpm, target 1000, "auto"** — while Darkbloom's own stated policy is "80.0% at 45.0 C".

@@ -318,6 +318,11 @@ FAN_SERVICE_RE = re.compile(r"^Service:\s*(\S+)", re.MULTILINE)
 _fan_temp_cache = {"data": None, "at": 0.0}
 _fan_temp_lock = threading.Lock()
 FAN_TEMP_CACHE_SEC = 2
+FAN_TEMP_CACHE_SEC_LOADED = 0.35
+# Adaptive: while a load test is running the whole point is to watch the fan
+# respond, so the cache has to get out of the way - otherwise a faster client
+# poll just re-reads the same stale value. Set by set_max_power_level().
+_fan_temp_cache_sec = FAN_TEMP_CACHE_SEC
 
 
 def get_fan_temp():
@@ -333,7 +338,7 @@ def get_fan_temp():
     so no caller sees a reading it would have read differently."""
     now = time.time()
     with _fan_temp_lock:
-        if _fan_temp_cache["data"] is not None and now - _fan_temp_cache["at"] < FAN_TEMP_CACHE_SEC:
+        if _fan_temp_cache["data"] is not None and now - _fan_temp_cache["at"] < _fan_temp_cache_sec:
             return _fan_temp_cache["data"]
     try:
         out = subprocess.run(
@@ -883,13 +888,6 @@ def price_guard_loop():
                 cfg["last_evaluated_at"] = time.time()
                 cfg["last_price_per_kwh"] = decision["price_per_kwh"]
                 cfg["last_break_even_per_kwh"] = decision["break_even_per_kwh"]
-                # A user pause outranks Auto. Auto may still issue a stop while
-                # paused (a harmless no-op, the daemon is already down), but it
-                # must never start back into a deliberate pause.
-                paused = read_pause_config().get("active")
-                if decision["action"] == "start" and paused:
-                    decision["action"] = None
-                    decision["reason"] = "would start, but serving is paused"
                 if decision["action"] and cfg.get("mode") == "auto":
                     ok = _apply_price_guard_action(decision["action"], decision["reason"])
                     if ok:
@@ -1265,108 +1263,85 @@ def fan_recovery_loop():
 
 
 # ---------------------------------------------------------------------------
-# Pause serving
+# Max power
 #
-# A deliberate, time-boxed stop that survives everything else on this machine
-# that has an opinion about whether the provider should be running: Price
-# Guard's Auto mode won't start back into it, and it doesn't touch the Price
-# Guard mode itself, so whatever was configured there resumes working
-# untouched once the pause ends. Darkbloom's own watchdog already leaves a
-# CLI-issued stop alone (it only restarts on an unexpected drop), so nothing
-# further is needed to make it stick.
+# A deliberate synthetic load used to watch how temperature and the fan behave
+# under real heat, rather than waiting for paid traffic to happen to produce
+# it. Steerable 0-100 while running: the level lives in a file the worker
+# re-reads, so a slider moves the load without restarting anything.
+#
+# This burns electricity and earns nothing - it is not serving. It also
+# competes with real paid inference on the same GPU. Hence: bounded, stoppable,
+# and off by default.
 # ---------------------------------------------------------------------------
-PAUSE_CONFIG = HOME / ".darkbloom" / "pause.json"
-PAUSE_POLL_SEC = 20
-
-
-def read_pause_config():
-    try:
-        if PAUSE_CONFIG.exists():
-            d = json.loads(PAUSE_CONFIG.read_text())
-            if isinstance(d, dict):
-                return d
-    except Exception:
-        pass
-    return {"active": False, "until": None, "started_at": None}
-
-
-def write_pause_config(cfg):
-    PAUSE_CONFIG.write_text(json.dumps(cfg))
-
-
-def get_pause_status():
-    cfg = read_pause_config()
-    if not cfg.get("active"):
-        return {"active": False}
-    until = cfg.get("until")
-    return {
-        "active": True,
-        "until": until,
-        "indefinite": until is None,
-        "started_at": cfg.get("started_at"),
-        "remaining_sec": max(0, until - time.time()) if until else None,
-    }
-
-
-def start_pause(hours=None):
-    """Stops serving now. hours=None pauses until explicitly resumed."""
-    until = (time.time() + float(hours) * 3600) if hours else None
-    label = f"{float(hours):g}h" if hours else "until resumed"
-    ok = _apply_price_guard_action("stop", f"paused from dashboard ({label})")
-    if ok:
-        write_pause_config({"active": True, "until": until, "started_at": time.time()})
-        log_price_guard(f"PAUSED: serving paused ({label})")
-    return ok
-
-
-def end_pause(reason):
-    ok = _apply_price_guard_action("start", reason)
-    write_pause_config({"active": False, "until": None, "started_at": None})
-    log_price_guard(f"PAUSE ENDED: {reason}")
-    return ok
-
-
-MAX_POWER_SCRIPT = HOME / ".darkbloom" / "max-power.sh"
-MAX_POWER_DEFAULT_SEC = 300
+MAX_POWER_SCRIPT = HOME / ".darkbloom" / "max-power.py"
+MAX_POWER_LEVEL_FILE = HOME / ".darkbloom" / "max-power-level"
 MAX_POWER_MAX_SEC = 1800
-_max_power = {"proc": None, "started_at": None, "until": None}
+MAX_POWER_PYTHONS = ["/opt/homebrew/bin/python3", sys.executable, "/usr/bin/python3"]
+_max_power = {"proc": None, "level": 0.0, "started_at": None}
 _max_power_lock = threading.Lock()
+
+
+def _max_power_python():
+    """Prefer an interpreter that can import MLX - without it the GPU can't be
+    loaded at all and this degrades to CPU only."""
+    for py in MAX_POWER_PYTHONS:
+        if not py or not os.path.exists(py):
+            continue
+        try:
+            r = subprocess.run([py, "-c", "import mlx.core"], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                return py
+        except Exception:
+            continue
+    return sys.executable
 
 
 def get_max_power_status():
     with _max_power_lock:
-        proc, until = _max_power["proc"], _max_power["until"]
+        proc = _max_power["proc"]
         running = bool(proc and proc.poll() is None)
         if not running and proc is not None:
             _max_power["proc"] = None
             _max_power["started_at"] = None
-            _max_power["until"] = None
+            _max_power["level"] = 0.0
+        level = _max_power["level"] if running else 0.0
     return {
         "available": MAX_POWER_SCRIPT.exists(),
         "running": running,
-        "remaining_sec": max(0, until - time.time()) if (running and until) else None,
+        "level": round(level, 1),
     }
 
 
-def start_max_power(seconds=None):
-    """Saturates CPU and GPU for a bounded time, so thermal and fan behaviour
-    can be watched under real heat instead of waiting for paid traffic to
-    happen to produce it - this is what validates a fan-control change.
-
-    Runs in its own process group so the whole tree dies on one signal. Time
-    boxed on purpose: it competes with real paid inference on the same GPU, so
-    it is something you turn on knowingly, not a mode you leave running. The
-    Neural Engine is not loaded (that needs a compiled CoreML model, and
-    neither coremltools nor Xcode is present); audio is never touched."""
-    if not MAX_POWER_SCRIPT.exists():
+def set_max_power_level(level):
+    """Sets the synthetic load to 0-100%. Starts the worker on the way up and
+    lets it exit on its own on the way down - it polls the level file and
+    stops when it reads 0, so there's no kill needed for the common case."""
+    level = max(0.0, min(100.0, float(level or 0)))
+    try:
+        MAX_POWER_LEVEL_FILE.write_text(str(level))
+    except Exception as e:
+        log_price_guard(f"ERROR: could not set max power level: {e}")
         return False
-    secs = int(max(10, min(MAX_POWER_MAX_SEC, seconds or MAX_POWER_DEFAULT_SEC)))
-    stop_max_power()
+
+    global _fan_temp_cache_sec
+    _fan_temp_cache_sec = FAN_TEMP_CACHE_SEC_LOADED if level > 0 else FAN_TEMP_CACHE_SEC
+
+    with _max_power_lock:
+        proc = _max_power["proc"]
+        running = bool(proc and proc.poll() is None)
+        _max_power["level"] = level
+
+    if level <= 0:
+        log_price_guard("MAX POWER: level 0 - stopping")
+        return True
+    if running or not MAX_POWER_SCRIPT.exists():
+        return MAX_POWER_SCRIPT.exists()
+
     try:
         proc = subprocess.Popen(
-            ["/bin/bash", str(MAX_POWER_SCRIPT), str(secs)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            [_max_power_python(), str(MAX_POWER_SCRIPT), str(MAX_POWER_LEVEL_FILE), str(MAX_POWER_MAX_SEC)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
         )
     except Exception as e:
         log_price_guard(f"ERROR: max power failed to start: {e}")
@@ -1374,17 +1349,17 @@ def start_max_power(seconds=None):
     with _max_power_lock:
         _max_power["proc"] = proc
         _max_power["started_at"] = time.time()
-        _max_power["until"] = time.time() + secs
-    log_price_guard(f"MAX POWER: saturating CPU+GPU for {secs}s")
+    log_price_guard(f"MAX POWER: synthetic load started at {level:.0f}%")
     return True
 
 
 def stop_max_power():
+    set_max_power_level(0)
     with _max_power_lock:
         proc = _max_power["proc"]
         _max_power["proc"] = None
         _max_power["started_at"] = None
-        _max_power["until"] = None
+        _max_power["level"] = 0.0
     if proc and proc.poll() is None:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -1393,20 +1368,8 @@ def stop_max_power():
                 proc.terminate()
             except Exception:
                 pass
-        log_price_guard("MAX POWER: stopped")
         return True
     return False
-
-
-def pause_loop():
-    while True:
-        try:
-            cfg = read_pause_config()
-            if cfg.get("active") and cfg.get("until") and time.time() >= cfg["until"]:
-                end_pause("scheduled pause expired")
-        except Exception as e:
-            log_price_guard(f"ERROR: pause loop failed: {e}")
-        time.sleep(PAUSE_POLL_SEC)
 
 
 def warmup_loop():
@@ -2770,7 +2733,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = {
                 "status": get_darkbloom_status(),
                 "energy": get_energy_series(),
-                "pause": get_pause_status(),
                 "max_power": get_max_power_status(),
                 "live_power": get_live_power(),
                 "account": get_account_data(),
@@ -2872,26 +2834,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/api/max_power":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
-            if body.get("action") == "stop":
-                ok = stop_max_power()
-            else:
-                ok = start_max_power(body.get("seconds"))
+            ok = set_max_power_level(body.get("level", 0))
             self._send_json({"ok": ok, "max_power": get_max_power_status()})
-
-        elif self.path == "/api/pause":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length) or b"{}")
-            action = body.get("action")
-            if action == "resume":
-                ok = end_pause("resumed from dashboard")
-            elif action == "pause":
-                hours = body.get("hours")
-                ok = start_pause(float(hours) if hours else None)
-            else:
-                self.send_response(400)
-                self.end_headers()
-                return
-            self._send_json({"ok": ok, "pause": get_pause_status()})
 
         elif self.path == "/api/price_guard/action":
             length = int(self.headers.get("Content-Length", 0))
@@ -2958,7 +2902,6 @@ if __name__ == "__main__":
     for _sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(_sig, lambda *_: sys.exit(0))
     threading.Thread(target=warmup_loop, daemon=True).start()
-    threading.Thread(target=pause_loop, daemon=True).start()
     threading.Thread(target=trust_monitor_loop, daemon=True).start()
     threading.Thread(target=fan_recovery_loop, daemon=True).start()
     threading.Thread(target=inference_duration_tracker_loop, daemon=True).start()
