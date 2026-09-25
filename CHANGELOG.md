@@ -1,5 +1,14 @@
 # Changelog
 
+## v39
+
+**The chat now explains itself when serving is stopped, and offers the way back.** It was already disabling correctly and showing "unavailable - the provider daemon is not running right now" — the chat talks to the same local inference endpoint paid work goes through, so no daemon means no model loaded. But two things made a correct state read as a broken page:
+
+- The textarea kept its inviting placeholder, *"Ask the loaded model something..."*, inside a greyed-out box. It now states the actual reason: *"Serving is stopped, so the model isn't loaded - start it above to chat."*
+- There was no way to act on it. Everywhere else a stopped provider is reported, the banner carries a Start link; here you were told what was wrong and left to find the switch in a different panel. The status line now offers **Start serving**, wired to the same `postPriceGuardAction('start')` the Price Guard controls use.
+
+The link only appears when the daemon is the reason — being busy with real paid traffic is a different state, and one nobody should be offered a button to interrupt.
+
 ## v38
 
 **Removed the "Net (Estimated) Over Time" chart.** It was the chart above it with its two lines subtracted — server-side, `net_usd` is literally `[rev - cost for rev, cost in zip(est_revenue_usd, cum_cost_usd)]`. Same data, same axis, stacked directly beneath its own source. There was no reading it supported that the pair above didn't.

@@ -498,6 +498,14 @@ let chatMessages = [];
 let chatModel = null;
 let chatAvailable = false;
 let chatUnavailableReason = '';
+// The chat needs the daemon, because it talks to the same local inference
+// endpoint paid work goes through. When the daemon is down because the user
+// stopped serving, say so in those terms and offer the way back - telling
+// someone what's wrong and leaving them to find the switch in another panel
+// is how a working page reads as broken.
+function chatStoppedByUser() {
+  return !chatAvailable && chatUnavailableReason.startsWith('the provider daemon');
+}
 let chatBusy = false;
 let chatShowReasoning = false;
 // Live "serving paid traffic" visualization. The real words are the
@@ -1414,11 +1422,11 @@ function renderChat() {
       <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer" title="Some models (e.g. gpt-oss) expose an internal reasoning/analysis pass before their real answer - off by default since it's usually noise, but here if you want to see it">
         <input type="checkbox" id="chat-reasoning-toggle" ${chatShowReasoning ? 'checked' : ''}> Show reasoning
       </label>
-      <span class="warmup-status" style="margin:0">${chatAvailable ? '<span style="color:var(--status-good)">idle - available</span>' : `<span style="color:var(--status-warning)">unavailable - ${chatUnavailableReason}</span>`}</span>
+      <span class="warmup-status" style="margin:0">${chatAvailable ? '<span style="color:var(--status-good)">idle - available</span>' : `<span style="color:var(--status-warning)">unavailable - ${chatUnavailableReason}${chatStoppedByUser() ? ` <a href="#" onclick="postPriceGuardAction('start'); return false;">Start serving</a>` : ''}</span>`}</span>
     </div>
     <div id="chat-history" class="warmup-log" style="max-height:240px;">${simMode ? simHtml : (historyHtml || '<span style="color:var(--text-muted)">No messages yet - this resets on page reload, nothing is saved.</span>')}</div>
     <div class="warmup-row" style="margin-top:8px">
-      <textarea id="chat-input" rows="2" style="flex:1;min-width:200px;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);font-family:inherit" placeholder="${simMode ? 'Chat opens automatically as soon as the provider is idle - your earlier messages are kept.' : 'Ask the loaded model something... (Enter to send, Shift+Enter for newline)'}" ${inputsDisabled ? 'disabled' : ''}></textarea>
+      <textarea id="chat-input" rows="2" style="flex:1;min-width:200px;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface-1);color:var(--text-primary);font-family:inherit" placeholder="${simMode ? 'Chat opens automatically as soon as the provider is idle - your earlier messages are kept.' : inputsDisabled ? (chatStoppedByUser() ? 'Serving is stopped, so the model isn\'t loaded - start it above to chat.' : `Unavailable - ${chatUnavailableReason}`) : 'Ask the loaded model something... (Enter to send, Shift+Enter for newline)'}" ${inputsDisabled ? 'disabled' : ''}></textarea>
       <button class="copy-cmd-btn" id="chat-send-btn" ${inputsDisabled ? 'disabled' : ''}>${chatBusy ? 'Thinking…' : 'Send'}</button>
       <button class="copy-cmd-btn" id="chat-clear-btn" ${chatMessages.length === 0 ? 'disabled' : ''}>Clear</button>
     </div>
