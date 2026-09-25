@@ -1,5 +1,19 @@
 # Changelog
 
+## v41
+
+**Auto acts the moment it's switched on**, instead of at the next five-minute tick, and its first decision ignores the hysteresis timers. Those timers reference an action taken under a different regime — possibly by hand, possibly half an hour ago — so enforcing them means turning Auto on and watching nothing happen, which is indistinguishable from it being broken. Once Auto has acted once, its own hysteresis resumes normally. Verified against the real `_evaluate_price_guard()`: Auto just switched on → starts; Auto's own stop two minutes ago → waits; manual stop → starts.
+
+**New serving mode: local only.** A fourth option in Price Guard that declines paid work but keeps the models loaded and the local OpenAI endpoint answering, so the chat box still works. It restarts the provider with `darkbloom start --local`, which serves the same models over the same endpoint and never connects to the coordinator. Price Guard's Auto is blocked from starting network serving underneath it.
+
+That took three attempts, and the failures are worth recording:
+
+1. **`darkbloom start --local` never returns.** Unlike a normal start it runs in the foreground and registers no launchd service, so `subprocess.run(timeout=60)` killed it — leaving the provider stopped and the switch reporting failure. It now launches detached and polls the endpoint for readiness.
+2. **`darkbloom stop` timed out while draining.** Its own default allows 600s to drain accepted requests; the call allowed 30. The stop is now bounded explicitly (`--timeout 45`) with a longer wait around it — which also fixes the same latent hazard in Price Guard's ordinary stop path.
+3. **The readiness check reported a false positive.** With the stop having silently failed, the *old* network provider was still on port 8000, so polling the endpoint found an answer and declared the new local process up. Two providers running, and a status file that lied about which. `set_serving_mode()` now checks the stop actually succeeded and waits for the daemon to really be down before starting anything.
+
+Verified end to end in both directions: local-only leaves one process owning port 8000 with `Trust: awaiting coordinator status`, inference answers both directly and through the dashboard's chat proxy, and switching back restores hardware trust with the model warm.
+
 ## v40
 
 **Fixed: Auto refused to resume for up to 30 minutes after a manual stop.** Caught live. The sequence:

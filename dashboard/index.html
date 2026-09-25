@@ -1045,6 +1045,7 @@ let lastTempAge = null;
 let lastNetPerDay = null;
 let lastFloorShare = null;
 let showElprisNet = false;
+let lastServingMode = 'network';
 let lastPrice48 = null;
 function renderTempAge(ta) {
   if (!ta) return;
@@ -1114,7 +1115,9 @@ function renderPriceGuard(pg) {
   // it running, or keep it stopped. The old UI split this across a mode pair
   // plus separate Start/Stop buttons, which made "Manual" read like a state of
   // its own when it only ever meant "nothing automatic touches this".
-  const sel = pg.mode === 'auto' ? 'auto' : (daemonRunning ? 'manual-start' : 'manual-stop');
+  const sel = lastServingMode === 'local' ? 'local'
+    : pg.mode === 'auto' ? 'auto'
+    : (daemonRunning ? 'manual-start' : 'manual-stop');
 
   const priceLine = live
     ? `<span title="Break-even comes from the measured $${live.active_rate_per_hour_usd.toFixed(4)}/hr active pay rate and ${(live.total_power_w || 0).toFixed(0)}W current draw.">Now <strong>${live.price_per_kwh.toFixed(3)} ${cur}/kWh</strong>, break-even <strong>${live.break_even_per_kwh.toFixed(3)}</strong> — ${live.reason}</span>`
@@ -1147,7 +1150,10 @@ function renderPriceGuard(pg) {
       <label class="warmup-toggle" style="font-weight:400" title="Stop serving and stay stopped. This is how you pause: nothing automatic will start it again, and darkbloom's own stop command is used so the coordinator sees a clean intentional disconnect - hardware trust is unaffected.">
         <input type="radio" name="pg-state" value="manual-stop" ${sel === 'manual-stop' ? 'checked' : ''}> Manual — stop
       </label>
-      <span class="warmup-status" style="margin:0">Provider: ${daemonRunning ? '<span style="color:var(--status-good)">running</span>' : '<span style="color:var(--status-warning)">stopped</span>'}</span>
+      <label class="warmup-toggle" style="font-weight:400" title="Declines paid work but keeps the models loaded and the local endpoint running, so the chat box below still answers. Restarts the provider with darkbloom start --local, which serves the same models over the same local OpenAI endpoint but never connects to the coordinator. Switching either way costs a minute or two of re-attestation before hardware trust is back.">
+        <input type="radio" name="pg-state" value="local" ${sel === 'local' ? 'checked' : ''}> Local only <span style="opacity:.6">(no paid work, chat still works)</span>
+      </label>
+      <span class="warmup-status" style="margin:0">Provider: ${lastServingMode === 'local' ? '<span style="color:var(--status-serious)">local only</span>' : daemonRunning ? '<span style="color:var(--status-good)">running</span>' : '<span style="color:var(--status-warning)">stopped</span>'}</span>
     </div>
     ${autoTuning}
     ${stoppedWarning}
@@ -1160,6 +1166,11 @@ function renderPriceGuard(pg) {
     r.addEventListener('change', async (e) => {
       if (!e.target.checked) return;
       const v = e.target.value;
+      if (v === 'local') {
+        await postServingMode('local');
+        return;
+      }
+      if (lastServingMode === 'local') await postServingMode('network');
       if (v === 'auto') {
         await postPriceGuardConfig({ mode: 'auto' });
       } else {
@@ -1191,6 +1202,15 @@ function earningsWarningHtml(account) {
   const share = total > 0 ? (floorRate / total) * 100 : 0;
   return `Stopped means giving up the base reward too — <strong>$${floorRate.toFixed(4)}/h</strong> just for being online ` +
     `(${share.toFixed(0)}% of hourly income, and it doesn't depend on serving). A day stopped ≈ <strong>$${(total * 24).toFixed(2)}</strong>.`;
+}
+
+async function postServingMode(mode) {
+  try {
+    const res = await fetch('/api/serving_mode', { method: 'POST', body: JSON.stringify({ mode }) });
+    lastServingMode = (await res.json()).serving_mode || 'network';
+    refreshPriceGuard();
+    refresh();
+  } catch (e) { /* silent */ }
 }
 
 async function postPriceGuardConfig(body) {

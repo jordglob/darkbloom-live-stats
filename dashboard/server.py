@@ -756,6 +756,162 @@ def _get_provider_start_args():
         return []
 
 
+SERVING_MODE_FILE = HOME / ".darkbloom" / "serving-mode.json"
+
+
+def read_serving_mode():
+    try:
+        if SERVING_MODE_FILE.exists():
+            v = json.loads(SERVING_MODE_FILE.read_text()).get("mode")
+            if v in ("network", "local"):
+                return v
+    except Exception:
+        pass
+    return "network"
+
+
+def write_serving_mode(mode, local_pid=None):
+    try:
+        SERVING_MODE_FILE.write_text(json.dumps(
+            {"mode": mode, "at": time.time(), "local_pid": local_pid}))
+    except Exception as e:
+        log_price_guard(f"ERROR: could not write serving mode: {e}")
+
+
+def _local_only_start_args():
+    """The provider's own configured args with the coordinator removed.
+
+    `darkbloom start --local` runs the same models behind the same local
+    OpenAI endpoint but never connects to the coordinator, so no paid work
+    arrives while the model stays loaded and usable from this machine. That's
+    the difference between this and stopping: stopping unloads everything and
+    the chat box goes dead with it."""
+    args = _get_provider_start_args()
+    out, skip = [], 0
+    for a in args:
+        if skip:
+            skip -= 1
+            continue
+        if a == "--coordinator-url":
+            skip = 1          # drop the flag and its value
+            continue
+        if a == "--local-endpoint":
+            out.append("--local")
+            continue
+        out.append(a)
+    if "--local" not in out:
+        out.append("--local")
+    return out
+
+
+def _local_endpoint_ready(timeout=1.0):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8000/v1/models", timeout=timeout) as r:
+            return r.status < 500
+    except urllib.error.HTTPError:
+        return True          # answering at all is enough; 401 means it's up
+    except Exception:
+        return False
+
+
+def _stop_local_process():
+    """Ends a local-only run started earlier, by the pid recorded when it was
+    launched. `darkbloom stop` doesn't reach it - that command talks to the
+    launchd service, and a --local run isn't one."""
+    try:
+        pid = json.loads(SERVING_MODE_FILE.read_text()).get("local_pid")
+    except Exception:
+        pid = None
+    if not pid:
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    for _ in range(20):
+        time.sleep(0.5)
+        if not _local_endpoint_ready(0.5):
+            return
+
+
+def set_serving_mode(mode):
+    """Switches between serving the network and local-only.
+
+    Local-only is NOT a variant of the normal start: `darkbloom start --local`
+    runs in the foreground and registers no launchd service, so it has to be
+    launched detached and then polled for readiness. Waiting on it the way the
+    network start is waited on just times out and leaves the provider stopped
+    - which is exactly what happened the first time this shipped."""
+    if mode not in ("network", "local"):
+        return False
+
+    _stop_local_process()
+    # The result matters. The first version ignored it, the stop timed out
+    # while draining, and the network provider stayed up - then the readiness
+    # check below saw ITS endpoint on the same port and reported success. Two
+    # providers, one of them a lie in the status file.
+    if not _apply_price_guard_action("stop", f"switching to {mode} serving"):
+        log_price_guard("ERROR: could not stop the current provider - serving mode unchanged")
+        return False
+    for _ in range(30):
+        if not (get_darkbloom_status().get("daemon") or "").startswith("running"):
+            break
+        time.sleep(1)
+    else:
+        log_price_guard("ERROR: provider still running after stop - refusing to start a second one")
+        return False
+
+    if mode == "network":
+        args = _get_provider_start_args()
+        if not args:
+            log_price_guard("ERROR: could not read provider args - serving mode unchanged")
+            return False
+        try:
+            ok = subprocess.run([str(DARKBLOOM_BIN), "start"] + args,
+                                capture_output=True, text=True, timeout=90).returncode == 0
+        except Exception as e:
+            log_price_guard(f"ERROR: start for network mode failed: {e}")
+            return False
+        if ok:
+            write_serving_mode("network")
+            log_price_guard("SERVING MODE: network")
+            notify_mac("Darkbloom Live & Stats", "Serving the network again")
+        return ok
+
+    args = _local_only_start_args()
+    if not args:
+        log_price_guard("ERROR: could not read provider args - serving mode unchanged")
+        return False
+    try:
+        proc = subprocess.Popen(
+            [str(DARKBLOOM_BIN), "start"] + args,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception as e:
+        log_price_guard(f"ERROR: local-only start failed: {e}")
+        return False
+
+    for _ in range(120):          # models can take a while to load
+        if proc.poll() is not None:
+            log_price_guard(f"ERROR: local-only process exited early (code {proc.returncode})")
+            return False
+        if _local_endpoint_ready():
+            write_serving_mode("local", local_pid=proc.pid)
+            log_price_guard(f"SERVING MODE: local (pid {proc.pid}) - no paid work; local chat still available")
+            notify_mac("Darkbloom Live & Stats", "Local-only: not accepting paid work, chat still works")
+            return True
+        time.sleep(1)
+
+    log_price_guard("ERROR: local endpoint never came up - killing the attempt")
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
+        pass
+    return False
+
+
 def _apply_price_guard_action(action, reason):
     """Applies a real start/stop decision via darkbloom's own CLI (not raw
     launchctl) so the coordinator sees a clean, intentional disconnect/
@@ -769,7 +925,12 @@ def _apply_price_guard_action(action, reason):
         if not running:
             return True
         try:
-            r = subprocess.run([str(DARKBLOOM_BIN), "stop"], capture_output=True, text=True, timeout=30)
+            # darkbloom stop drains accepted requests first and its own
+            # default allows 600s for that, so an unbounded wait here can
+            # outlive any caller's patience. Bound the drain explicitly and
+            # give the call a little longer than that to return.
+            r = subprocess.run([str(DARKBLOOM_BIN), "stop", "--timeout", "45"],
+                               capture_output=True, text=True, timeout=75)
             ok = r.returncode == 0
         except Exception as e:
             log_price_guard(f"ERROR: stop failed: {e}")
@@ -853,7 +1014,13 @@ def _evaluate_price_guard(cfg):
     # to start until 06:52 while electricity was at 1.344 against a 7.515
     # break-even. Same blind spot as the v19 banner bug - the timer knew WHEN
     # the last action happened but not WHO made it.
-    if cfg.get("last_action_source") == "manual":
+    # ...and the same applies to Auto's very first decision after being
+    # switched on. Those timers reference an action taken under a different
+    # regime - possibly by hand, possibly half an hour ago - so enforcing them
+    # means turning Auto on and watching nothing happen. Once Auto has acted
+    # once, its own hysteresis takes over normally.
+    just_activated = (cfg.get("last_action_at") or 0) < (cfg.get("mode_set_at") or 0)
+    if just_activated or cfg.get("last_action_source") == "manual":
         min_running_sec = 0
         min_stopped_sec = 0
 
@@ -899,6 +1066,12 @@ def price_guard_loop():
                 cfg["last_evaluated_at"] = time.time()
                 cfg["last_price_per_kwh"] = decision["price_per_kwh"]
                 cfg["last_break_even_per_kwh"] = decision["break_even_per_kwh"]
+                # Local-only outranks Auto: it's a deliberate "not renting
+                # right now", and Auto starting network serving underneath it
+                # would silently undo that.
+                if decision["action"] == "start" and read_serving_mode() == "local":
+                    decision["action"] = None
+                    decision["reason"] = "would start, but this Mac is in local-only mode"
                 if decision["action"] and cfg.get("mode") == "auto":
                     ok = _apply_price_guard_action(decision["action"], decision["reason"])
                     if ok:
@@ -2771,6 +2944,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "status": get_darkbloom_status(),
                 "energy": get_energy_series(),
                 "max_power": get_max_power_status(),
+                "serving_mode": read_serving_mode(),
                 "live_power": get_live_power(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),
@@ -2857,8 +3031,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
             cfg = read_price_guard_config()
+            switched_to_auto = False
             if "mode" in body and body["mode"] in ("manual", "auto"):
+                switched_to_auto = body["mode"] == "auto" and cfg.get("mode") != "auto"
                 cfg["mode"] = body["mode"]
+                if switched_to_auto:
+                    cfg["mode_set_at"] = time.time()
                 log_price_guard(f"mode set to {cfg['mode']} via dashboard")
             if "margin_pct" in body:
                 cfg["margin_pct"] = max(0, float(body["margin_pct"]))
@@ -2867,7 +3045,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if "min_stopped_min" in body:
                 cfg["min_stopped_min"] = max(0, float(body["min_stopped_min"]))
             write_price_guard_config(cfg)
+            # Act on it now rather than at the next 5-minute tick. Switching a
+            # control on and seeing nothing happen for five minutes is
+            # indistinguishable from it not working.
+            if switched_to_auto:
+                try:
+                    decision = _evaluate_price_guard(cfg)
+                    if decision and decision.get("action"):
+                        if _apply_price_guard_action(decision["action"], decision["reason"]):
+                            cfg["last_action"] = decision["action"]
+                            cfg["last_action_at"] = time.time()
+                            cfg["last_reason"] = decision["reason"]
+                            cfg["last_action_source"] = "auto"
+                            write_price_guard_config(cfg)
+                except Exception as e:
+                    log_price_guard(f"ERROR: immediate evaluation on enabling auto failed: {e}")
             self._send_json(cfg)
+        elif self.path == "/api/serving_mode":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            ok = set_serving_mode(body.get("mode"))
+            self._send_json({"ok": ok, "serving_mode": read_serving_mode()})
+
         elif self.path == "/api/max_power":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
