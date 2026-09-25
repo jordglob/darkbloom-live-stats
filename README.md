@@ -10,6 +10,16 @@ step, no bookmarklet, just the same local device token `darkbloom login`
 already stores on this Mac.
 
 **Not affiliated with or endorsed by Darkbloom, Eigen Labs, or EigenLayer.**
+
+> ### Status: experimental
+>
+> The charting and the fan-control work in particular are an active
+> experiment, not a settled design. Several views exist side by side purely
+> so they can be compared against each other, and **code will be removed as
+> the better-looking and better-behaved options win** — expect panels,
+> options and whole endpoints to disappear between versions. Anything marked
+> *(experimental)* in the UI is a candidate for deletion, not a feature to
+> depend on. Pin a tag if you need stability.
 Community tool, use at your own risk. It only reads local system state and
 your own Darkbloom account data - it does not modify your provider's behavior.
 
@@ -206,6 +216,46 @@ performance. It's filed upstream as
 with a reviewed fix in [PR #599](https://github.com/Layr-Labs/d-inference/pull/599),
 open and unmerged since 2026-07-15 - a GitHub permissions issue with their
 review agent, not a technical one, going by the PR thread.
+
+### Why fan control here is harder than it looks
+
+Worth writing down, because three separate implementations got it wrong in
+three different ways — including this one, twice.
+
+**Darkbloom's helper** fails closed in the wrong direction: one bad sensor
+reading wedges its state machine, and it then sits at the floor RPM forever
+while still reporting its policy as "80.0% at 45.0 C". Observed live at GPU
+75.3 °C with the fan at 1000 rpm, mode `auto`. That's a plain bug, fixed
+upstream but unmerged.
+
+**The external helper this project shells out to** works correctly, but it
+does something subtly different from what it looks like: `apply gpu 45 85`
+reads the temperature *at that instant*, computes one fan fraction from it,
+and writes that as a fixed manual value. It does **not** install a curve the
+SMC then follows on its own. For its intended use — a human running a CLI
+command once — that's the right design. Automate it and the trap springs:
+call it and walk away, and the fan is pinned to however warm the machine
+happened to be one moment in the past, forever. Making the fan *track*
+temperature means re-applying continuously, which quietly makes your poll
+interval the control resolution. At 30 s the fan lagged badly; at 5 s it
+follows.
+
+**This project then got it wrong twice.** First by engaging and releasing on
+the same condition — "GPU hot **and** fan not responding". Engaging spins the
+fan up, which falsifies the second half, so it released on the very next poll
+and handed control back to a controller already proven broken: 1517 cycles in
+3.1 days, 74 % of releases with the GPU still above 70 °C, one at 100.5 °C.
+Then, after fixing that, by only engaging at 85 °C — so across the entire
+45–85 °C range the fan stayed flat at its floor and then slammed to 100 %.
+
+The general shape of the difficulty: **the actuator has no memory of intent,
+and the obvious health signal is destroyed by your own intervention.** Any
+controller that uses one predicate both to engage and to release will
+oscillate. Any controller that writes a fixed value and assumes it's a curve
+will lag. And because the hold lives only in the controlling process, a
+restart strands the hardware — this project pinned the fan at 4900 rpm for
+55 minutes on a 29 °C GPU that way before the state was persisted and a
+shutdown handler added.
 
 This dashboard flags the symptom (the "Running hot" banner) but doesn't fix
 it - vendoring a privileged SMC helper into a monitoring dashboard is out of
