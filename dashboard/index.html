@@ -148,9 +148,11 @@
   .line-cost { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
   .line-revenue { fill: none; stroke: var(--series-revenue); stroke-width: 2; stroke-linecap: round; }
   .line-power { fill: none; stroke: var(--series-cost); stroke-width: 2; stroke-linecap: round; }
-  .line-power-peak { fill: none; stroke: var(--series-cost); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
+  .line-power-peak { fill: none; stroke: var(--series-cost); stroke-width: 1; opacity: 0.45; }
+  .band-power { fill: var(--series-cost); opacity: 0.09; stroke: none; }
   .line-temp { fill: none; stroke: var(--gauge-gpu); stroke-width: 2; stroke-linecap: round; }
   .line-temp-peak { fill: none; stroke: var(--gauge-gpu); stroke-width: 1; opacity: 0.45; }
+  .line-cpu-temp { fill: none; stroke: var(--series-elpris); stroke-width: 1.5; stroke-linejoin: round; }
   .band-temp { fill: var(--gauge-gpu); opacity: 0.09; stroke: none; }
   .threshold-line { stroke: var(--status-critical); stroke-width: 1; stroke-dasharray: 4 3; opacity: 0.7; }
   .threshold-label { fill: var(--status-critical); font-size: 9px; opacity: 0.8; }
@@ -320,6 +322,30 @@
   </div>
 
   <div class="panel">
+    <h2 title="Same GPU temperature, on a logarithmic AGE axis: 'now' is the right edge and each vertical gridline is a step further into the past. Fed by two resolutions - macmon's ~5s readings for the last hour, then 5-minute CSV buckets beyond that - so zooming toward now shows real samples rather than one bucket average stretched wide.">GPU Temp &amp; Fan — log age <span id="temp-age-stats" class="gauge-time"></span></h2>
+    <div class="legend" id="temp-age-legend"></div>
+    <div class="warmup-row" style="margin-bottom:4px">
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Off by default. Synthetic CPU + GPU load, so you can watch the fan respond to real heat instead of waiting for paid traffic to produce it. Tick this, then drag the slider.">
+        <input type="checkbox" id="max-power-enable"> Load test
+      </label>
+      <input type="range" id="max-power-slider" min="0" max="100" step="5" value="0" disabled style="flex:1;max-width:260px">
+      <span class="warmup-status" style="margin:0;min-width:3.5em"><strong id="max-power-value">0%</strong></span>
+      <span class="warmup-status" style="margin:0;font-size:12px;color:var(--text-muted)" id="max-power-cadence" title="Sampling and redraw rate. Rises with the load, because watching the fan respond is the whole reason to turn the load up.">sampling 2.0s</span>
+    </div>
+    <div class="warmup-row" style="margin-bottom:4px">
+      <span class="warmup-status" style="margin:0">Show:</span>
+      <label class="warmup-toggle" style="font-weight:400;margin:0"><input type="checkbox" class="series-toggle" data-series="temp" checked> <i style="background:var(--gauge-gpu);display:inline-block;width:9px;height:9px;border-radius:2px"></i> GPU temp</label>
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Shaded band from each point's bin average up to the hottest reading in that bin. Its width shows how much that point is summarising - seconds near now, days at the old end."><input type="checkbox" class="series-toggle" data-series="peak" checked> <i style="background:var(--gauge-gpu);opacity:.35;display:inline-block;width:9px;height:9px;border-radius:2px"></i> Peak band</label>
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="CPU die temperature, same axis as GPU. Only macmon reports it, so this series stops where macmon's coverage does."><input type="checkbox" class="series-toggle" data-series="cpu"> <i style="background:var(--series-elpris);display:inline-block;width:9px;height:9px;border-radius:2px"></i> CPU temp</label>
+      <label class="warmup-toggle" style="font-weight:400;margin:0"><input type="checkbox" class="series-toggle" data-series="fan" checked> <i style="background:var(--gauge-cpu);display:inline-block;width:9px;height:9px;border-radius:2px"></i> Fan %</label>
+      <span id="max-power-warning" class="warmup-status" style="margin:0;font-size:12px;color:var(--status-serious)"></span>
+    </div>
+    <div class="chart-wrap">
+      <svg class="chart chart-tall" id="chart-temp-age"></svg>
+      <div class="tooltip" id="tooltip-temp-age"></div>
+    </div>
+
+  <div class="panel">
     <h2 title="Real data pulled directly from Darkbloom's own API, using the same device token the CLI already stores locally. Refreshed automatically every 30s.">Darkbloom Account <span class="gauge-time">(live, synced automatically)</span></h2>
     <div id="account"></div>
   </div>
@@ -362,31 +388,6 @@
     </div>
   </div>
 
-  <div class="panel">
-    <h2 title="Experimental comparison chart: same GPU temp/fan data, but the full CSV history (not just since temp/fan logging started) with the x-axis spaced by log(time since now) instead of evenly - so the ~20-day stretch before this logging existed compresses toward the left instead of being cut off, while the recent, data-dense days keep most of the chart's width. Sitting next to the plain version above for comparison, not replacing it.">GPU Temp &amp; Fan — full history, log time (experimental)</h2>
-    <div class="legend" id="temp-log-legend"></div>
-    <div class="chart-wrap">
-      <svg class="chart" id="chart-temp-log"></svg>
-      <div class="tooltip" id="tooltip-temp-log"></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2 title="Same GPU temperature, on a logarithmic AGE axis: 'now' is the right edge and each vertical gridline is a step further into the past. Fed by two resolutions - macmon's ~5s readings for the last hour, then 5-minute CSV buckets beyond that - so zooming toward now shows real samples rather than one bucket average stretched wide.">GPU Temp &amp; Fan — log age <span id="temp-age-stats" class="gauge-time"></span></h2>
-    <div class="legend" id="temp-age-legend"></div>
-    <div class="warmup-row" style="margin-bottom:4px">
-      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Off by default. Synthetic CPU + GPU load, so you can watch the fan respond to real heat instead of waiting for paid traffic to produce it. Tick this, then drag the slider.">
-        <input type="checkbox" id="max-power-enable"> Load test
-      </label>
-      <input type="range" id="max-power-slider" min="0" max="100" step="5" value="0" disabled style="flex:1;max-width:260px">
-      <span class="warmup-status" style="margin:0;min-width:3.5em"><strong id="max-power-value">0%</strong></span>
-      <span class="warmup-status" style="margin:0;font-size:12px;color:var(--text-muted)" id="max-power-cadence" title="Sampling and redraw rate. Rises with the load, because watching the fan respond is the whole reason to turn the load up.">sampling 2.0s</span>
-      <span id="max-power-warning" class="warmup-status" style="margin:0;font-size:12px;color:var(--status-serious)"></span>
-    </div>
-    <div class="chart-wrap">
-      <svg class="chart chart-tall" id="chart-temp-age"></svg>
-      <div class="tooltip" id="tooltip-temp-age"></div>
-    </div>
   </div>
 
   <div class="panel">
@@ -946,12 +947,13 @@ function logBinAges(points, key, nowMs, frameMinMs, frameMaxMs, nbins) {
     age = Math.max(frameMinMs, age);
     let idx = Math.floor(((Math.log10(age) - lo) / (hi - lo)) * nbins);
     idx = Math.max(0, Math.min(nbins - 1, idx));
-    const a = acc.get(idx) || [0, 0, 0];
+    const a = acc.get(idx) || [0, 0, 0, v];
     a[0] += age; a[1] += v; a[2] += 1;
+    if (v > a[3]) a[3] = v;
     acc.set(idx, a);
   }
   return [...acc.values()]
-    .map(([sa, sv, n]) => ({ age_ms: sa / n, v: sv / n }))
+    .map(([sa, sv, n, pk]) => ({ age_ms: sa / n, v: sv / n, peak: pk }))
     .sort((a, b) => b.age_ms - a.age_ms);
 }
 
@@ -1014,6 +1016,11 @@ async function postMaxPower(level) {
   } catch (e) { /* silent */ }
 }
 
+// Which series the log-age chart draws. Kept here rather than read from the
+// DOM at draw time so the chart can redraw at the live cadence without
+// touching the document on every frame.
+const seriesOn = { temp: true, peak: true, cpu: false, fan: true };
+
 let tempAgeTimer = null;
 let lastTempAge = null;
 function renderTempAge(ta) {
@@ -1024,7 +1031,7 @@ function renderTempAge(ta) {
   document.getElementById('temp-age-stats').textContent =
     `${ta.fine_sample_count.toLocaleString()} live samples \u00B7 axis ${ta.sample_interval_sec.toFixed(1)}s \u2192 ${spanDays.toFixed(1)} days (since ${installTxt})`;
   document.getElementById('temp-age-legend').innerHTML =
-    `<span title="One continuous curve. Out to 24h it's macmon's own ~${ta.sample_interval_sec.toFixed(0)}s SMC readings; beyond that, 5-minute CSV rows. Log-binned onto the same axis so the handover isn't a break in the line."><i style="background:var(--gauge-gpu)"></i>GPU Temp</span>` +
+    `<span title="One continuous curve. Out to 24h it's macmon's own ~${ta.sample_interval_sec.toFixed(0)}s SMC readings; beyond that, 5-minute CSV rows. Log-binned onto the same axis so the handover isn't a break in the line."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg, band to peak)</span>` +
     `<span title="Fan speed as % of max RPM, right axis. Only the 5-minute CSV has fan RPM - macmon doesn't report it - so this curve is coarser than temperature, topped up with the live reading."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
   // Splice the browser-side live tier onto the server's, and drop the axis
   // floor to the live cadence so those samples get their own room instead of
@@ -1043,6 +1050,7 @@ function renderTempAge(ta) {
     merged.live_cadence_ms = LIVE_TIER_CADENCE_MS;
   }
   renderLogAgeChart('chart-temp-age', 'tooltip-temp-age', merged, {
+    show: seriesOn,
     yDomain: [35, 105],
     hLines: [{ value: 85, label: '85\u00B0C \u2014 running hot' }],
   });
@@ -1803,13 +1811,18 @@ function renderReal48(p) {
   // Cumulative real earnings vs. cumulative measured cost over the price
   // panel's 15-min grid - the same per-bucket data as its Net overlay, just
   // summed so it reads like a bank balance. Future buckets are gaps.
-  const prices = (p && p.prices) || [];
+  const allPrices = (p && p.prices) || [];
   const nowMs = Date.now();
+  // Stop at the last elapsed bucket. This chart borrows the price panel's
+  // grid, which runs into tomorrow so a forecast has somewhere to go - but you
+  // cannot have earned tomorrow's money, so carrying that grid over here left
+  // ~40% of the chart permanently blank.
+  const lastElapsed = allPrices.reduce(
+    (acc, x, i) => (new Date(x.time_end).getTime() <= nowMs ? i : acc), -1);
+  const prices = lastElapsed >= 0 ? allPrices.slice(0, lastElapsed + 1) : [];
   let earn = 0, cost = 0, firstIdx = -1;
   const earnVals = [], costVals = [];
   prices.forEach((x, i) => {
-    const elapsed = new Date(x.time_end).getTime() <= nowMs;
-    if (!elapsed) { earnVals.push(null); costVals.push(null); return; }
     if (firstIdx < 0 && ((x.earnings_usd || 0) > 0 || (x.cost_usd || 0) > 0)) firstIdx = i;
     earn += x.earnings_usd || 0;
     cost += x.cost_usd || 0;
@@ -1990,40 +2003,9 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   const innerH = h - padT - padB;
   const yToPixel = (v) => padT + innerH - ((v - yMin) / yRange) * innerH;
 
-  // Normal mode spaces points evenly by index. Log-time mode instead spaces
-  // them by log(time since now) - so a long, mostly-empty stretch of history
-  // compresses toward the left instead of eating most of the chart's width,
-  // while the recent, data-dense stretch gets most of the horizontal room.
-  // Experimental: compared side-by-side against the plain linear chart for
-  // the same data rather than replacing it outright.
   const tsCount = timestamps.length;
-  let xForIndex;
-  if (opts.logTime && tsCount > 1) {
-    // Normalize by MIN and MAX log-age, not just max - dividing by max alone
-    // (as a first version of this did) assumes the most recent point's age
-    // is ~0, but log1p(age) of even a "fresh" point (tens of seconds old)
-    // isn't actually close to 0 on this scale, so "now" landed near the
-    // middle of the chart instead of at the right edge. Anchoring both ends
-    // to the data's own actual min/max age guarantees the newest point
-    // lands exactly at the right edge and the oldest exactly at the left,
-    // same as the plain index-based axis does.
-    const nowMs = Date.now();
-    const logAges = timestamps.map(t => Math.log1p(Math.max(0, nowMs - new Date(t).getTime())));
-    const logAgeMin = Math.min(...logAges);
-    const logAgeMax = Math.max(...logAges, logAgeMin + 1e-9);
-    xForIndex = (i) => padL + (1 - (logAges[i] - logAgeMin) / (logAgeMax - logAgeMin)) * innerW;
-  } else {
-    xForIndex = (i) => padL + (tsCount === 1 ? 0 : (i / (tsCount - 1)) * innerW);
-  }
+  const xForIndex = (i) => padL + (tsCount === 1 ? 0 : (i / (tsCount - 1)) * innerW);
   const xPositions = Array.from({length: tsCount}, (_, i) => xForIndex(i));
-  const nearestIdxToX = (targetX) => {
-    let best = 0, bestD = Infinity;
-    for (let i = 0; i < tsCount; i++) {
-      const d = Math.abs(xPositions[i] - targetX);
-      if (d < bestD) { bestD = d; best = i; }
-    }
-    return best;
-  };
 
   // Right axis gets its own independent domain - it shares the same 3
   // gridline y-positions as the left axis (standard dual-axis convention)
@@ -2117,15 +2099,8 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   }
 
   // x-axis time labels: first / middle / last by INDEX normally - but in
-  // log-time mode most indices are crammed into a narrow pixel range, so
-  // picking by index can put two labels on top of each other (seen live:
-  // "middle" landed a few px from "start" and the text overlapped into
-  // gibberish). Pick by target PIXEL position instead, snapping each to
-  // its nearest actual point.
   const n0 = tsCount;
-  const labelIdxs = opts.logTime
-    ? [nearestIdxToX(padL), nearestIdxToX(padL + innerW / 2), nearestIdxToX(padL + innerW)]
-    : [0, Math.floor((n0 - 1) / 2), n0 - 1];
+  const labelIdxs = [0, Math.floor((n0 - 1) / 2), n0 - 1];
   const labelAnchors = ['start', 'middle', 'end'];
   const seenIdxs = new Set();
   labelIdxs.forEach((idx, li) => {
@@ -2310,21 +2285,12 @@ function renderLineChart(svgId, tooltipId, timestamps, series, colorClasses, val
   svg.appendChild(overlay);
 
   const n = n0;
-  // Point x-positions aren't evenly spaced in log-time mode, so finding the
-  // nearest index to the mouse has to search actual positions rather than
-  // solving the (no longer valid) even-spacing formula directly - reuses
-  // the xPositions/nearestIdxToX built for the axis labels above.
   overlay.addEventListener('mousemove', (e) => {
     const rect = svg.getBoundingClientRect();
     const scaleX = w / rect.width;
     const mx = (e.clientX - rect.left) * scaleX;
-    let idx;
-    if (opts.logTime) {
-      idx = nearestIdxToX(mx);
-    } else {
-      idx = Math.round(((mx - padL) / innerW) * (n - 1));
-      idx = Math.max(0, Math.min(n - 1, idx));
-    }
+    let idx = Math.round(((mx - padL) / innerW) * (n - 1));
+    idx = Math.max(0, Math.min(n - 1, idx));
     // x from the timestamp grid directly, not any one series' point - a
     // series can be null at this index (e.g. tomorrow's unpublished price)
     // while the crosshair itself should still track the mouse normally.
@@ -2553,8 +2519,8 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
   });
 
   // --- fan first, as an area, so the temp line reads on top of it ---
-  const fanPts = (ta.fan || []).map(p => ({ x: xForAge(p.age_ms), y: yToPixelR(p.v), age: p.age_ms, v: p.v }));
-  if (fanPts.length > 1) {
+  const fanPts = opts.show.fan ? (ta.fan || []).map(p => ({ x: xForAge(p.age_ms), y: yToPixelR(p.v), age: p.age_ms, v: p.v })) : [];
+  if (opts.show.fan && fanPts.length > 1) {
     const baseY = yToPixelR(0);
     let d = `M${fanPts[0].x.toFixed(2)},${baseY.toFixed(2)} L`;
     d += fanPts.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' L');
@@ -2565,11 +2531,41 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
     svg.appendChild(el);
   }
 
-  const tempPts = (ta.temp || []).map(p => ({ x: xForAge(p.age_ms), y: yToPixel(p.v), age: p.age_ms, v: p.v }));
-  if (tempPts.length > 1) {
+  const tempPts = (ta.temp || []).map(p => ({
+    x: xForAge(p.age_ms), y: yToPixel(p.v), age: p.age_ms, v: p.v,
+    peak: p.peak != null ? p.peak : p.v,
+  }));
+
+  // Band from the bin average up to its hottest reading. On this axis the
+  // width of that gap is itself the message: bins near "now" span seconds, so
+  // peak collapses onto the mean and the band closes to a line; bins at the
+  // old end span days, and it opens up. It shows how much each point is
+  // summarising, which is exactly what a log-age axis makes hard to judge.
+  if (opts.show.peak && tempPts.length > 1 && tempPts.some(p => p.peak > p.v)) {
+    let d = 'M' + tempPts.map(p => `${p.x.toFixed(2)},${yToPixel(p.peak).toFixed(2)}`).join(' L');
+    d += ' L' + tempPts.slice().reverse().map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' L') + ' Z';
+    const band = mk('path');
+    band.setAttribute('d', d);
+    band.setAttribute('class', 'band-temp');
+    svg.appendChild(band);
+  }
+
+  if (opts.show.temp && tempPts.length > 1) {
     const el = mk('path');
     el.setAttribute('d', tempPts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(2) + ',' + p.y.toFixed(2)).join(' '));
     el.setAttribute('class', 'line-temp');
+    svg.appendChild(el);
+  }
+
+  // CPU temperature shares the left axis - it's the same unit, and seeing the
+  // two together answers "which of them is actually producing the heat".
+  const cpuPts = opts.show.cpu
+    ? (ta.cpu_temp || []).map(p => ({ x: xForAge(p.age_ms), y: yToPixel(p.v), age: p.age_ms, v: p.v }))
+    : [];
+  if (cpuPts.length > 1) {
+    const el = mk('path');
+    el.setAttribute('d', cpuPts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(2) + ',' + p.y.toFixed(2)).join(' '));
+    el.setAttribute('class', 'line-cpu-temp');
     svg.appendChild(el);
   }
 
@@ -2616,6 +2612,7 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
     const mx = (e.clientX - rect.left) * (w / rect.width);
     const pt = nearest(tempPts, mx);
     const pf = nearest(fanPts, mx);
+    const pc = nearest(cpuPts, mx);
     if (!pt) return;
     hoverLine.setAttribute('x1', pt.x); hoverLine.setAttribute('x2', pt.x);
     hoverLine.style.display = 'block';
@@ -2636,6 +2633,8 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
     tooltip.style.top = '0px';
     tooltip.innerHTML = `<div class="t-time">${fmtAge(pt.age)}</div>` +
       `<div class="t-row"><span>GPU Temp</span><strong>${pt.v.toFixed(1)}°C</strong></div>` +
+      (pt.peak > pt.v + 0.05 ? `<div class="t-row"><span>Peak in bin</span><strong>${pt.peak.toFixed(1)}°C</strong></div>` : '') +
+      (pc ? `<div class="t-row"><span>CPU Temp</span><strong>${pc.v.toFixed(1)}°C</strong></div>` : '') +
       (pf ? `<div class="t-row"><span>Fan speed</span><strong>${pf.v.toFixed(0)}%</strong></div>` : '') +
       `<div class="t-row"><span>Source</span><strong>${src}</strong></div>`;
   });
@@ -2706,7 +2705,12 @@ async function refresh() {
     const powerSeries = [{name: 'Power (incl. baseline)', values: rows.total_power_w || []}];
     const powerColors = ['line-power'];
     if (hasPeak) { powerSeries.push({name: 'Peak', values: rows.peak_total_power_w}); powerColors.push('line-power-peak'); }
-    renderLineChart('chart-power', 'tooltip-power', rows.timestamps, powerSeries, powerColors, fmtW);
+    // Same treatment the temp chart got at v24: a dashed line above the data
+    // reads as a limit, a band reads as the spread between typical and worst
+    // in each bucket. Two charts showing the same relationship shouldn't speak
+    // two different visual languages on one page.
+    const powerOpts = hasPeak ? { envelope: { lower: 0, upper: 1, className: 'band-power' } } : {};
+    renderLineChart('chart-power', 'tooltip-power', rows.timestamps, powerSeries, powerColors, fmtW, powerOpts);
     const nowW = (rows.total_power_w || []).at(-1);
     const maxW = Math.max(...(hasPeak ? rows.peak_total_power_w : (rows.total_power_w || [0])));
     document.getElementById('power-chart-stats').textContent = nowW != null ? `now: ${fmtW(nowW)} · max: ${fmtW(maxW)}` : '';
@@ -2737,26 +2741,6 @@ async function refresh() {
     const nowTemp = realTemps.at(-1);
     const maxTemp = Math.max(...(hasTempPeak ? rows.peak_gpu_temp_c.filter(v => v != null) : realTemps));
     document.getElementById('temp-chart-stats').textContent = nowTemp != null ? `now: ${nowTemp.toFixed(1)}°C · max: ${maxTemp.toFixed(1)}°C` : 'no data yet';
-
-    const hasTempPeakFull = !!(rows.peak_gpu_temp_c_full && rows.peak_gpu_temp_c_full.length);
-    document.getElementById('temp-log-legend').innerHTML =
-      `<span title="Same average/peak split as the chart above, just over the full CSV history instead of only since temp/fan logging started."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg${hasTempPeakFull ? ', band to peak' : ''})</span>` +
-      `<span title="Fan speed %, right axis - same data as the chart above, unclipped to the full history."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
-    const tempSeriesLog = [{name: 'GPU Temp', values: rows.gpu_temp_c_full || []}];
-    const tempColorsLog = ['line-temp'];
-    if (hasTempPeakFull) { tempSeriesLog.push({name: 'Peak', values: rows.peak_gpu_temp_c_full}); tempColorsLog.push('line-temp-peak'); }
-    const tempLogOpts = {
-      rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct_full || [], colorClass: 'area-fan' }],
-      rightValueFmt: v => `${v.toFixed(0)}%`,
-      yDomain: [35, 105],
-      yDomainRight: [0, 100],
-      axisValueFmt: v => `${v.toFixed(0)}°C`,
-      rightAsArea: true,
-      hLines: [{ value: 85, label: '85°C — running hot' }],
-      logTime: true,
-    };
-    if (hasTempPeakFull) tempLogOpts.envelope = { lower: 0, upper: 1, className: 'band-temp' };
-    renderLineChart('chart-temp-log', 'tooltip-temp-log', rows.timestamps, tempSeriesLog, tempColorsLog, v => `${v.toFixed(1)}°C`, tempLogOpts);
 
     // Log-age chart: the server does the pyramid (macmon ~5s out to 24h,
     // 5-minute CSV rows beyond) and hands back two already-binned curves.
@@ -2806,6 +2790,12 @@ refreshTempAge();
   // drag across the range doesn't fire a request per step.
   sl.addEventListener('input', () => renderMaxPower(parseFloat(sl.value)));
   sl.addEventListener('change', () => postMaxPower(parseFloat(sl.value)));
+  document.querySelectorAll('.series-toggle').forEach(cb => {
+    cb.addEventListener('change', () => {
+      seriesOn[cb.dataset.series] = cb.checked;
+      if (lastTempAge) renderTempAge(lastTempAge);
+    });
+  });
   const en = document.getElementById('max-power-enable');
   if (en) en.addEventListener('change', () => {
     if (en.checked) {

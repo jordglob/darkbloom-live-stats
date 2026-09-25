@@ -2404,6 +2404,7 @@ TEMP_AGE_BINS = 340
 TEMP_AGE_FLOOR_MS = 200  # never claim resolution finer than this
 MACMON_TS_RE = re.compile(r'"timestamp":\s*"([^"]+)"')
 MACMON_GPU_TEMP_RE = re.compile(r'"gpu_temp_avg":\s*([0-9.]+)')
+MACMON_CPU_TEMP_RE = re.compile(r'"cpu_temp_avg":\s*([0-9.]+)')
 # The full history (12MB of macmon + the whole CSV) is expensive to parse and
 # barely changes, while the right-hand edge of the chart changes every ~5s.
 # So the parsed SAMPLES are cached and only topped up from the tail of the log,
@@ -2440,12 +2441,18 @@ def _log_bin(samples, now, frame_min_ms, frame_max_ms, nbins):
         age_ms = max(frame_min_ms, age_ms)
         idx = int((math.log10(age_ms) - lo) / (hi - lo) * nbins)
         idx = max(0, min(nbins - 1, idx))
-        a = acc.setdefault(idx, [0.0, 0.0, 0])
+        a = acc.setdefault(idx, [0.0, 0.0, 0, v])
         a[0] += age_ms
         a[1] += v
         a[2] += 1
-    out = [{"age_ms": round(s_age / n, 1), "v": round(s_v / n, 2)}
-           for s_age, s_v, n in (acc[i] for i in sorted(acc))]
+        if v > a[3]:
+            a[3] = v
+    # peak alongside the mean: on a log-age axis the gap between them is itself
+    # informative, because it shows how much each point is summarising. Bins
+    # near "now" span seconds, so peak collapses onto the mean; bins at the old
+    # end span days, and the band opens up.
+    out = [{"age_ms": round(s_age / n, 1), "v": round(s_v / n, 2), "peak": round(pk, 2)}
+           for s_age, s_v, n, pk in (acc[i] for i in sorted(acc))]
     out.sort(key=lambda p: -p["age_ms"])  # oldest first, so the line draws left to right
     return out
 
@@ -2471,7 +2478,8 @@ def _read_macmon_samples(now, max_age_sec):
                     continue
                 if t < cutoff:
                     continue
-                out.append((t, float(m_v.group(1))))
+                m_c = MACMON_CPU_TEMP_RE.search(line)
+                out.append((t, float(m_v.group(1)), float(m_c.group(1)) if m_c else None))
     except Exception:
         return []
     return out
@@ -2503,7 +2511,8 @@ def _read_macmon_tail_since(since_ts, max_bytes=262144):
             except Exception:
                 continue
             if t > since_ts:
-                out.append((t, float(m_v.group(1))))
+                m_c = MACMON_CPU_TEMP_RE.search(line)
+                out.append((t, float(m_v.group(1)), float(m_c.group(1)) if m_c else None))
     except Exception:
         return []
     return out
@@ -2581,7 +2590,7 @@ def get_temp_age_series():
     def _median_gap(samples):
         if len(samples) < 3:
             return None
-        ts = sorted(t for t, _ in samples)
+        ts = sorted(row[0] for row in samples)
         gaps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
         return gaps[len(gaps) // 2] if gaps else None
 
@@ -2604,7 +2613,11 @@ def get_temp_age_series():
         pass
 
     fine_cutoff = now - TEMP_AGE_FINE_MAX_SEC
-    temp_samples = [s for s in fine if s[0] >= fine_cutoff] + [s for s in csv_temp if s[0] < fine_cutoff]
+    temp_samples = ([(t, g) for t, g, _c in fine if t >= fine_cutoff]
+                    + [s for s in csv_temp if s[0] < fine_cutoff])
+    # CPU temperature exists only in macmon, so this series simply stops where
+    # macmon's coverage does rather than being faked from the CSV.
+    cpu_samples = [(t, c) for t, _g, c in fine if c is not None]
 
     result = {
         "now": now,
@@ -2615,6 +2628,7 @@ def get_temp_age_series():
         "fine_handover_sec": TEMP_AGE_FINE_MAX_SEC,
         "fine_sample_count": len(fine),
         "temp": _log_bin(temp_samples, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
+        "cpu_temp": _log_bin(cpu_samples, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
         "fan": _log_bin(csv_fan, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
     }
     return result
@@ -2693,13 +2707,6 @@ def get_energy_series():
         "gpu_temp_c": gpu_temp_c_trimmed,
         "peak_gpu_temp_c": peak_gpu_temp_c_trimmed,
         "fan_pct": fan_pct_trimmed,
-        # Untrimmed, full-history versions of the same three - kept alongside
-        # the trimmed ones so the log-time comparison chart can show the
-        # whole CSV span (compressing the empty pre-logging stretch instead
-        # of cutting it off) side by side with the linear, trimmed original.
-        "gpu_temp_c_full": gpu_temp_c,
-        "peak_gpu_temp_c_full": peak_gpu_temp_c,
-        "fan_pct_full": fan_pct,
         "cum_wh": [float(r.get("cum_wh", 0) or 0) for r in rows],
         "cum_cost_usd": cum_cost_usd,
         "est_revenue_usd": est_revenue_usd,

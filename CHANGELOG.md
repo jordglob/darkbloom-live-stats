@@ -1,5 +1,23 @@
 # Changelog
 
+## v35
+
+**The log-age chart is now the main chart** — moved directly under the live gauges, since it's the one that earns the position: it's the only view that fits a 30-second fan oscillation and a 27-day trend in one frame.
+
+**Series toggles.** A row of checkboxes with colour swatches turns each layer on and off independently: GPU temp, peak band, CPU temp, fan %. Toggle state lives in JS rather than being read from the DOM per frame, so the chart can still redraw at the live cadence without touching the document.
+
+**CPU temperature added** as a togglable series. macmon has been logging `cpu_temp_avg` all along next to the GPU reading and nothing used it. It shares the left axis — same unit — and answers "which of the two is actually producing the heat". It stops where macmon's coverage does rather than being faked from the CSV.
+
+**Peak band on the log-age chart.** It had the data but drew only the average line, which is why the older log-time chart looked richer. The band's *width* is the interesting part here: bins near "now" span seconds, so peak collapses onto the mean and the band closes to a line; bins at the old end span days and it opens up. Measured: 148 h back the spread is 40.4 °C, at 5.6 s it's 0.0. On an axis that deliberately distorts time, that gap shows how much each point is summarising.
+
+Plus the three fixes from the chart review:
+
+- **Removed the log-time chart (v23).** Demonstrably the weakest of the three: its right half was ~2 hours of flat interpolation across half the width, because equal-duration buckets stretched on a log axis add width without adding data. The log-age chart does what it was reaching for, with a real resolution pyramid behind it. Removing it also retired the `logTime` option, `nearestIdxToX`, and the `*_full` server fields that existed only to feed it — `renderLineChart` is back to roughly its pre-v23 shape.
+- **The earnings chart stops at "now".** It borrowed the price panel's grid, which runs into tomorrow so a forecast has somewhere to go — but you cannot have earned tomorrow's money, so ~40 % of it was permanently blank. Now ends at the last elapsed bucket; verified the data reaches the exact plot edge (914 of 914 px).
+- **The power chart's peak is a band**, matching the temp chart. Two charts showing the same relationship shouldn't speak two different visual languages on one page; a dashed line above the data reads as a limit, a band reads as spread.
+
+Not split into separate commits as originally planned — the work was redirected partway through and the edits interleave in the same functions, so splitting afterwards would have been fictional.
+
 ## v34
 
 **Decade banding on the log-age chart.** Alternate decades now carry a faint background tint. The one thing a reader has to grasp about this chart is that equal width is *not* equal time — near the right edge a centimetre is seconds, near the left it's weeks — and shading alternate decades makes that structural rather than something to infer from the tick labels. Same convention as log graph paper.
