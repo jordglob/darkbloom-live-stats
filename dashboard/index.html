@@ -374,8 +374,10 @@
     <h2 title="Same GPU temperature, on a logarithmic AGE axis: 'now' is the right edge and each vertical gridline is a step further into the past. Fed by two resolutions - macmon's ~5s readings for the last hour, then 5-minute CSV buckets beyond that - so zooming toward now shows real samples rather than one bucket average stretched wide.">GPU Temp &amp; Fan — log age <span id="temp-age-stats" class="gauge-time"></span></h2>
     <div class="legend" id="temp-age-legend"></div>
     <div class="warmup-row" style="margin-bottom:4px">
-      <span class="warmup-status" style="margin:0" title="Synthetic CPU + GPU load, so you can watch the fan respond to real heat instead of waiting for paid traffic to produce it. Drag it up and watch the curves move.">Load test:</span>
-      <input type="range" id="max-power-slider" min="0" max="100" step="5" value="0" style="flex:1;max-width:260px">
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Off by default. Synthetic CPU + GPU load, so you can watch the fan respond to real heat instead of waiting for paid traffic to produce it. Tick this, then drag the slider.">
+        <input type="checkbox" id="max-power-enable"> Load test
+      </label>
+      <input type="range" id="max-power-slider" min="0" max="100" step="5" value="0" disabled style="flex:1;max-width:260px">
       <span class="warmup-status" style="margin:0;min-width:3.5em"><strong id="max-power-value">0%</strong></span>
       <span class="warmup-status" style="margin:0;font-size:12px;color:var(--text-muted)" id="max-power-cadence" title="Sampling and redraw rate. Rises with the load, because watching the fan respond is the whole reason to turn the load up.">sampling 2.0s</span>
       <span id="max-power-warning" class="warmup-status" style="margin:0;font-size:12px;color:var(--status-serious)"></span>
@@ -993,6 +995,13 @@ function renderMaxPower(level) {
   if (c) c.textContent = `sampling ${(cadenceForLevel(level) / 1000).toFixed(1)}s`;
   if (w) w.innerHTML = maxPowerWarningHtml(level);
   if (sl && document.activeElement !== sl) sl.value = level;
+  const en = document.getElementById('max-power-enable');
+  const on = level > 0 || (en && en.checked);
+  if (sl) {
+    sl.disabled = !on;
+    sl.style.opacity = on ? '1' : '0.45';
+  }
+  if (en && document.activeElement !== en && level > 0) en.checked = true;
 }
 
 async function postMaxPower(level) {
@@ -1026,6 +1035,11 @@ function renderTempAge(ta) {
     merged.temp = mergeTiers(ta.temp, logBinAges(liveTier, 'temp', nowMs, frameMin, ta.frame_max_ms, 90));
     merged.fan = mergeTiers(ta.fan, logBinAges(liveTier, 'fan', nowMs, frameMin, ta.frame_max_ms, 90));
     merged.live_tier_points = liveTier.length;
+    // So the tooltip can name the tier a point actually came from - the live
+    // buffer's cadence changes with the load slider, and saying "~6s sample"
+    // for a 0.4s reading would be wrong.
+    merged.live_oldest_age_ms = nowMs - liveTier[0].t * 1000;
+    merged.live_cadence_ms = LIVE_TIER_CADENCE_MS;
   }
   renderLogAgeChart('chart-temp-age', 'tooltip-temp-age', merged, {
     yDomain: [35, 105],
@@ -2420,7 +2434,7 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
   const frameAge = frameMax >= 86400000
     ? `${(frameMax / 86400000).toFixed(0)}d`
     : `${(frameMax / 3600000).toFixed(0)}h`;
-  const frameLabel = `${frameAge} · install`;
+  const frameLabel = `${frameAge} since install`;
   const edgeLab = mk('text');
   edgeLab.setAttribute('x', padL); edgeLab.setAttribute('y', h - 8);
   edgeLab.setAttribute('text-anchor', 'start');
@@ -2573,7 +2587,16 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
     hoverLine.style.display = 'block';
     dotT.setAttribute('cx', pt.x); dotT.setAttribute('cy', pt.y); dotT.style.display = 'block';
     if (pf) { dotF.setAttribute('cx', pf.x); dotF.setAttribute('cy', pf.y); dotF.style.display = 'block'; }
-    const src = pt.age <= (ta.fine_handover_sec || 0) * 1000 ? `~${(ta.sample_interval_sec || 5).toFixed(0)}s sample` : 'bucket avg';
+    // Three tiers, named by where the point actually came from.
+    let src;
+    if (ta.live_oldest_age_ms != null && pt.age <= ta.live_oldest_age_ms) {
+      const c = (ta.live_cadence_ms || 2000) / 1000;
+      src = `~${c < 1 ? c.toFixed(1) : c.toFixed(0)}s live`;
+    } else if (pt.age <= (ta.fine_handover_sec || 0) * 1000) {
+      src = `~${(ta.sample_interval_sec || 5).toFixed(0)}s sample`;
+    } else {
+      src = 'bucket avg';
+    }
     tooltip.style.display = 'block';
     tooltip.style.left = Math.min(rect.width - 175, Math.max(0, pt.x / (w / rect.width) + 10)) + 'px';
     tooltip.style.top = '0px';
@@ -2749,6 +2772,18 @@ refreshTempAge();
   // drag across the range doesn't fire a request per step.
   sl.addEventListener('input', () => renderMaxPower(parseFloat(sl.value)));
   sl.addEventListener('change', () => postMaxPower(parseFloat(sl.value)));
+  const en = document.getElementById('max-power-enable');
+  if (en) en.addEventListener('change', () => {
+    if (en.checked) {
+      // Ticking it shouldn't silently start burning power - arm the slider at
+      // zero and let the user choose the level deliberately.
+      renderMaxPower(0);
+      sl.disabled = false;
+      sl.style.opacity = '1';
+    } else {
+      postMaxPower(0);
+    }
+  });
 })();
 refreshPowerFast();
 refreshWarmup();

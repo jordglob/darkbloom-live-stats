@@ -1,5 +1,15 @@
 # Changelog
 
+## v33
+
+Three fixes to the load-test control:
+
+- **A checkbox arms it.** The slider is disabled and dimmed until "Load test" is ticked, so its off-state is unmistakable rather than being inferred from a slider sitting at zero. Ticking the box arms the slider at 0 rather than starting anything — turning it on shouldn't silently begin burning power; the level stays a deliberate second choice.
+- **The axis label reads "27d since install"**, not a bare duration or an ambiguous "· install".
+- **The tooltip now names the tier a point actually came from.** It reported `~6s sample` for everything under 24h, which is wrong for points out of the browser's live buffer — and increasingly wrong during a load test, where that buffer runs at up to 0.4s. Three tiers now: `~0.4s live` (browser buffer, at its current cadence), `~6s sample` (macmon), `bucket avg` (CSV).
+
+Verified the adaptive cache actually reaches the sensor at the faster rate, by probing `/api/live_power` every 0.5s: at level 0 the readings repeat in pairs (the 2s cache serving duplicates), at level 100 they change on nearly every probe and visibly climb. Without that change the faster polling would have redrawn the same stale number.
+
 ## v32
 
 **Price Guard reduced to the three states it actually has.** The old UI split one decision across a mode pair (Manual/Auto) plus separate Start/Stop buttons plus, briefly, a pause panel of its own. That made "Manual" read like a state when it only ever meant "nothing automatic touches this". Now:
