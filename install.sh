@@ -43,7 +43,7 @@ mkdir -p "$TARGET/dashboard"
 cp "$REPO_DIR/dashboard/server.py" "$TARGET/dashboard/server.py"
 cp "$REPO_DIR/dashboard/index.html" "$TARGET/dashboard/index.html"
 
-for f in pm-start.sh energy-monitor.sh; do
+for f in pm-start.sh energy-monitor.sh max-power.sh; do
   cp "$REPO_DIR/scripts/$f" "$TARGET/$f"
   chmod +x "$TARGET/$f"
 done

@@ -500,7 +500,20 @@ STATUS_PATTERNS = {
 }
 
 
+STATUS_CACHE_SEC = 5
+_status_cache = {"data": None, "at": 0.0}
+_status_lock = threading.Lock()
+
+
 def get_darkbloom_status():
+    """Cached briefly: `darkbloom status` is a ~900ms subprocess, and several
+    callers per /api/data cycle plus the price-guard and pause paths all want
+    it. 5s is well inside the page's own 10s refresh, so nothing observable
+    goes stale."""
+    now = time.time()
+    with _status_lock:
+        if _status_cache["data"] is not None and now - _status_cache["at"] < STATUS_CACHE_SEC:
+            return _status_cache["data"]
     try:
         out = subprocess.run(
             [str(DARKBLOOM_BIN), "status"], capture_output=True, text=True, timeout=10
@@ -555,6 +568,9 @@ def get_darkbloom_status():
                     result["trust_reason"] = mm.group(1).strip()
                     break
             break
+    with _status_lock:
+        _status_cache["data"] = result
+        _status_cache["at"] = time.time()
     return result
 
 
@@ -1037,7 +1053,11 @@ FAN_HELPER_BIN = HOME / ".darkbloom" / "bin" / "darkbloom-fan-helper"
 FAN_RECOVERY_LOG = HOME / ".darkbloom" / "fan-recovery.log"
 FAN_RECOVERY_START_C = 45  # matches Darkbloom's own stated policy ("80.0% at 45.0 C")
 FAN_RECOVERY_FULL_C = 85  # ramps to 100% by here - real headroom under the ~100-105C throttle point
-FAN_RECOVERY_POLL_SEC = 30
+# Re-applied every poll while engaged, and the helper computes a single fan
+# target from the temperature at that moment rather than installing a curve the
+# SMC follows on its own - so this interval IS the tracking resolution. At 30s
+# the fan lagged temperature badly; at 5s it follows it.
+FAN_RECOVERY_POLL_SEC = 5
 # Release well below the engage point, and never immediately. Engaging and
 # releasing on the same condition made this oscillate: _is_running_hot() needs
 # the fan to be LOW, so the moment recovery spun the fan up the condition it
@@ -1046,8 +1066,18 @@ FAN_RECOVERY_POLL_SEC = 30
 # reheated and it engaged again. Measured over 3.1 days of real log: 1517
 # cycles (488/day), median hold 30s - exactly one poll - and 74% of releases
 # happened with the GPU still above 70C, 30% still above 80C, one at 100.5C.
-FAN_RECOVERY_RELEASE_C = 70
+FAN_RECOVERY_RELEASE_C = 48
 FAN_RECOVERY_MIN_HOLD_SEC = 180
+# Engage as soon as the fan demonstrably isn't tracking temperature - not once
+# it's already an emergency. Darkbloom's own stated policy is "80.0% at 45.0 C",
+# so a GPU sitting at 55C+ with the fan still near its 1000rpm floor means
+# their helper is not doing the job, whatever the reason. Waiting for 85C (the
+# old behaviour, inherited from the Running Hot banner's threshold) meant the
+# fan stayed flat at the floor across the entire 45-85C range and then slammed
+# to 100%. Observed live at GPU 75.3C: fan 1000/4900, target 1000, "auto".
+# Applying the 45->85 curve at that temperature asks for ~75% instead.
+FAN_RECOVERY_ENGAGE_C = 55
+FAN_RECOVERY_ENGAGE_FAN_FRAC = 0.35
 _fan_recovery_state = {"active": False, "last_action_at": None, "last_status": None, "engaged_at": None}
 # Persisted, because this state means "we have the fan pinned in manual mode".
 # Kept only in memory it was lost on every restart, and the release branch
@@ -1134,6 +1164,23 @@ def _is_running_hot(ft):
     return (hot and fan_frac < 0.5) or (helper_failing and hot)
 
 
+def _fan_is_not_tracking(ft):
+    """Engage condition for recovery: the GPU is warm enough that the fan
+    should have spun up by Darkbloom's own stated policy, and it hasn't.
+
+    Deliberately separate from _is_running_hot(), which stays at 85C because
+    the Running Hot banner means "this is an emergency". This one means "the
+    fan is not following temperature", which is a lower bar and the thing we
+    can actually fix by applying a curve."""
+    if not ft or ft.get("gpu_temp_c") is None or not ft.get("fan_rpm") or not ft.get("fan_max_rpm"):
+        return False
+    warm = ft["gpu_temp_c"] >= FAN_RECOVERY_ENGAGE_C
+    fan_frac = ft["fan_rpm"] / ft["fan_max_rpm"]
+    helper_failing = bool(
+        ft.get("fan_mode") == "error" or (ft.get("fan_error") and ft.get("fan_service_running")))
+    return bool(warm and (fan_frac < FAN_RECOVERY_ENGAGE_FAN_FRAC or helper_failing))
+
+
 def _fan_recovery_decision(active, temp_c, held_sec, hot):
     """Pure state-machine step for fan_recovery_loop: "engage" | "hold" |
     "release" | "idle".
@@ -1177,7 +1224,7 @@ def fan_recovery_loop():
 
             held = now_t - (_fan_recovery_state["engaged_at"] or now_t)
             action = _fan_recovery_decision(
-                _fan_recovery_state["active"], temp, held, _is_running_hot(ft))
+                _fan_recovery_state["active"], temp, held, _fan_is_not_tracking(ft))
 
             if _fan_recovery_state["active"]:
                 if action == "release":
@@ -1277,6 +1324,78 @@ def end_pause(reason):
     write_pause_config({"active": False, "until": None, "started_at": None})
     log_price_guard(f"PAUSE ENDED: {reason}")
     return ok
+
+
+MAX_POWER_SCRIPT = HOME / ".darkbloom" / "max-power.sh"
+MAX_POWER_DEFAULT_SEC = 300
+MAX_POWER_MAX_SEC = 1800
+_max_power = {"proc": None, "started_at": None, "until": None}
+_max_power_lock = threading.Lock()
+
+
+def get_max_power_status():
+    with _max_power_lock:
+        proc, until = _max_power["proc"], _max_power["until"]
+        running = bool(proc and proc.poll() is None)
+        if not running and proc is not None:
+            _max_power["proc"] = None
+            _max_power["started_at"] = None
+            _max_power["until"] = None
+    return {
+        "available": MAX_POWER_SCRIPT.exists(),
+        "running": running,
+        "remaining_sec": max(0, until - time.time()) if (running and until) else None,
+    }
+
+
+def start_max_power(seconds=None):
+    """Saturates CPU and GPU for a bounded time, so thermal and fan behaviour
+    can be watched under real heat instead of waiting for paid traffic to
+    happen to produce it - this is what validates a fan-control change.
+
+    Runs in its own process group so the whole tree dies on one signal. Time
+    boxed on purpose: it competes with real paid inference on the same GPU, so
+    it is something you turn on knowingly, not a mode you leave running. The
+    Neural Engine is not loaded (that needs a compiled CoreML model, and
+    neither coremltools nor Xcode is present); audio is never touched."""
+    if not MAX_POWER_SCRIPT.exists():
+        return False
+    secs = int(max(10, min(MAX_POWER_MAX_SEC, seconds or MAX_POWER_DEFAULT_SEC)))
+    stop_max_power()
+    try:
+        proc = subprocess.Popen(
+            ["/bin/bash", str(MAX_POWER_SCRIPT), str(secs)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        log_price_guard(f"ERROR: max power failed to start: {e}")
+        return False
+    with _max_power_lock:
+        _max_power["proc"] = proc
+        _max_power["started_at"] = time.time()
+        _max_power["until"] = time.time() + secs
+    log_price_guard(f"MAX POWER: saturating CPU+GPU for {secs}s")
+    return True
+
+
+def stop_max_power():
+    with _max_power_lock:
+        proc = _max_power["proc"]
+        _max_power["proc"] = None
+        _max_power["started_at"] = None
+        _max_power["until"] = None
+    if proc and proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        log_price_guard("MAX POWER: stopped")
+        return True
+    return False
 
 
 def pause_loop():
@@ -1693,10 +1812,19 @@ def get_doctor_report():
     return result
 
 
+DISK_CACHE_SEC = 300
+_disk_cache = {"data": None, "at": 0.0}
+_disk_lock = threading.Lock()
+
+
 def get_disk_usage():
     """Downloaded MLX models and how much disk they use, split into the
     currently active model vs. everything else - the leftovers from past
     model-rotation experiments that are safe to remove if disk space matters."""
+    now = time.time()
+    with _disk_lock:
+        if _disk_cache["data"] is not None and now - _disk_cache["at"] < DISK_CACHE_SEC:
+            return _disk_cache["data"]
     try:
         out = subprocess.run(
             [str(DARKBLOOM_BIN), "models", "list", "--json"],
@@ -1720,11 +1848,15 @@ def get_disk_usage():
             "active": is_active,
         })
     models.sort(key=lambda m: (not m["active"], -m["size_gb"]))
-    return {
+    result = {
         "models": models,
         "active_models": active_models,
         "unused_total_gb": round(unused_total_bytes / 1e9, 1),
     }
+    with _disk_lock:
+        _disk_cache["data"] = result
+        _disk_cache["at"] = time.time()
+    return result
 
 
 def _bucket_downsample(rows, max_points):
@@ -2638,8 +2770,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = {
                 "status": get_darkbloom_status(),
                 "energy": get_energy_series(),
-                "temp_age": get_temp_age_series(),
                 "pause": get_pause_status(),
+                "max_power": get_max_power_status(),
                 "live_power": get_live_power(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),
@@ -2737,6 +2869,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cfg["min_stopped_min"] = max(0, float(body["min_stopped_min"]))
             write_price_guard_config(cfg)
             self._send_json(cfg)
+        elif self.path == "/api/max_power":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if body.get("action") == "stop":
+                ok = stop_max_power()
+            else:
+                ok = start_max_power(body.get("seconds"))
+            self._send_json({"ok": ok, "max_power": get_max_power_status()})
+
         elif self.path == "/api/pause":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -2813,6 +2954,7 @@ class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 if __name__ == "__main__":
     atexit.register(release_fan_on_shutdown)
+    atexit.register(stop_max_power)
     for _sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(_sig, lambda *_: sys.exit(0))
     threading.Thread(target=warmup_loop, daemon=True).start()

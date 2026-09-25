@@ -1,5 +1,29 @@
 # Changelog
 
+## v31
+
+**The fan now follows temperature.** This was the point of the whole exercise, and it wasn't fixed by v27 — that fix stopped the *oscillation*, but recovery still only engaged at 85°C. Below that the fan sat flat at its 1000rpm floor no matter how warm the GPU got, then slammed to 100%. Caught live: **GPU 75.3°C with the fan at 1000rpm, target 1000, "auto"** — while Darkbloom's own stated policy is "80.0% at 45.0 C".
+
+Recovery now engages on a new, separate condition (`_fan_is_not_tracking()`): GPU ≥55°C with the fan still under 35%. That's a demonstrable "their helper isn't doing its job" signal rather than an emergency. `_is_running_hot()` stays at 85°C, because the Running Hot banner should keep meaning *emergency*. Release drops to ≤48°C to sit well below the new engage point.
+
+The helper computes a single fan target from the temperature at that instant — it does not install a curve the SMC follows on its own — so **the poll interval IS the tracking resolution**. Dropped 30s → 5s. Measured under a real load run:
+
+| GPU at engage | fan fraction applied |
+|---|---|
+| 55.6°C | 0.30 |
+| 65.8°C | 0.55 |
+| 68.1°C | 0.79 |
+
+Proportional, and it released cleanly each time (down to 40°C after a full 3-minute hold). Previously: flat at the floor until 85°C, then `1.000000`, then thrash.
+
+**Max power button** (in Price Guard, next to Pause). Saturates every CPU core and the GPU via an MLX/Metal matmul loop, time-boxed and stoppable, so thermal and fan behaviour can be watched under real heat instead of waiting for paid traffic to produce it — this is what validated the change above. Measured: idle 7.1W → **112W**, GPU 4% → 100%, 40.9°C → 84.9°C. The Neural Engine is deliberately **not** loaded: reaching it needs a compiled CoreML model and neither coremltools nor Xcode is present here, and faking it would be worse than leaving it out honestly. Audio is never touched. The UI states plainly that it competes with real paid inference on the same GPU.
+
+**Monitoring overhead cut to 0.95% of the machine** (the stated budget was 1%). `/api/data` was taking **3.2 seconds per call** every 10s — 32% of a core — because four slow subprocess calls were being re-run at the page's refresh rate. `get_disk_usage()` (models on disk, ~1.1s) is now cached 300s and `get_darkbloom_status()` (~0.9s) 5s; `doctor` was already cached; `temp_age` was dropped from `/api/data` since the chart has its own endpoint. Result: 3.2s → 0.2s, and the dashboard process went from 24.4% of a core to 0.3%. What remains is dominated by `powermetrics` (10.3% of a core), which is the irreducible cost of sampling power at 200ms.
+
+**Pause moved into Price Guard and simplified** — one duration dropdown and one button instead of a panel of its own, since it belongs with the other start/stop controls.
+
+**Fixed: the log-age chart stopped rendering.** Removing `temp_age` from `/api/data` (above) also removed the call that bootstrapped its polling timer — the timer is set up *by* the first render, so nothing ever started it. Now kicked off explicitly at page load.
+
 ## v30
 
 **A third, live tier on the log-age chart, collected in the browser.** The same 2s poll that already drives the live gauges now also feeds a ring buffer, spliced onto the right edge of the chart. So the newest stretch is real live readings rather than the server's coarsest-available summary, and the chart moves when the gauges do.

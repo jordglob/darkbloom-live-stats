@@ -334,11 +334,6 @@
   </div>
 
   <div class="panel">
-    <h2 title="Stops serving on purpose, for a set time or until you resume. Uses darkbloom's own stop command, so the coordinator sees a clean intentional disconnect rather than a crash - your hardware-trust level is not affected. Price Guard's Auto mode will not start back into a pause.">Pause serving <span class="gauge-time">(temporarily stop renting out this Mac)</span></h2>
-    <div id="pause-panel"></div>
-  </div>
-
-  <div class="panel">
     <h2 title="Compares the current electricity price against this account's own measured $/hr active pay rate, converted to a break-even price per kWh in your configured currency. Auto mode calls the real darkbloom start/stop CLI commands - Manual mode just shows the numbers and lets you trigger start/stop yourself.">Price Guard <span class="gauge-time">(optional: pause serving when electricity costs more than serving earns)</span></h2>
     <div id="price-guard"></div>
   </div>
@@ -487,6 +482,7 @@ let lastPowerMethod = null;
 let lastPriceGuard = null;
 let lastAccount = null;
 let lastPause = null;
+let lastMaxPower = null;
 let lastConfiguredModels = [];
 let chatMessages = [];
 let chatModel = null;
@@ -983,67 +979,90 @@ async function refreshTempAge() {
   } catch (e) { /* silent */ }
 }
 
-function renderPause(pause, account) {
-  const el = document.getElementById('pause-panel');
-  if (!el) return;
+function pauseControlsHtml(pause, account) {
   const hr = (account && account.hourly_rate_comparison) || null;
   const floorRate = hr && hr.floor_rate_per_hour_usd;
   const activeRate = hr && hr.active_rate_per_hour_usd;
 
-  // The warning is built from this account's own measured rates, not a quoted
-  // figure. The base reward is the part people don't expect to lose: it's paid
-  // for being online and trusted at all, so an idle-but-connected Mac still
-  // earns it and a paused one doesn't.
-  let warn = 'Pausing stops all earnings, including the base reward paid just for being online and trusted.';
+  // Built from this account's own measured rates, not a quoted figure. The
+  // base reward is the part people don't expect to lose: an idle-but-connected
+  // Mac still earns it, a paused one doesn't.
+  let warn = 'Pausing stops all earnings, including the base reward paid just for being online.';
   if (floorRate != null && activeRate != null) {
     const total = floorRate + activeRate;
     const share = total > 0 ? (floorRate / total) * 100 : 0;
-    warn = `<strong>Pausing gives up the base reward too.</strong> This account earns <strong>$${floorRate.toFixed(4)}/h</strong> ` +
-      `just for being online and trusted — that's <strong>${share.toFixed(0)}%</strong> of its hourly income, and it does not depend on ` +
-      `serving any requests. Actually serving adds $${activeRate.toFixed(4)}/h on top. A 24h pause costs roughly ` +
-      `<strong>$${(total * 24).toFixed(2)}</strong>.`;
+    warn = `Pausing gives up the base reward too — <strong>$${floorRate.toFixed(4)}/h</strong> just for being online ` +
+      `(${share.toFixed(0)}% of hourly income, and it doesn't depend on serving). A 24h pause ≈ <strong>$${(total * 24).toFixed(2)}</strong>.`;
+  }
+
+  const mp = lastMaxPower;
+  if (mp && mp.running) {
+    const l = mp.remaining_sec;
+    return `
+      <div class="warmup-row">
+        <span class="warmup-status" style="margin:0"><strong style="color:var(--status-serious)">Max power running</strong> — CPU + GPU saturated, ${Math.max(0, Math.round(l))}s left.</span>
+        <button class="copy-cmd-btn" id="max-power-stop-btn">Stop</button>
+      </div>
+      <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">Competing with real paid inference on the same GPU while this runs. Neural Engine not loaded (needs a compiled CoreML model — not installed here); audio untouched.</div>`;
   }
 
   if (pause && pause.active) {
-    const left = pause.indefinite ? null : pause.remaining_sec;
+    const left = pause.remaining_sec;
     const leftTxt = pause.indefinite
       ? 'until you resume'
       : `resumes in ${left > 3600 ? (left / 3600).toFixed(1) + ' h' : Math.max(0, Math.round(left / 60)) + ' min'}`;
-    el.innerHTML = `
+    return `
       <div class="warmup-row">
-        <span class="warmup-status" style="margin:0"><strong style="color:var(--status-warning)">Serving paused</strong> — ${leftTxt}.</span>
-        <button class="copy-cmd-btn" id="pause-resume-btn">Resume now</button>
+        <span class="warmup-status" style="margin:0"><strong style="color:var(--status-warning)">Paused</strong> — ${leftTxt}.</span>
+        <button class="copy-cmd-btn" id="pause-resume-btn">Resume</button>
       </div>
       <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${warn}</div>`;
-    const btn = document.getElementById('pause-resume-btn');
-    if (btn) btn.addEventListener('click', () => postPause({ action: 'resume' }));
-    return;
   }
 
-  el.innerHTML = `
+  return `
     <div class="warmup-row">
-      <span class="warmup-status" style="margin:0">Pause for:</span>
-      <button class="copy-cmd-btn pause-btn" data-hours="1">1 h</button>
-      <button class="copy-cmd-btn pause-btn" data-hours="4">4 h</button>
-      <button class="copy-cmd-btn pause-btn" data-hours="8">8 h</button>
-      <button class="copy-cmd-btn pause-btn" data-hours="24">24 h</button>
-      <button class="copy-cmd-btn pause-btn" data-hours="">Until I resume</button>
+      <span class="warmup-status" style="margin:0">Serving:</span>
+      <select id="pause-hours" title="How long to stop serving for. Uses darkbloom's own stop command, so it counts as a clean intentional disconnect and doesn't affect hardware trust.">
+        <option value="1">1 h</option>
+        <option value="4">4 h</option>
+        <option value="8">8 h</option>
+        <option value="24">24 h</option>
+        <option value="">until I resume</option>
+      </select>
+      <button class="copy-cmd-btn" id="pause-btn">Pause</button>
+      <button class="copy-cmd-btn" id="max-power-btn" title="Saturates every CPU core and the GPU (via MLX/Metal) for 5 minutes, so you can watch how temperature and the fan actually behave under real heat. The Neural Engine is NOT loaded - that needs a compiled CoreML model and neither coremltools nor Xcode is installed here, and faking it would be worse than leaving it out. Audio is never touched. Note: this competes with real paid inference on the same GPU.">Max power (5 min)</button>
     </div>
-    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${warn}</div>
-    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">Uses darkbloom's own stop command, so this counts as a clean intentional disconnect — it does not affect your hardware-trust level, and Darkbloom's watchdog leaves a deliberate stop alone. Price Guard keeps its current mode and will not start back into a pause.</div>`;
-  document.querySelectorAll('.pause-btn').forEach(b => {
-    b.addEventListener('click', () => {
-      const h = b.dataset.hours;
-      postPause({ action: 'pause', hours: h ? parseFloat(h) : null });
-    });
+    <div class="warmup-status" style="font-size:12px;color:var(--text-muted)">${warn}</div>`;
+}
+
+function wirePauseControls() {
+  const resume = document.getElementById('pause-resume-btn');
+  if (resume) resume.addEventListener('click', () => postPause({ action: 'resume' }));
+  const pauseBtn = document.getElementById('pause-btn');
+  if (pauseBtn) pauseBtn.addEventListener('click', () => {
+    const v = document.getElementById('pause-hours').value;
+    postPause({ action: 'pause', hours: v ? parseFloat(v) : null });
   });
+  const maxBtn = document.getElementById('max-power-btn');
+  if (maxBtn) maxBtn.addEventListener('click', () => postMaxPower({ seconds: 300 }));
+  const maxStop = document.getElementById('max-power-stop-btn');
+  if (maxStop) maxStop.addEventListener('click', () => postMaxPower({ action: 'stop' }));
+}
+
+async function postMaxPower(body) {
+  try {
+    const res = await fetch('/api/max_power', { method: 'POST', body: JSON.stringify(body) });
+    lastMaxPower = (await res.json()).max_power;
+    refreshPriceGuard();
+  } catch (e) { /* silent */ }
 }
 
 async function postPause(body) {
   try {
     const res = await fetch('/api/pause', { method: 'POST', body: JSON.stringify(body) });
     const out = await res.json();
-    renderPause(out.pause, lastAccount);
+    lastPause = out.pause;
+    refreshPriceGuard();
     refresh();
   } catch (e) { /* silent */ }
 }
@@ -1090,6 +1109,7 @@ function renderPriceGuard(pg) {
       <button class="copy-cmd-btn" id="pg-start-btn" ${daemonRunning ? 'disabled' : ''}>Start now</button>
       <button class="copy-cmd-btn" id="pg-stop-btn" ${!daemonRunning ? 'disabled' : ''}>Stop now</button>
     </div>` : ''}
+    ${pauseControlsHtml(lastPause, lastAccount)}
     ${pg.log_tail && pg.log_tail.length ? `<div class="warmup-log">${[...pg.log_tail].reverse().join('<br>')}</div>` : ''}
   `;
 
@@ -1111,6 +1131,7 @@ function renderPriceGuard(pg) {
   const stopBtn = document.getElementById('pg-stop-btn');
   if (startBtn) startBtn.addEventListener('click', () => postPriceGuardAction('start'));
   if (stopBtn) stopBtn.addEventListener('click', () => postPriceGuardAction('stop'));
+  wirePauseControls();
 }
 
 async function postPriceGuardConfig(body) {
@@ -2595,7 +2616,8 @@ async function refresh() {
     lastUtilization = utilization || null;
     lastAccount = account || null;
     lastPause = data.pause || null;
-    renderPause(data.pause, account);
+    lastMaxPower = data.max_power || null;
+    if (lastPriceGuard) renderPriceGuard(lastPriceGuard);
 
     renderCards(status, energy, account, daemon_state);
     renderBanners(status, energy, doctor, daemon_state);
@@ -2670,7 +2692,6 @@ async function refresh() {
 
     // Log-age chart: the server does the pyramid (macmon ~5s out to 24h,
     // 5-minute CSV rows beyond) and hands back two already-binned curves.
-    if (data.temp_age) renderTempAge(data.temp_age);
 
     renderLineChart('chart-money', 'tooltip-money',
       rows.timestamps,
@@ -2709,6 +2730,7 @@ async function refresh() {
 initGauges();
 refresh();
 refreshLivePower();
+refreshTempAge();
 refreshPowerFast();
 refreshWarmup();
 refreshPriceGuard();
