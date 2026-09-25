@@ -1,5 +1,23 @@
 # Changelog
 
+## v40
+
+**Fixed: Auto refused to resume for up to 30 minutes after a manual stop.** Caught live. The sequence:
+
+```
+06:22:41  mode set to manual via dashboard     (picked "Manual — stop")
+06:22:43  STOPPED: manual stop via dashboard
+06:28:12  mode set to auto via dashboard       (switched back to Auto)
+          ... nothing for five minutes ...
+06:33:00  STARTED: manual start via dashboard  (started by hand)
+```
+
+Auto wasn't holding off because of price — electricity was at 1.344 against a 7.494 break-even, deeply profitable. It was `min_stopped_min` (30 by default), which blocks a start until that long has passed *since the last action*. The last action was the user's own manual stop, so Auto sat idle until 06:52 waiting out a timer meant for something else.
+
+Those guards exist so Auto can't flap either side of the break-even price — they're Auto's own hysteresis. A manual start or stop is a human decision and can't oscillate, so making Auto wait one out just parks the provider for no reason, earning nothing, with only a reason string buried in the Price Guard panel to say why.
+
+`last_action_source` has been recorded since v19; `_evaluate_price_guard()` now consults it and zeroes both timers when the previous action was manual. Same blind spot as the v19 banner bug, in fact: the timer knew *when* the last action happened but not *who* made it.
+
 ## v39
 
 **The chat now explains itself when serving is stopped, and offers the way back.** It was already disabling correctly and showing "unavailable - the provider daemon is not running right now" — the chat talks to the same local inference endpoint paid work goes through, so no daemon means no model loaded. But two things made a correct state read as a broken page:

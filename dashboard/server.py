@@ -845,6 +845,17 @@ def _evaluate_price_guard(cfg):
     last_action_at = cfg.get("last_action_at") or 0
     min_running_sec = max(0, cfg.get("min_running_min", 60)) * 60
     min_stopped_sec = max(0, cfg.get("min_stopped_min", 30)) * 60
+    # These guards exist so Auto can't flap either side of the break-even
+    # price - they're about Auto's own hysteresis. A MANUAL start or stop is a
+    # human decision that can't oscillate, so making Auto wait out the timer
+    # after one just leaves the provider sitting idle for no reason. Seen live:
+    # a manual stop at 06:22, Auto switched back on at 06:28, and Auto refused
+    # to start until 06:52 while electricity was at 1.344 against a 7.515
+    # break-even. Same blind spot as the v19 banner bug - the timer knew WHEN
+    # the last action happened but not WHO made it.
+    if cfg.get("last_action_source") == "manual":
+        min_running_sec = 0
+        min_stopped_sec = 0
 
     action = None
     reason = None
