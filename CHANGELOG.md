@@ -1,5 +1,17 @@
 # Changelog
 
+## v37
+
+The four remaining points from the first-time-reader review.
+
+**Serving load is paired with the base-reward share.** A bare busy-ness percentage reads as a score you're failing, and a newcomer can't know there's nothing to fail at — the number reflects how much traffic the network sent, which the provider doesn't control. It now reads `143 requests/h · 102k tokens/h · 56% of earnings comes from being online regardless`, which is the fact that makes a quiet hour unalarming.
+
+**Warnings have two tiers instead of one colour.** Yellow was doing double duty: "known quirk, ignore it" and "go look at this" appeared identically, so three yellow lines made a working machine look broken. Health-check warnings now follow the same rule the top banner already used — if requests are visibly succeeding, a *warning* is by definition not blocking anything, so it renders grey with an explicit `note, no action needed —` prefix and turns yellow only if serving stops. The spam-heuristic line is demoted the same way below 1% of jobs, since 0% is noise rather than a pattern.
+
+**The load-test caption is permanent.** It warned about burning unpaid power only *after* you moved the slider — the wrong order for the one control on this page that costs money. A grey line now sits under the checkbox at all times: *"Load test burns power nobody is paying for and competes with real paid inference — it is off unless you tick it."*
+
+**"will NOT match the Net card, read why" now states the reason inline.** Leading with what a number *isn't* makes it sound untrustworthy. The heading reads "Estimated cost vs. revenue over full history (excludes the base reward — that's why it reads lower than Net)", so the discrepancy is explained where it's encountered rather than deferred to a footnote.
+
 ## v36
 
 Changes from reading the dashboard as someone opening it for the first time.

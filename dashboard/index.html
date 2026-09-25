@@ -394,6 +394,9 @@
       <label class="warmup-toggle" style="font-weight:400;margin:0"><input type="checkbox" class="series-toggle" data-series="fan" checked> <i style="background:var(--gauge-cpu);display:inline-block;width:9px;height:9px;border-radius:2px"></i> Fan %</label>
       <span id="max-power-warning" class="warmup-status" style="margin:0;font-size:12px;color:var(--status-serious)"></span>
     </div>
+    <div class="warmup-row" style="margin-bottom:4px">
+      <span class="warmup-status" style="margin:0;font-size:12px;color:var(--text-muted)" title="The load test exists to make heat on demand so you can watch the fan respond. It is synthetic work: nobody pays for it, and it shares the GPU with whatever real inference is running.">Load test burns power nobody is paying for and competes with real paid inference — it is off unless you tick it.</span>
+    </div>
     <div class="chart-wrap">
       <svg class="chart chart-tall" id="chart-temp-age"></svg>
       <div class="tooltip" id="tooltip-temp-age"></div>
@@ -414,7 +417,7 @@
 
   <div class="panel">
     <details class="explainer">
-      <summary>Estimated cost vs. revenue over full history (nerdy — will NOT match the Net card, read why)</summary>
+      <summary>Estimated cost vs. revenue over full history (excludes the base reward — that's why it reads lower than Net)</summary>
       <p style="font-size:12px;color:var(--text-muted);margin:8px 0">These two charts use a rough <em>local</em> revenue guess (tokens × a flat rate) that ignores the base reward - which is most of the real income - so they read far more pessimistic than your real balance. They're kept because they cover the full logged history (the real ledger only covers ~2 days locally) and show the token-earnings trend. For "am I making money", use the Net card and the real 48h chart above instead.</p>
       <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Token Revenue (USD) <span id="money-chart-stats" class="gauge-time"></span></h2>
       <div class="legend">
@@ -629,8 +632,16 @@ function updateGauges(data) {
       const reqH = utilization.requests_per_hour;
       const tokH = utilization.tokens_per_hour;
       const pagesH = (tokH ?? 0) * 0.75 / 500;
-      detailEl.textContent = (reqH != null) ? `${reqH} requests/h · ${fmtCompact(tokH ?? 0)} tokens/h${pagesH >= 1 ? ` (≈ ${Math.round(pagesH)} pages/h)` : ''}` : '';
-      detailEl.title = TOKENS_AS_TEXT_TIP;
+      // A bare busy-ness percentage reads as a score you're failing. Pairing it
+      // with the base-reward share says the thing a newcomer can't work out
+      // alone: a quiet hour still pays, and the traffic isn't yours to control.
+      const floorTxt = lastFloorShare != null
+        ? ` · ${(lastFloorShare * 100).toFixed(0)}% of earnings comes from being online regardless`
+        : '';
+      detailEl.textContent = (reqH != null)
+        ? `${reqH} requests/h · ${fmtCompact(tokH ?? 0)} tokens/h${pagesH >= 1 ? ` (≈ ${Math.round(pagesH)} pages/h)` : ''}${floorTxt}`
+        : '';
+      detailEl.title = TOKENS_AS_TEXT_TIP + ' There is no target number here: it reflects how much traffic the network sent you, which you do not control. The base reward is paid for being online and trusted whether or not any request arrives.';
     }
   });
 }
@@ -1034,6 +1045,7 @@ const seriesOn = { temp: true, peak: true, cpu: false, fan: true };
 let tempAgeTimer = null;
 let lastTempAge = null;
 let lastNetPerDay = null;
+let lastFloorShare = null;
 function renderTempAge(ta) {
   if (!ta) return;
   lastTempAge = ta;
@@ -1601,6 +1613,7 @@ function renderAccount(account) {
   let plainLine = '';
   if (hr && hr.floor_usd != null && hr.active_usd != null && (hr.floor_usd + hr.active_usd) > 0) {
     const floorShare = hr.floor_usd / (hr.floor_usd + hr.active_usd);
+    lastFloorShare = floorShare;
     plainLine = floorShare > 0.5
       ? `<strong>${(floorShare * 100).toFixed(0)}%</strong> of recent earnings is the base reward for being online and trusted; <strong>${((1 - floorShare) * 100).toFixed(0)}%</strong> is from actually serving requests. <span title="Normal on this network right now, not a sign something is wrong: staying trusted and online is what pays, serving is the bonus on top. Computed from the same real ledger window as the table below.">Normal here.</span>`
       : `<strong>${((1 - floorShare) * 100).toFixed(0)}%</strong> of recent earnings is from serving requests, <strong>${(floorShare * 100).toFixed(0)}%</strong> the base reward for being online.`;
@@ -1635,7 +1648,7 @@ function renderAccount(account) {
   };
 }
 
-function renderNerdyStats(daemonState, account, doctor, inferenceDurations) {
+function renderNerdyStats(daemonState, account, doctor, inferenceDurations, served) {
   const el = document.getElementById('nerdy-stats');
   if (!el) return;
 
@@ -1671,14 +1684,24 @@ Note: active $/hr counts every real job including likely spam (see the token-len
     `<span class="pill" style="margin-right:12px" title="Loaded in memory. KV = how the model's attention cache is stored; MTP = multi-token prediction."><span class="dot" style="background:var(--status-good)"></span>${s.model}${s.kv_backend ? `: ${s.kv_backend} KV` : ''}${s.mtp_enabled ? ', MTP on' : ''}</span>`
   ).join('');
 
+  // Two tiers, on the same rule the top banner already uses: if requests are
+  // visibly succeeding, a doctor WARNING is by definition not blocking
+  // anything, so it's a note rather than something to act on. Painting both
+  // kinds yellow made a working machine look broken - three yellow lines and
+  // no way to tell "known quirk, ignore" from "go look at this".
   const warns = (doctor && doctor.warns) || [];
   const warnLines = warns.length
-    ? warns.map(w => `<div class="rotation-summary" style="color:var(--status-warning)">⚠ ${w.check ? w.check + ' — ' : ''}${w.detail}</div>`).join('')
+    ? warns.map(w => {
+        const body = `${w.check ? w.check + ' — ' : ''}${w.detail}`;
+        return served > 0
+          ? `<div class="rotation-summary" title="Requests are succeeding right now, so this is informational. It would move to a warning if serving stopped."><span style="opacity:.6">note, no action needed —</span> ${body}</div>`
+          : `<div class="rotation-summary" style="color:var(--status-warning)">⚠ ${body}</div>`;
+      }).join('')
     : `<div class="rotation-summary">No warnings from \`darkbloom doctor\`.</div>`;
 
   el.innerHTML = `
     <div class="rotation-summary">${tokenLine}</div>
-    ${spamLine ? `<div class="rotation-summary" style="color:var(--status-warning)">${spamLine}</div>` : ''}
+    ${spamLine ? `<div class="rotation-summary"${(ns && ns.spam_jobs / Math.max(1, ns.real_jobs || ns.spam_jobs)) >= 0.01 ? ' style="color:var(--status-warning)"' : ' title="Below 1% of jobs - noise, not a pattern worth acting on."'}>${spamLine}</div>` : ''}
     <div class="rotation-summary">${durLine}</div>
     <div class="rotation-summary">${hourlyLine}</div>
     <div class="rotation-summary">${capLine}</div>
@@ -2711,7 +2734,7 @@ async function refresh() {
     updateChatAvailability(status, daemon_state);
     renderAccount(account);
     renderDisk(disk);
-    renderNerdyStats(daemon_state, account, doctor, inference_durations);
+    renderNerdyStats(daemon_state, account, doctor, inference_durations, status.requests_served || 0);
     const elprisNow = renderElpris(price_48h);
     renderReal48(price_48h);
     updateFavicon(status);
