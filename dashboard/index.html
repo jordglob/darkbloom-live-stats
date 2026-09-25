@@ -416,25 +416,15 @@
 
 
   <div class="panel">
-    <details class="explainer">
-      <summary>Estimated cost vs. revenue over full history (excludes the base reward — that's why it reads lower than Net)</summary>
-      <p style="font-size:12px;color:var(--text-muted);margin:8px 0">These two charts use a rough <em>local</em> revenue guess (tokens × a flat rate) that ignores the base reward - which is most of the real income - so they read far more pessimistic than your real balance. They're kept because they cover the full logged history (the real ledger only covers ~2 days locally) and show the token-earnings trend. For "am I making money", use the Net card and the real 48h chart above instead.</p>
-      <h2 title="Cumulative electricity cost vs. our own rough local revenue estimate, over time.">Cumulative Electricity Cost vs. Estimated Token Revenue (USD) <span id="money-chart-stats" class="gauge-time"></span></h2>
-      <div class="legend">
-        <span><i style="background:var(--series-cost)"></i>Electricity cost</span>
-        <span><i style="background:var(--series-revenue)"></i>Estimated token revenue (excl. base reward)</span>
-      </div>
-      <div class="chart-wrap">
-        <svg class="chart" id="chart-money"></svg>
-        <div class="tooltip" id="tooltip-money"></div>
-      </div>
-      <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Estimated revenue uses a flat $0.048 per million tokens, last recalibrated 2026-09-10 from this account's real ledger (excluding a known spam signature). <code>darkbloom status</code> only reports a combined token count, so it can't be split into input/output pricing. Recalibrated periodically, not trusted indefinitely.</p>
-      <h2 style="margin-top:16px" title="Estimated token revenue minus electricity cost, over the full logged history. Excludes the base reward, so it runs well below the real Net card.">Net (Estimated, excl. base reward) Over Time <span id="net-chart-stats" class="gauge-time"></span></h2>
-      <div class="chart-wrap">
-        <svg class="chart" id="chart-net"></svg>
-        <div class="tooltip" id="tooltip-net"></div>
-      </div>
-    </details>
+    <h2 title="Total tokens this Mac has generated, accumulated over the whole logged history. The daemon's own counter resets on every restart, so this adds up per-interval deltas rather than plotting the raw counter - a restart shows as a flat step, never a drop to zero.">Tokens generated — full history <span id="tokens-chart-stats" class="gauge-time"></span></h2>
+    <div class="legend">
+      <span><i style="background:var(--series-revenue)"></i>Cumulative tokens</span>
+    </div>
+    <div class="chart-wrap">
+      <svg class="chart" id="chart-tokens"></svg>
+      <div class="tooltip" id="tooltip-tokens"></div>
+    </div>
+    <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Work volume over the full log, which the 48h earnings chart above cannot show - Darkbloom's API only returns its most recent batch of ledger entries, so real per-entry earnings build up to about two days. For what you actually earned, read that chart; this one is for the long trend.</p>
   </div>
 
   <div class="panel">
@@ -1046,6 +1036,8 @@ let tempAgeTimer = null;
 let lastTempAge = null;
 let lastNetPerDay = null;
 let lastFloorShare = null;
+let showElprisNet = false;
+let lastPrice48 = null;
 function renderTempAge(ta) {
   if (!ta) return;
   lastTempAge = ta;
@@ -1792,6 +1784,7 @@ function renderPriceControls(p) {
 }
 
 function renderElpris(p) {
+  lastPrice48 = p;
   const surcharge = renderPriceControls(p) || { grid_fee_per_kwh: 0, energy_tax_per_kwh: 0, vat_pct: 0 };
   const prices = (p && p.prices) || [];
   const timestamps = prices.map(x => x.time_start);
@@ -1808,20 +1801,29 @@ function renderElpris(p) {
   const leftColors = ['line-elpris'];
   if (hasSurcharge) { leftSeries.push({ name: 'Incl. fees & tax', values: totalValues }); leftColors.push('line-elpris-total'); }
 
-  renderLineChart('chart-elpris', 'tooltip-elpris', timestamps, leftSeries, leftColors, fmtUsdPerKwh, {
-    allowNegative: true,
-    nowLine: true,
-    rightSeries: [{ name: 'Net (earnings − cost, 15-min)', values: netValues, colorClass: 'line-earnings' }],
-    rightValueFmt: fmtUsd,
-    allowNegativeRight: true,
-  });
+  // The per-slot Net overlay answers a real question - which hours were worth
+  // running - but it crosses zero constantly and is the noisiest thing on the
+  // page. Off by default, behind a checkbox, like the log-age chart's series.
+  const elprisOpts = { allowNegative: true, nowLine: true };
+  if (showElprisNet) {
+    elprisOpts.rightSeries = [{ name: 'Net (earnings − cost, 15-min)', values: netValues, colorClass: 'line-earnings' }];
+    elprisOpts.rightValueFmt = fmtUsd;
+    elprisOpts.allowNegativeRight = true;
+  }
+  renderLineChart('chart-elpris', 'tooltip-elpris', timestamps, leftSeries, leftColors, fmtUsdPerKwh, elprisOpts);
 
   const legendEl = document.getElementById('elpris-legend');
   if (legendEl) {
     legendEl.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Electricity price (left axis)</span>` +
       (hasSurcharge ? `<span><i style="background:var(--series-elpris-total)"></i>Incl. fees & tax</span>` : '') +
-      `<span title="Real earnings minus real electricity cost in each 15-minute slot, in USD - shows which hours were actually worth running."><i style="background:var(--series-revenue)"></i>Net per 15 min (right axis)</span>`;
+      `<label class="warmup-toggle" style="font-weight:400;margin:0;font-size:12px" title="Real earnings minus real electricity cost in each 15-minute slot - shows which hours were actually worth running. Off by default: it crosses zero constantly and makes the price lines harder to read."><input type="checkbox" id="elpris-net-toggle" ${showElprisNet ? 'checked' : ''}> <i style="background:var(--series-revenue)"></i>Net per 15 min (right axis)</label>`;
   }
+
+  const netToggle = document.getElementById('elpris-net-toggle');
+  if (netToggle) netToggle.addEventListener('change', () => {
+    showElprisNet = netToggle.checked;
+    if (lastPrice48) renderElpris(lastPrice48);
+  });
 
   let nowVal = null;
   const statsEl = document.getElementById('elpris-chart-stats');
@@ -2788,19 +2790,19 @@ async function refresh() {
     // Log-age chart: the server does the pyramid (macmon ~5s out to 24h,
     // 5-minute CSV rows beyond) and hands back two already-binned curves.
 
-    renderLineChart('chart-money', 'tooltip-money',
-      rows.timestamps,
-      [{name: 'Electricity cost', values: rows.cum_cost_usd || []}, {name: 'Revenue', values: rows.est_revenue_usd || []}],
-      ['line-cost', 'line-revenue'], fmtUsd);
-    const costNow = (rows.cum_cost_usd || []).at(-1), revNow = (rows.est_revenue_usd || []).at(-1);
-    document.getElementById('money-chart-stats').textContent = costNow != null ? `cost now: ${fmtUsd(costNow)} · revenue now: ${fmtUsd(revNow)}` : '';
-
-    renderLineChart('chart-net', 'tooltip-net', rows.timestamps,
-      [{name: 'Net', values: rows.net_usd || []}], ['line-net'], fmtUsd, {allowNegative: true});
-    const netVals = rows.net_usd || [];
-    const netNow = netVals.at(-1);
-    document.getElementById('net-chart-stats').textContent = netNow != null
-      ? `now: ${fmtUsd(netNow)} · min: ${fmtUsd(Math.min(...netVals))} · max: ${fmtUsd(Math.max(...netVals))}`
+    // Tokens, not dollars. The dollar version multiplied tokens by a flat
+    // guessed rate and excluded the base reward - most of the income - so it
+    // read far worse than reality and needed a paragraph of apology beneath
+    // it. And the Net chart under it was literally these two lines
+    // subtracted: server-side, net_usd is [rev - cost for rev, cost in ...].
+    // Token volume is the part that was actually worth plotting over 26 days.
+    const tokVals = rows.cum_tokens || [];
+    renderLineChart('chart-tokens', 'tooltip-tokens', rows.timestamps,
+      [{ name: 'Cumulative tokens', values: tokVals }], ['line-revenue'],
+      v => `${fmtCompact(v)} tokens`);
+    const tokNow = tokVals.at(-1);
+    document.getElementById('tokens-chart-stats').textContent = tokNow
+      ? `${fmtCompact(tokNow)} tokens · ≈ ${fmtCompact(tokNow * 0.75)} words since ${fmtTime(rows.timestamps[0])}`
       : '';
 
     document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');

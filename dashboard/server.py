@@ -1839,7 +1839,8 @@ def _bucket_downsample(rows, max_points):
     # which would otherwise drag whole buckets toward a fake near-zero read
     # for as long as old rows dominate a bucket.
     numeric_keys = ["avg_power_w", "total_power_w", "cum_wh", "cum_cost_sek",
-                     "elpris_sek_kwh", "usd_sek", "est_revenue_usd_approx"]
+                     "elpris_sek_kwh", "usd_sek", "est_revenue_usd_approx",
+                     "cum_tokens"]
     sparse_keys = ["gpu_temp_c", "fan_pct"]
     out_rows = []
     peak_total_power_w = []
@@ -2662,6 +2663,23 @@ def get_energy_series():
     if not rows:
         return {"rows": [], "latest": None, "power_monitoring_active": False}
 
+    # requests_served/tokens are the daemon's own lifetime counters, which
+    # reset to 0 on every daemon restart - plotting them raw gives a sawtooth
+    # that says nothing about total work done. Accumulate per-row deltas
+    # instead, treating any decrease as a restart where the whole new value is
+    # newly earned. Same rule get_utilization() applies to its window.
+    cum_tok = 0
+    prev_tok = None
+    for r in rows:
+        try:
+            v = int(float(r.get("tokens") or 0))
+        except (TypeError, ValueError):
+            v = prev_tok or 0
+        if prev_tok is not None:
+            cum_tok += (v - prev_tok) if v >= prev_tok else v
+        prev_tok = v
+        r["cum_tokens"] = cum_tok
+
     latest = rows[-1]
     power_active = any(float(r.get("avg_power_w", 0) or 0) > 0 for r in rows[-20:])
 
@@ -2708,6 +2726,7 @@ def get_energy_series():
         "peak_gpu_temp_c": peak_gpu_temp_c_trimmed,
         "fan_pct": fan_pct_trimmed,
         "cum_wh": [float(r.get("cum_wh", 0) or 0) for r in rows],
+        "cum_tokens": [float(r.get("cum_tokens", 0) or 0) for r in rows],
         "cum_cost_usd": cum_cost_usd,
         "est_revenue_usd": est_revenue_usd,
         "net_usd": [rev - cost for rev, cost in zip(est_revenue_usd, cum_cost_usd)],

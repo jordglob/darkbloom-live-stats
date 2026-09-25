@@ -1,5 +1,17 @@
 # Changelog
 
+## v38
+
+**Removed the "Net (Estimated) Over Time" chart.** It was the chart above it with its two lines subtracted — server-side, `net_usd` is literally `[rev - cost for rev, cost in zip(est_revenue_usd, cum_cost_usd)]`. Same data, same axis, stacked directly beneath its own source. There was no reading it supported that the pair above didn't.
+
+**"Cumulative Electricity Cost vs. Estimated Token Revenue" is now "Tokens generated — full history".** Its dollar figure multiplied tokens by a flat guessed rate and excluded the base reward — which is 56% of this account's income — so it read far worse than reality and carried a paragraph of apology underneath. But it *was* the only long-range series: the real-earnings chart is capped at about two days because Darkbloom's API only returns its most recent batch of ledger entries.
+
+So the axis changed rather than the chart being deleted. Token volume was always the part worth plotting over 26 days; the dollar conversion was the part that was wrong. Reads `27M tokens · ≈ 21M words since Aug 29`.
+
+The counter needed care: `tokens` in the CSV is the daemon's own lifetime count and resets to zero on every daemon restart, so plotting it raw gives a sawtooth. `get_energy_series()` now accumulates per-row deltas, treating a decrease as a restart where the whole new value is newly earned — the same rule `get_utilization()` already applied to its window. A restart shows as a flat step, never a drop. Verified monotonic across the full 300-point series.
+
+**The price chart's per-slot Net overlay is off by default, behind a checkbox.** It answers a real question — which hours were actually worth running — but it crosses zero constantly and was the noisiest element on the page, drawn over the two price lines it was meant to annotate.
+
 ## v37
 
 The four remaining points from the first-time-reader review.
