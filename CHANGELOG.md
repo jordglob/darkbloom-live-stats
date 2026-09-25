@@ -1,5 +1,17 @@
 # Changelog
 
+## v36
+
+Changes from reading the dashboard as someone opening it for the first time.
+
+**Panel order follows what a newcomer needs, not what was built first.** "Real Earnings vs. Electricity Cost" — green line above blue, readable without explanation, answers the only question a new provider has — was at position 10, about 3.5 screens down. It's now directly under the live gauges. The log-age chart moves down to sit with the other diagnostics: it's the best view *if you already know what you're looking at*, but leading with a logarithmic axis, decade bands, a load-test slider and four series toggles asks a lot of someone on their first visit.
+
+**The Net card gives a daily rate.** The balance is a lifetime figure and doesn't answer "is leaving this Mac on worth it". It now reads `balance $19.93 − electricity · ≈ $0.6625/day`, measured from the same real earnings-minus-cost window the 48h chart already sums — not projected from a quoted rate.
+
+**Gauges reordered and "GPU Headroom" renamed to "GPU Busy".** Headroom was shown inverted, which reads as wasted capacity when it means the opposite, and it carried a red zone implying that idling was a fault to fix. It isn't: idle means the network sent no work, and the base reward pays either way. The colour warning is gone with it. The order is now serving load, temperature, fan, total power, GPU busy — then CPU/GPU watts and RAM last, which are for diagnosing rather than deciding.
+
+**Fixed: the log-age panel was never closed.** Its `</div>` went missing when the panel was moved in v35, so the Darkbloom Account panel was nested *inside* it. Browsers silently repair this, which is why nothing looked wrong — it surfaced only when reordering panels programmatically and the boundaries overlapped.
+
 ## v35
 
 **The log-age chart is now the main chart** — moved directly under the live gauges, since it's the one that earns the position: it's the only view that fits a 30-second fan oscillation and a 27-day trend in one frame.

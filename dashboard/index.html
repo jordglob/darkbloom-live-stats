@@ -274,9 +274,9 @@
         <h4>Live Power gauges</h4>
         <p><strong>CPU / GPU / Total</strong> — CPU and GPU are instantaneous draw straight from `powermetrics`, ~5 times per second. "Total" is the whole Mac: if <code>macmon</code> is installed it's the real reading from the Mac's own SMC power sensor (RAM, SSD, fans and all) divided by an assumed 90% power-supply efficiency, i.e. close to what a wall meter would show. Without macmon it's CPU+GPU plus a flat 7W guess - measured on an M4 Pro Mac mini (no peripherals attached) that guess is roughly right at idle but about 2.5x too low under sustained inference: the SMC reported ~60W while CPU+GPU+RAM rails summed to ~29W. Install macmon (<code>brew install macmon</code>) if you care about the cost numbers at all.</p>
         <p><strong>RAM used</strong> — system-wide memory pressure, not just this app's usage. Turns red/orange as it approaches full, since that's the exact condition that caused real model-load failures during testing.</p>
-        <p><strong>GPU Headroom</strong> — how much of the GPU is <em>not</em> busy right now, straight from powermetrics. Idle Macs sit around 75-85% (the OS itself uses some); it drops toward 0% during real inference. Low is expected while serving, not a problem.</p>
+        <p><strong>GPU Busy</strong> — how much of the GPU is working right now, straight from powermetrics. Idle Macs sit around 15-25% (the OS itself uses some); it rises toward 100% during real inference. High means paid work is running — it is the direction you want.</p>
         <p><strong>Fan Speed / GPU Temp</strong> — read via <code>darkbloom fan status</code> (Apple Silicon doesn't expose either through powermetrics). Temp turns orange at 85°C and red at 95°C. If the GPU is hot but the fan is barely spinning, a banner appears at the top: that means Darkbloom's own fan-control helper isn't engaging. It isn't dangerous (macOS throttles the chip before any damage) but it costs performance - the small text under the gauge shows the helper's current mode.</p>
-        <p><strong>Utilization (last hour)</strong> — average GPU busy-ness over the last ~60 minutes, from the same powermetrics figure as GPU Headroom, logged every 5 minutes. A low or 0% reading with a healthy Trust/Daemon status just means genuinely little traffic right now, not a fault — that's when the base-reward floor is what's paying (see Nerdy Stats).</p>
+        <p><strong>Serving load (last hour)</strong> — average GPU busy-ness over the last ~60 minutes, from the same powermetrics figure as GPU Busy, logged every 5 minutes. There is no target number: it reflects how much traffic the network sent you, which you don't control. A low or 0% reading with a healthy Trust/Daemon status just means genuinely little traffic right now, not a fault — that's when the base-reward floor is what's paying (see Nerdy Stats).</p>
       </div>
 
       <div class="explainer-section">
@@ -322,28 +322,24 @@
   </div>
 
   <div class="panel">
-    <h2 title="Same GPU temperature, on a logarithmic AGE axis: 'now' is the right edge and each vertical gridline is a step further into the past. Fed by two resolutions - macmon's ~5s readings for the last hour, then 5-minute CSV buckets beyond that - so zooming toward now shows real samples rather than one bucket average stretched wide.">GPU Temp &amp; Fan — log age <span id="temp-age-stats" class="gauge-time"></span></h2>
-    <div class="legend" id="temp-age-legend"></div>
-    <div class="warmup-row" style="margin-bottom:4px">
-      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Off by default. Synthetic CPU + GPU load, so you can watch the fan respond to real heat instead of waiting for paid traffic to produce it. Tick this, then drag the slider.">
-        <input type="checkbox" id="max-power-enable"> Load test
-      </label>
-      <input type="range" id="max-power-slider" min="0" max="100" step="5" value="0" disabled style="flex:1;max-width:260px">
-      <span class="warmup-status" style="margin:0;min-width:3.5em"><strong id="max-power-value">0%</strong></span>
-      <span class="warmup-status" style="margin:0;font-size:12px;color:var(--text-muted)" id="max-power-cadence" title="Sampling and redraw rate. Rises with the load, because watching the fan respond is the whole reason to turn the load up.">sampling 2.0s</span>
-    </div>
-    <div class="warmup-row" style="margin-bottom:4px">
-      <span class="warmup-status" style="margin:0">Show:</span>
-      <label class="warmup-toggle" style="font-weight:400;margin:0"><input type="checkbox" class="series-toggle" data-series="temp" checked> <i style="background:var(--gauge-gpu);display:inline-block;width:9px;height:9px;border-radius:2px"></i> GPU temp</label>
-      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Shaded band from each point's bin average up to the hottest reading in that bin. Its width shows how much that point is summarising - seconds near now, days at the old end."><input type="checkbox" class="series-toggle" data-series="peak" checked> <i style="background:var(--gauge-gpu);opacity:.35;display:inline-block;width:9px;height:9px;border-radius:2px"></i> Peak band</label>
-      <label class="warmup-toggle" style="font-weight:400;margin:0" title="CPU die temperature, same axis as GPU. Only macmon reports it, so this series stops where macmon's coverage does."><input type="checkbox" class="series-toggle" data-series="cpu"> <i style="background:var(--series-elpris);display:inline-block;width:9px;height:9px;border-radius:2px"></i> CPU temp</label>
-      <label class="warmup-toggle" style="font-weight:400;margin:0"><input type="checkbox" class="series-toggle" data-series="fan" checked> <i style="background:var(--gauge-cpu);display:inline-block;width:9px;height:9px;border-radius:2px"></i> Fan %</label>
-      <span id="max-power-warning" class="warmup-status" style="margin:0;font-size:12px;color:var(--status-serious)"></span>
+    <h2 title="What Darkbloom actually paid this account (every ledger entry, including the base reward for being online) versus what this Mac's electricity actually cost, both added up over the last two days. Real numbers on both sides - the one chart here that should line up with the Net card at the top.">Real Earnings vs. Electricity Cost — last 48h (USD) <span id="real48-chart-stats" class="gauge-time"></span></h2>
+    <div class="legend">
+      <span><i style="background:var(--series-revenue)"></i>Real earnings (incl. base reward)</span>
+      <span><i style="background:var(--series-cost)"></i>Electricity cost (measured)</span>
     </div>
     <div class="chart-wrap">
-      <svg class="chart chart-tall" id="chart-temp-age"></svg>
-      <div class="tooltip" id="tooltip-temp-age"></div>
+      <svg class="chart" id="chart-real48"></svg>
+      <div class="tooltip" id="tooltip-real48"></div>
     </div>
+    <p style="font-size:11px;color:var(--text-muted);margin-top:8px" id="real48-note"></p>
+    <details class="sync-help" style="margin-top:10px">
+      <summary>How is the electricity cost calculated?</summary>
+      <p><strong>Electricity price:</strong> the source and zone you picked in the Electricity Price panel below, re-checked every 15 minutes - the actual price for the current hour, not an estimate. Prices arrive in that source's currency and are converted to USD (rate checked hourly) so everything on this page shares one currency.</p>
+      <p><strong>Power:</strong> every 5 minutes the Mac's average power draw is turned into the energy used in that slice and priced at that slice's own rate. If <code>macmon</code> is installed, power is the whole-system reading from the Mac's own SMC sensor (RAM, SSD, fans included) divided by an assumed 90% power-supply efficiency to approximate the wall. Without it, it's CPU+GPU from powermetrics plus a flat 7W guess - which measured about right at idle but roughly 2.5x too low under sustained inference on an M4 Pro Mac mini (SMC ~60W vs. rails ~29W, nothing plugged into the ports). The footer at the bottom of the page says which method is in use. Rows logged before macmon was in use keep their old, lower numbers.</p>
+      <p><strong>Net (real balance)</strong> at the top = your real account balance minus this accumulated cost.</p>
+    </details>
+  </div>
+
 
   <div class="panel">
     <h2 title="Real data pulled directly from Darkbloom's own API, using the same device token the CLI already stores locally. Refreshed automatically every 30s.">Darkbloom Account <span class="gauge-time">(live, synced automatically)</span></h2>
@@ -380,6 +376,31 @@
   </div>
 
   <div class="panel">
+    <h2 title="Same GPU temperature, on a logarithmic AGE axis: 'now' is the right edge and each vertical gridline is a step further into the past. Fed by two resolutions - macmon's ~5s readings for the last hour, then 5-minute CSV buckets beyond that - so zooming toward now shows real samples rather than one bucket average stretched wide.">GPU Temp &amp; Fan — log age <span id="temp-age-stats" class="gauge-time"></span></h2>
+    <div class="legend" id="temp-age-legend"></div>
+    <div class="warmup-row" style="margin-bottom:4px">
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Off by default. Synthetic CPU + GPU load, so you can watch the fan respond to real heat instead of waiting for paid traffic to produce it. Tick this, then drag the slider.">
+        <input type="checkbox" id="max-power-enable"> Load test
+      </label>
+      <input type="range" id="max-power-slider" min="0" max="100" step="5" value="0" disabled style="flex:1;max-width:260px">
+      <span class="warmup-status" style="margin:0;min-width:3.5em"><strong id="max-power-value">0%</strong></span>
+      <span class="warmup-status" style="margin:0;font-size:12px;color:var(--text-muted)" id="max-power-cadence" title="Sampling and redraw rate. Rises with the load, because watching the fan respond is the whole reason to turn the load up.">sampling 2.0s</span>
+    </div>
+    <div class="warmup-row" style="margin-bottom:4px">
+      <span class="warmup-status" style="margin:0">Show:</span>
+      <label class="warmup-toggle" style="font-weight:400;margin:0"><input type="checkbox" class="series-toggle" data-series="temp" checked> <i style="background:var(--gauge-gpu);display:inline-block;width:9px;height:9px;border-radius:2px"></i> GPU temp</label>
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Shaded band from each point's bin average up to the hottest reading in that bin. Its width shows how much that point is summarising - seconds near now, days at the old end."><input type="checkbox" class="series-toggle" data-series="peak" checked> <i style="background:var(--gauge-gpu);opacity:.35;display:inline-block;width:9px;height:9px;border-radius:2px"></i> Peak band</label>
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="CPU die temperature, same axis as GPU. Only macmon reports it, so this series stops where macmon's coverage does."><input type="checkbox" class="series-toggle" data-series="cpu"> <i style="background:var(--series-elpris);display:inline-block;width:9px;height:9px;border-radius:2px"></i> CPU temp</label>
+      <label class="warmup-toggle" style="font-weight:400;margin:0"><input type="checkbox" class="series-toggle" data-series="fan" checked> <i style="background:var(--gauge-cpu);display:inline-block;width:9px;height:9px;border-radius:2px"></i> Fan %</label>
+      <span id="max-power-warning" class="warmup-status" style="margin:0;font-size:12px;color:var(--status-serious)"></span>
+    </div>
+    <div class="chart-wrap">
+      <svg class="chart chart-tall" id="chart-temp-age"></svg>
+      <div class="tooltip" id="tooltip-temp-age"></div>
+    </div>
+  </div>
+
+  <div class="panel">
     <h2 title="GPU temperature over time (average and peak per bucket), same source as the live GPU Temp gauge - darkbloom fan status, since Apple Silicon doesn't expose this via powermetrics. Fan speed (% of this Mac's max RPM) is overlaid on the right axis so you can see whether the fan is actually responding to temperature - see the Running Hot banner if it isn't.">GPU Temp &amp; Fan — history <span id="temp-chart-stats" class="gauge-time"></span></h2>
     <div class="legend" id="temp-legend"></div>
     <div class="chart-wrap">
@@ -390,24 +411,6 @@
 
   </div>
 
-  <div class="panel">
-    <h2 title="What Darkbloom actually paid this account (every ledger entry, including the base reward for being online) versus what this Mac's electricity actually cost, both added up over the last two days. Real numbers on both sides - the one chart here that should line up with the Net card at the top.">Real Earnings vs. Electricity Cost — last 48h (USD) <span id="real48-chart-stats" class="gauge-time"></span></h2>
-    <div class="legend">
-      <span><i style="background:var(--series-revenue)"></i>Real earnings (incl. base reward)</span>
-      <span><i style="background:var(--series-cost)"></i>Electricity cost (measured)</span>
-    </div>
-    <div class="chart-wrap">
-      <svg class="chart" id="chart-real48"></svg>
-      <div class="tooltip" id="tooltip-real48"></div>
-    </div>
-    <p style="font-size:11px;color:var(--text-muted);margin-top:8px" id="real48-note"></p>
-    <details class="sync-help" style="margin-top:10px">
-      <summary>How is the electricity cost calculated?</summary>
-      <p><strong>Electricity price:</strong> the source and zone you picked in the Electricity Price panel below, re-checked every 15 minutes - the actual price for the current hour, not an estimate. Prices arrive in that source's currency and are converted to USD (rate checked hourly) so everything on this page shares one currency.</p>
-      <p><strong>Power:</strong> every 5 minutes the Mac's average power draw is turned into the energy used in that slice and priced at that slice's own rate. If <code>macmon</code> is installed, power is the whole-system reading from the Mac's own SMC sensor (RAM, SSD, fans included) divided by an assumed 90% power-supply efficiency to approximate the wall. Without it, it's CPU+GPU from powermetrics plus a flat 7W guess - which measured about right at idle but roughly 2.5x too low under sustained inference on an M4 Pro Mac mini (SMC ~60W vs. rails ~29W, nothing plugged into the ports). The footer at the bottom of the page says which method is in use. Rows logged before macmon was in use keep their old, lower numbers.</p>
-      <p><strong>Net (real balance)</strong> at the top = your real account balance minus this accumulated cost.</p>
-    </details>
-  </div>
 
   <div class="panel">
     <details class="explainer">
@@ -469,20 +472,23 @@ const REFRESH_MS = 10000;
 const LIVE_POWER_REFRESH_MS = 2000;   // slow poll: RAM + Ollama status (spawns subprocesses, not cheap)
 const POWER_FAST_REFRESH_MS = 200;    // fast poll: CPU/GPU/Total watts only (cheap file tail, matches powermetrics' own ~200ms sampling)
 
+// Ordered by what a newcomer actually needs to know, not by what's cheapest
+// to measure: is it working, is it healthy, what is it costing. CPU/GPU watts
+// and RAM are detail and come last - they're for diagnosing, not deciding.
 const GAUGES = [
-  { id: 'cpu', label: 'CPU', source: 'power', key: 'cpu_w', max: 30, unit: 'W', color: '--gauge-cpu' },
-  { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
-  { id: 'total', label: 'Total', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total',
-    tooltip: 'Whole-Mac power. "Measured" = the Mac\'s own SMC system-power sensor (RAM, SSD, fans included) divided by an assumed 90% power-supply efficiency, i.e. close to a wall meter. "Estimated" = CPU+GPU plus a flat 7W guess, used when macmon isn\'t installed - about right at idle, ~2.5x too low under heavy load.' },
-  { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
-  { id: 'headroom', label: 'GPU Headroom', source: 'power', key: 'headroom_pct', max: 100, unit: '%', color: '--gauge-total',
-    tooltip: 'Sourced directly from the GPU active-residency figure powermetrics itself reports every sample (100% minus GPU busy-ness) - a real-time measurement, not a synthetic/computed estimate. Idle baseline is not literally 0% GPU activity: background OS/WindowServer load alone typically keeps it around 15-25% active even at rest, so this gauge normally reads roughly 75-85% at idle, dropping toward 0% under real MLX/Ollama inference load.' },
+  { id: 'util', label: 'Serving load (last hour)', source: 'utilization', key: 'gpu_util_avg_pct', max: 100, unit: '%', color: '--gauge-total',
+    tooltip: 'Real average GPU busy-ness over the last hour - the same powermetrics "GPU HW active residency" figure the live GPU Busy gauge reads, averaged across every 5-min sample energy-monitor.sh has logged in that window. There is no "correct" number: it reflects how much paid traffic the network sent you, which you do not control. You still earn the base reward while idle. Replaced an earlier version that just measured how often any request arrived (a duty cycle), which could not tell one tiny request per 5-min slice from the GPU pegged at 100% the whole time.' },
+  { id: 'temp', label: 'GPU Temp', source: 'fan_temp', key: 'gpu_temp_c', max: 100, unit: '°C', color: '--gauge-gpu',
+    tooltip: 'Average across all reported GPU thermal sensors, via `darkbloom fan status`. Under about 85 C is comfortable; the Running Hot banner appears above that if the fan is not keeping up.' },
   { id: 'fan', label: 'Fan Speed', source: 'fan_temp', key: 'fan_rpm', max: 4900, unit: 'RPM', color: '--gauge-cpu',
     tooltip: 'Fan RPM, read via `darkbloom fan status` (read-only - does not enable fan control). Apple Silicon does not expose this via powermetrics at all.' },
-  { id: 'temp', label: 'GPU Temp', source: 'fan_temp', key: 'gpu_temp_c', max: 100, unit: '°C', color: '--gauge-gpu',
-    tooltip: 'Average across all reported GPU thermal sensors, via `darkbloom fan status`.' },
-  { id: 'util', label: 'Utilization (last hour)', source: 'utilization', key: 'gpu_util_avg_pct', max: 100, unit: '%', color: '--gauge-total',
-    tooltip: 'Real average GPU busy-ness over the last hour - the same powermetrics "GPU HW active residency" figure the live GPU Headroom gauge reads, averaged across every 5-min sample energy-monitor.sh has logged in that window. Replaced an earlier version that just measured how often any request arrived (a duty cycle), which could not tell one tiny request per 5-min slice from the GPU pegged at 100% the whole time. Shows "not enough data yet" until real logged samples exist for this window - the underlying column only started being recorded once this changed, nothing retroactive.' },
+  { id: 'total', label: 'Total', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total',
+    tooltip: 'Whole-Mac power - this is what you pay for. "Measured" = the Mac\'s own SMC system-power sensor (RAM, SSD, fans included) divided by an assumed 90% power-supply efficiency, i.e. close to a wall meter. "Estimated" = CPU+GPU plus a flat 7W guess, used when macmon isn\'t installed - about right at idle, ~2.5x too low under heavy load.' },
+  { id: 'headroom', label: 'GPU Busy', source: 'power', key: 'gpu_active_pct', max: 100, unit: '%', color: '--gauge-total',
+    tooltip: 'How busy the GPU is right now, straight from the GPU active-residency figure powermetrics reports every sample. Previously shown inverted as "GPU Headroom", which read like wasted capacity when it meant the opposite. Idle is not 0%: background OS/WindowServer load alone typically keeps it around 15-25% even at rest, rising toward 100% under real inference.' },
+  { id: 'cpu', label: 'CPU', source: 'power', key: 'cpu_w', max: 30, unit: 'W', color: '--gauge-cpu' },
+  { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
+  { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
 ];
 let lastUtilization = null;
 let lastRam = null;
@@ -598,10 +604,10 @@ function updateGauges(data) {
     if (g.id === 'ram') {
       arcEl.setAttribute('stroke', frac > 0.93 ? 'var(--status-critical)' : frac > 0.85 ? 'var(--status-warning)' : `var(${g.color})`);
     }
-    // Headroom is the inverse read - low is the bad direction here.
-    if (g.id === 'headroom') {
-      arcEl.setAttribute('stroke', frac < 0.07 ? 'var(--status-critical)' : frac < 0.15 ? 'var(--status-warning)' : `var(${g.color})`);
-    }
+    // No colour warning on GPU Busy: neither direction is a fault. Busy means
+    // paid work is running, idle means the network sent none - and the base
+    // reward pays either way. It used to be shown inverted as "Headroom" with
+    // a red zone, which implied idling was something to fix.
     if (g.id === 'temp') {
       arcEl.setAttribute('stroke', val >= 95 ? 'var(--status-critical)' : val >= 85 ? 'var(--status-warning)' : `var(${g.color})`);
       if (detailEl) detailEl.textContent = val >= 95 ? 'very hot - see banner' : val >= 85 ? 'hot' : val >= 70 ? 'working' : 'cool';
@@ -784,6 +790,10 @@ function renderCards(status, energy, account, daemonState) {
       net = parseFloat(account.balance_usd) - costUsd;
       netLabel = 'Net (real balance)';
       netSub = `balance ${fmtUsd(parseFloat(account.balance_usd))} − electricity`;
+      // The balance is lifetime, which doesn't answer the question anyone
+      // actually has: is leaving this Mac on worth it? Measured daily rate,
+      // from the same real earnings-minus-cost window the 48h chart sums.
+      if (lastNetPerDay != null) netSub += ` · ≈ ${fmtUsd(lastNetPerDay)}/day`;
     } else {
       net = parseFloat(latest.est_revenue_usd_approx) - costUsd;
       netLabel = 'Net (estimated)';
@@ -1023,6 +1033,7 @@ const seriesOn = { temp: true, peak: true, cpu: false, fan: true };
 
 let tempAgeTimer = null;
 let lastTempAge = null;
+let lastNetPerDay = null;
 function renderTempAge(ta) {
   if (!ta) return;
   lastTempAge = ta;
@@ -1832,6 +1843,15 @@ function renderReal48(p) {
   renderLineChart('chart-real48', 'tooltip-real48', prices.map(x => x.time_start),
     [{ name: 'Real earnings', values: earnVals }, { name: 'Electricity cost', values: costVals }],
     ['line-revenue', 'line-cost'], fmtUsd);
+  // Same window the chart draws: real earnings and real measured cost over
+  // however many hours have actually elapsed, scaled to a day. That answers
+  // the question the lifetime balance doesn't - is leaving this Mac on worth
+  // it - and it's measured, not projected from a quoted rate.
+  if (prices.length > 1) {
+    const spanH = (new Date(prices[prices.length - 1].time_end).getTime()
+                   - new Date(prices[0].time_start).getTime()) / 3600000;
+    if (spanH > 1) lastNetPerDay = ((earn - cost) / spanH) * 24;
+  }
   const statsEl = document.getElementById('real48-chart-stats');
   const noteEl = document.getElementById('real48-note');
   if (statsEl) statsEl.textContent = prices.length ? `earned ${fmtUsd(earn)} · cost ${fmtUsd(cost)} · net ${fmtUsd(earn - cost)}` : '';
