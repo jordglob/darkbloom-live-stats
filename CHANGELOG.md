@@ -1,5 +1,13 @@
 # Changelog
 
+## v42
+
+**Removed the linear "GPU Temp & Fan — history" chart.** The log-age chart is a strict superset of it: same GPU temp line, same peak band, same fan area, same 85 °C threshold — plus CPU temperature, four times the span (26.9 days against 6.4), and second-level resolution near "now" where the linear chart had five-minute buckets. Its only unique property was even time spacing.
+
+The trimmed series that existed solely to feed it are gone from `/api/data` too — `temp_timestamps`, `gpu_temp_c`, `peak_gpu_temp_c` and `fan_pct`, along with the leading-gap trim added for it in v22. The energy payload is down to 11 keys. The log-age chart reads the CSV independently through `get_temp_age_series()`, so it was never a consumer.
+
+That leaves five charts: real earnings vs. cost, power history, log-age temp/fan, cumulative tokens, and electricity price.
+
 ## v41
 
 **Auto acts the moment it's switched on**, instead of at the next five-minute tick, and its first decision ignores the hysteresis timers. Those timers reference an action taken under a different regime — possibly by hand, possibly half an hour ago — so enforcing them means turning Auto on and watching nothing happen, which is indistinguishable from it being broken. Once Auto has acted once, its own hysteresis resumes normally. Verified against the real `_evaluate_price_guard()`: Auto just switched on → starts; Auto's own stop two minutes ago → waits; manual stop → starts.

@@ -2883,32 +2883,13 @@ def get_energy_series():
 
     cum_cost_usd = [float(r.get("cum_cost_sek", 0) or 0) / usd_rate(r) for r in rows]
     est_revenue_usd = [float(r.get("est_revenue_usd_approx", 0) or 0) for r in rows]
-    gpu_temp_c = [float(r["gpu_temp_c"]) if r.get("gpu_temp_c") not in (None, "") else None for r in rows]
-    fan_pct = [r.get("fan_pct") for r in rows]
     timestamps = [r["timestamp"] for r in rows]
-
-    # Temp/fan logging was added long after this CSV started, so most of the
-    # chart's history has nothing to show for either series - trim the empty
-    # leading stretch just for this pair, on their own timestamp axis, rather
-    # than cramming the only real data into a sliver on the right.
-    temp_start_idx = next(
-        (i for i, (t, f) in enumerate(zip(gpu_temp_c, fan_pct)) if t is not None or f is not None),
-        len(gpu_temp_c),
-    )
-    temp_timestamps = timestamps[temp_start_idx:]
-    gpu_temp_c_trimmed = gpu_temp_c[temp_start_idx:]
-    fan_pct_trimmed = fan_pct[temp_start_idx:]
-    peak_gpu_temp_c_trimmed = peak_gpu_temp_c[temp_start_idx:] if peak_gpu_temp_c else peak_gpu_temp_c
 
     series = {
         "timestamps": timestamps,
         "avg_power_w": [float(r.get("avg_power_w", 0) or 0) for r in rows],
         "total_power_w": [float(r.get("total_power_w", 0) or 0) for r in rows],
         "peak_total_power_w": peak_total_power_w,
-        "temp_timestamps": temp_timestamps,
-        "gpu_temp_c": gpu_temp_c_trimmed,
-        "peak_gpu_temp_c": peak_gpu_temp_c_trimmed,
-        "fan_pct": fan_pct_trimmed,
         "cum_wh": [float(r.get("cum_wh", 0) or 0) for r in rows],
         "cum_tokens": [float(r.get("cum_tokens", 0) or 0) for r in rows],
         "cum_cost_usd": cum_cost_usd,

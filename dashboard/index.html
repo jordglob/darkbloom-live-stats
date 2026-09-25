@@ -403,14 +403,6 @@
     </div>
   </div>
 
-  <div class="panel">
-    <h2 title="GPU temperature over time (average and peak per bucket), same source as the live GPU Temp gauge - darkbloom fan status, since Apple Silicon doesn't expose this via powermetrics. Fan speed (% of this Mac's max RPM) is overlaid on the right axis so you can see whether the fan is actually responding to temperature - see the Running Hot banner if it isn't.">GPU Temp &amp; Fan — history <span id="temp-chart-stats" class="gauge-time"></span></h2>
-    <div class="legend" id="temp-legend"></div>
-    <div class="chart-wrap">
-      <svg class="chart" id="chart-temp"></svg>
-      <div class="tooltip" id="tooltip-temp"></div>
-    </div>
-  </div>
 
   </div>
 
@@ -2788,32 +2780,6 @@ async function refresh() {
     const maxW = Math.max(...(hasPeak ? rows.peak_total_power_w : (rows.total_power_w || [0])));
     document.getElementById('power-chart-stats').textContent = nowW != null ? `now: ${fmtW(nowW)} · max: ${fmtW(maxW)}` : '';
 
-    const hasTempPeak = !!(rows.peak_gpu_temp_c && rows.peak_gpu_temp_c.length);
-    document.getElementById('temp-legend').innerHTML =
-      `<span title="The solid line is the average of several 5-minute readings; the shaded band reaches up to the hottest single reading in that same stretch, so brief spikes stay visible instead of being averaged away."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg${hasTempPeak ? ', band to peak' : ''})</span>` +
-      `<span title="Fan speed as % of this Mac's max RPM, right axis, on a fixed 0-100% scale so you can see how much headroom is left. If temp climbs but this stays low, the fan isn't responding - see the Running Hot banner."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
-    const tempSeries = [{name: 'GPU Temp', values: rows.gpu_temp_c || []}];
-    const tempColors = ['line-temp'];
-    if (hasTempPeak) { tempSeries.push({name: 'Peak', values: rows.peak_gpu_temp_c}); tempColors.push('line-temp-peak'); }
-    // Shared settings for both temp charts: a fixed temperature window (so the
-    // same line height always means the same heat, and 85C never moves), a
-    // fixed 0-100% fan scale (so "barely trying" reads differently from
-    // "maxed out"), and the 85C line the Running Hot banner triggers on.
-    const tempChartOpts = {
-      rightSeries: [{ name: 'Fan speed %', values: rows.fan_pct || [], colorClass: 'area-fan' }],
-      rightValueFmt: v => `${v.toFixed(0)}%`,
-      yDomain: [35, 105],
-      yDomainRight: [0, 100],
-      axisValueFmt: v => `${v.toFixed(0)}°C`,
-      rightAsArea: true,
-      hLines: [{ value: 85, label: '85°C — running hot' }],
-    };
-    if (hasTempPeak) tempChartOpts.envelope = { lower: 0, upper: 1, className: 'band-temp' };
-    renderLineChart('chart-temp', 'tooltip-temp', rows.temp_timestamps || rows.timestamps, tempSeries, tempColors, v => `${v.toFixed(1)}°C`, tempChartOpts);
-    const realTemps = (rows.gpu_temp_c || []).filter(v => v != null);
-    const nowTemp = realTemps.at(-1);
-    const maxTemp = Math.max(...(hasTempPeak ? rows.peak_gpu_temp_c.filter(v => v != null) : realTemps));
-    document.getElementById('temp-chart-stats').textContent = nowTemp != null ? `now: ${nowTemp.toFixed(1)}°C · max: ${maxTemp.toFixed(1)}°C` : 'no data yet';
 
     // Log-age chart: the server does the pyramid (macmon ~5s out to 24h,
     // 5-minute CSV rows beyond) and hands back two already-binned curves.
