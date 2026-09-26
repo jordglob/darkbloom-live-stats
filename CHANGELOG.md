@@ -1,5 +1,13 @@
 # Changelog
 
+## v43
+
+**The footer says which provider version is running and when it took over** — `darkbloom 0.9.9 · promoted 1.6d ago · auto-update on`.
+
+Worth surfacing because of the cadence: this provider has shipped 12 versions in 26 days, averaging 2.4 days between releases, with auto-update enabled. "What changed recently" is therefore usually the version, and that's the first thing you want to know when something starts behaving oddly — especially alongside an OS upgrade, where two variables moving at once makes anything that breaks much harder to attribute.
+
+The promotion time comes from the watchdog's own log rather than the binary's mtime. The watchdog only promotes a build after it survives a 600-second stabilisation window, so that line marks when the version actually took over, not when it downloaded. Auto-update state is read from `provider.toml` rather than by spawning `darkbloom autoupdate status`, and the whole thing is cached five minutes.
+
 ## v42
 
 **Removed the linear "GPU Temp & Fan — history" chart.** The log-age chart is a strict superset of it: same GPU temp line, same peak band, same fan area, same 85 °C threshold — plus CPU temperature, four times the span (26.9 days against 6.4), and second-level resolution near "now" where the linear chart had five-minute buckets. Its only unique property was even time spacing.

@@ -2810,9 +2810,28 @@ async function refresh() {
       ? 'Power: whole-Mac reading from the SMC system-power sensor via macmon (RAM, SSD, fans included), divided by an assumed 90% power-supply efficiency to approximate wall draw.'
       : 'Power: CPU+GPU from powermetrics plus a flat 7W guess for everything else. Install macmon (brew install macmon) and restart the energy monitor for a real whole-Mac reading - the guess is ~2.5x too low under heavy load.')
       + ` Estimated token revenue (nerdy charts only) uses a flat $0.048 per million tokens, last recalibrated 2026-09-10 from this account's real ledger. ${energy.total_rows ?? 0} rows logged. Page refreshes every 10s; power gauges ~5x/s.`;
-    foot.innerHTML = powerMethod === 'smc'
+    // What version is running and when it took over. The provider ships every
+    // ~2.4 days with auto-update on, so "what changed recently" is usually the
+    // version - and that's the first thing worth knowing when something starts
+    // behaving oddly. Promotion time comes from the watchdog, which only
+    // promotes a build after it survives 600s, so it's when the version
+    // actually took over rather than when it downloaded.
+    const vm = data.version_meta || {};
+    const ver = (status && status.version) ? `darkbloom ${status.version}` : '';
+    let verLine = '';
+    if (ver) {
+      const bits = [ver];
+      if (vm.promoted_at) {
+        const days = (Date.now() / 1000 - vm.promoted_at) / 86400;
+        bits.push(days < 1 ? `promoted ${Math.round(days * 24)}h ago` : `promoted ${days.toFixed(1)}d ago`);
+      }
+      if (vm.auto_update === true) bits.push('auto-update on');
+      else if (vm.auto_update === false) bits.push('auto-update off');
+      verLine = ` · <span title="The running provider version and when the watchdog promoted it, after the build survived its 600s stabilisation window. With auto-update on, a new version can land at any time - so if something starts misbehaving, check whether this changed.">${bits.join(' · ')}</span>`;
+    }
+    foot.innerHTML = (powerMethod === 'smc'
       ? `Power measured by the Mac's own sensor · updates every 10 s <span style="opacity:.6">(hover for details)</span>`
-      : `Power is estimated — <code>brew install macmon</code> for a real reading · updates every 10 s <span style="opacity:.6">(hover for details)</span>`;
+      : `Power is estimated — <code>brew install macmon</code> for a real reading · updates every 10 s <span style="opacity:.6">(hover for details)</span>`) + verLine;
   } catch (e) {
     document.getElementById('updated').textContent = 'could not fetch data: ' + e;
   }

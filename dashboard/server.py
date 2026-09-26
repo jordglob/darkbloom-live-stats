@@ -276,6 +276,50 @@ def get_utilization():
 PHYSMEM_RE = re.compile(r"PhysMem:\s*([\d.]+)([GM])\s*used.*?([\d.]+)([GM])\s*unused")
 
 
+PROVIDER_TOML = HOME / ".config" / "darkbloom" / "provider.toml"
+WATCHDOG_LOG = HOME / ".darkbloom" / "watchdog.log"
+_version_meta_cache = {"data": None, "at": 0.0}
+
+
+def get_provider_version_meta():
+    """When the running provider version was promoted, and whether it updates
+    itself. Worth showing: the provider ships roughly every 2.4 days with
+    auto-update on, so "what changed recently" is usually the version, and
+    that's the first thing you want when something starts behaving oddly.
+
+    Promotion time comes from the watchdog's own log rather than the binary's
+    mtime - the watchdog only promotes a build after it survives 600s, so that
+    line is when the version actually took over, not when it downloaded."""
+    now = time.time()
+    if _version_meta_cache["data"] is not None and now - _version_meta_cache["at"] < 300:
+        return _version_meta_cache["data"]
+
+    promoted_at, promoted_version = None, None
+    try:
+        with open(WATCHDOG_LOG, errors="ignore") as f:
+            for line in f:
+                m = re.match(r"\[([\dT:-]+)Z\] watchdog: (v[\d.]+) passed .*promoted", line)
+                if m:
+                    promoted_version = m.group(2)
+                    promoted_at = datetime.fromisoformat(m.group(1)).replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        pass
+
+    auto_update = None
+    try:
+        for line in PROVIDER_TOML.read_text(errors="ignore").splitlines():
+            m = re.match(r"\s*auto_update\s*=\s*(true|false)", line)
+            if m:
+                auto_update = m.group(1) == "true"
+                break
+    except Exception:
+        pass
+
+    out = {"promoted_at": promoted_at, "promoted_version": promoted_version, "auto_update": auto_update}
+    _version_meta_cache.update({"data": out, "at": now})
+    return out
+
+
 def get_ram_status():
     """System-wide RAM headroom - lets the dashboard warn about the same
     RAM contention that caused real model-load failures earlier this session,
@@ -495,6 +539,7 @@ def get_inference_duration_stats():
 
 
 STATUS_PATTERNS = {
+    "version": re.compile(r"^darkbloom\s+([\d.]+)", re.M),
     "trust": re.compile(r"Trust:\s*(.+)"),
     "trust_reason": re.compile(r"→\s*(.+)"),
     "daemon": re.compile(r"Daemon:\s*(.+)"),
@@ -527,6 +572,7 @@ def get_darkbloom_status():
         return {"error": str(e)}
 
     result = {
+        "version": None,
         "trust": None,
         "trust_reason": None,
         "daemon": None,
@@ -542,6 +588,10 @@ def get_darkbloom_status():
         if m:
             result["requests_served"] = int(m.group(1))
             result["tokens"] = int(m.group(2))
+            continue
+        m = STATUS_PATTERNS["version"].search(line)
+        if m and result["version"] is None:
+            result["version"] = m.group(1)
             continue
         m = STATUS_PATTERNS["trust"].search(line)
         if m and result["trust"] is None:
@@ -2926,6 +2976,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "energy": get_energy_series(),
                 "max_power": get_max_power_status(),
                 "serving_mode": read_serving_mode(),
+                "version_meta": get_provider_version_meta(),
                 "live_power": get_live_power(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),
