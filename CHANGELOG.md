@@ -1,5 +1,9 @@
 # Changelog
 
+## v63
+
+**Serve and Load now no longer report a failure for a model that loads a few seconds later.** On 2026-09-27 Serve for qwen3.5 said "Switched, but loading failed: Insufficient memory (29.0 GB free, need 29.8 GB)", yet ten seconds later the daemon had it warm (19.8 GB on the GPU) - the failing request raced a load that then succeeded. A load now waits up to 45 s for the daemon to list the model as warm before giving up, and only blames a load error that is newer than the attempt, so an old failure is never shown for a new try.
+
 ## v62
 
 **Model loads can free macOS's file cache themselves, after a one-time setup.** v61 found why qwen3.6 would not load with nothing else loaded: Darkbloom counts active memory as used, and a switch reads every weight file to hash it, leaving ~12 GB of file cache in active memory. `sudo purge` drops it, but the dashboard never runs sudo on its own.

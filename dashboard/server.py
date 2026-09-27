@@ -2694,33 +2694,55 @@ def _set_job_for_local(local_id, message):
                 job["message"] = message
 
 
+# Darkbloom can finish a load a few seconds after the request that triggered
+# it was answered 429 (seen 2026-09-27: "loading failed", then warm 10 s
+# later), so wait for the daemon to report it before calling it a failure.
+LOAD_SETTLE_SEC = 45
+
+
 def _load_once(model):
     conf = json.loads(LOCAL_JSON.read_text())
+    started = time.time()
     try:
         _ping_model(conf, model, timeout=300)
     except urllib.error.HTTPError as e:
-        # A 429 is only harmless when the model is already warm and busy. When
-        # it cannot be loaded at all (not enough memory) the endpoint also
-        # answers 429 "capacity temporarily unavailable" - reporting that as
-        # "Loaded" is exactly the mistake made on 2026-09-27.
-        _, warm = _daemon_model_state()
-        if e.code == 429 and model in warm:
-            return "Already loaded and busy"
-        err = _load_error_for(model)
-        raise RuntimeError(err or f"HTTP {e.code} {e.reason}")
-    _, warm = _daemon_model_state()
-    if model not in warm:
-        err = _load_error_for(model)
-        raise RuntimeError(err or "Request answered but the model is not loaded")
+        # 429 also means "capacity temporarily unavailable" when the model
+        # cannot be loaded at all, so it is never taken as success by itself.
+        if _wait_warm(model, LOAD_SETTLE_SEC, started):
+            return "Loaded" if e.code != 429 else "Loaded (was busy)"
+        raise RuntimeError(_load_error_for(model, since=started) or f"HTTP {e.code} {e.reason}")
+    if not _wait_warm(model, LOAD_SETTLE_SEC, started):
+        raise RuntimeError(_load_error_for(model, since=started) or "Request answered but the model is not loaded")
     return "Loaded"
 
 
-def _load_error_for(model):
+def _wait_warm(model, timeout, started):
+    """Poll daemon-state until the model is warm; stop early on a load error
+    newer than this attempt."""
+    deadline = time.time() + timeout
+    while True:
+        _, warm = _daemon_model_state()
+        if model in warm:
+            return True
+        if _load_error_for(model, since=started) and time.time() - started > 10:
+            # Give an in-flight load a few seconds even after an error, since
+            # the error can come from a concurrent network request.
+            _, warm = _daemon_model_state()
+            return model in warm
+        if time.time() >= deadline:
+            return False
+        time.sleep(2)
+
+
+def _load_error_for(model, since=None):
+    """Darkbloom's latest load error for this model - only one newer than
+    `since` when given, so an old failure isn't blamed on a new attempt."""
     try:
         err = json.loads(DAEMON_STATE_PATH.read_text()).get("last_model_load_error") or {}
     except Exception:
         return None
-    if err.get("model") == model and time.time() - (err.get("at") or 0) < 600:
+    at = err.get("at") or 0
+    if err.get("model") == model and time.time() - at < 600 and (since is None or at >= since):
         return err.get("message")
     return None
 
