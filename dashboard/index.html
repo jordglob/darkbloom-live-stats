@@ -214,6 +214,15 @@
   .copy-cmd-btn { font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
   .copy-cmd-btn:hover { background: var(--surface-2, var(--surface-1)); }
   table.rotation-table tr:last-child td { border-bottom: none; }
+  .demand-windows { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+  .demand-windows button { font-size: 11px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }
+  .demand-windows button.active { color: var(--text-primary); border-color: var(--text-muted); font-weight: 600; }
+  tr.demand-mine td { background: color-mix(in srgb, var(--series-revenue) 10%, transparent); }
+  .demand-badge { font-size: 10px; font-weight: 600; color: var(--series-revenue); margin-left: 6px; white-space: nowrap; }
+  .demand-share { display: inline-block; height: 6px; border-radius: 3px; background: var(--series-cost); vertical-align: middle; margin-right: 6px; }
+  .demand-spark { width: 90px; height: 20px; vertical-align: middle; }
+  .demand-spark polyline { fill: none; stroke: var(--series-cost); stroke-width: 1.5; }
+  table.rotation-table td.num, table.rotation-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .rotation-summary { font-size: 12px; color: var(--text-secondary); margin: 10px 0; }
   .rotation-summary strong { color: var(--text-primary); }
 
@@ -366,6 +375,18 @@
   <div class="panel">
     <h2 title="Models Darkbloom has downloaded to this Mac and how much disk they use. Unused ones are safe to remove if you need the space back.">Disk Usage</h2>
     <div id="disk"></div>
+  </div>
+
+  <div class="panel">
+    <h2 title="Network-wide demand per model from Darkbloom's public stats API - the same data as the Model demand panel on console.darkbloom.dev/stats. Only UTC hours with at least 20 requests from 3 different accounts are published, with at least an hour of delay, so these are published observations, not total demand. Rows highlighted green are models in this provider's --model list.">Network Model Demand
+      <span class="demand-windows">
+        <button data-window="24h" onclick="setDemandWindow('24h')">24h</button>
+        <button data-window="7d" onclick="setDemandWindow('7d')">7d</button>
+        <button data-window="30d" onclick="setDemandWindow('30d')">30d</button>
+      </span>
+      <span id="demand-stats" class="gauge-time"></span>
+    </h2>
+    <div id="model-demand"></div>
   </div>
 
   <div class="panel">
@@ -1550,6 +1571,108 @@ function renderDisk(disk) {
     </table>
     </div>
   `;
+}
+
+let demandWindow = '24h';
+try { demandWindow = localStorage.getItem('demandWindow') || '24h'; } catch (e) {}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Requests per bucket; null buckets (unpublished hours) break the line
+// instead of being drawn as zero.
+function demandSparkline(series) {
+  const vals = (series || []).map(p => p.counts ? p.counts.requests : null);
+  const max = Math.max(1, ...vals.filter(v => v != null));
+  const n = vals.length;
+  if (n < 2) return '';
+  const segs = [];
+  let cur = [];
+  vals.forEach((v, i) => {
+    if (v == null) { if (cur.length) segs.push(cur); cur = []; return; }
+    cur.push(`${(i / (n - 1) * 88 + 1).toFixed(1)},${(19 - v / max * 17).toFixed(1)}`);
+  });
+  if (cur.length) segs.push(cur);
+  // A lone point has no line to draw, so it gets a short tick.
+  const lines = segs.map(s => s.length === 1
+    ? `<polyline points="${s[0]} ${(parseFloat(s[0]) + 2).toFixed(1)},${s[0].split(',')[1]}"/>`
+    : `<polyline points="${s.join(' ')}"/>`).join('');
+  return `<svg class="demand-spark" viewBox="0 0 90 20" preserveAspectRatio="none">${lines}</svg>`;
+}
+
+function renderModelDemand(d) {
+  const el = document.getElementById('model-demand');
+  document.querySelectorAll('.demand-windows button').forEach(b =>
+    b.classList.toggle('active', b.dataset.window === demandWindow));
+  const stats = document.getElementById('demand-stats');
+  if (!d || d.error) {
+    stats.textContent = '';
+    el.innerHTML = `<div class="rotation-summary">Could not reach Darkbloom's public stats API${d && d.error ? ` (${escapeHtml(d.error)})` : ''}.</div>`;
+    return;
+  }
+  const models = (d.models || []).slice().sort((a, b) => b.requests - a.requests);
+  stats.textContent = d.end_at ? `(up to ${fmtTime(d.end_at)}${d.stale ? ', stale' : ''})` : '';
+  if (!models.length) {
+    el.innerHTML = `<div class="rotation-summary">No published hours in this window yet.</div>`;
+    return;
+  }
+  const total = models.reduce((s, m) => s + (m.requests || 0), 0);
+  const maxReq = models[0].requests || 1;
+  const pct = (a, b) => b ? (a / b * 100) : null;
+  const rateColor = r => r == null ? 'var(--text-muted)'
+    : r >= 98 ? 'var(--status-good)' : r >= 90 ? 'var(--status-warning)' : 'var(--status-critical)';
+  const mine = models.filter(m => m.served_here);
+  const mineShare = pct(mine.reduce((s, m) => s + m.requests, 0), total);
+  const collected = d.collection_started_at ? fmtTime(d.collection_started_at) : null;
+  el.innerHTML = `
+    <div class="rotation-summary">${fmtNum(total)} published requests across ${models.length} models.
+      ${mine.length ? `Models configured here: <strong>${mineShare.toFixed(1)}%</strong> of them.` : 'None of the models configured here appear.'}
+      ${collected ? `<span style="color:var(--text-muted)" title="Darkbloom only started recording this history then - longer windows fill in over time.">Collected since ${collected}.</span>` : ''}</div>
+    <div class="table-scroll">
+    <table class="rotation-table">
+      <thead><tr>
+        <th>Model</th>
+        <th class="num" title="Published requests in the window, and share of the total.">Requests</th>
+        <th class="num" title="Completed / requests.">Completed</th>
+        <th class="num" title="Turned away because no provider had room (capacity) or could meet the latency limit. High numbers mean unmet demand - providers are short for this model.">Rejected</th>
+        <th class="num" title="Timed out before finishing.">Timeouts</th>
+        <th class="num" title="HTTP 429 responses. Overlaps the other outcomes, so it is not added to them.">429s</th>
+        <th title="Requests per bucket over the window. Gaps are hours that were not published.">Trend</th>
+      </tr></thead>
+      <tbody>
+        ${models.map(m => {
+          const rate = pct(m.completed, m.requests);
+          const rejected = (m.capacity_rejected || 0) + (m.latency_rejected || 0);
+          return `<tr class="${m.served_here ? 'demand-mine' : ''}">
+            <td>${escapeHtml(m.model)}${m.served_here ? '<span class="demand-badge" title="In the --model list of the provider plist. Says nothing about whether it actually loads or is serving right now.">configured here</span>' : ''}</td>
+            <td class="num"><span class="demand-share" style="width:${Math.max(2, m.requests / maxReq * 60).toFixed(0)}px"></span>${fmtNum(m.requests)} <span style="color:var(--text-muted)">${pct(m.requests, total).toFixed(1)}%</span></td>
+            <td class="num" style="color:${rateColor(rate)}">${rate == null ? '–' : rate.toFixed(1) + '%'}</td>
+            <td class="num">${rejected ? fmtNum(rejected) : '–'}</td>
+            <td class="num">${m.timed_out ? fmtNum(m.timed_out) : '–'}</td>
+            <td class="num">${m.http_429 ? fmtNum(m.http_429) : '–'}</td>
+            <td>${demandSparkline(m.time_series)}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+async function refreshModelDemand() {
+  try {
+    const res = await fetch('/api/model_demand?window=' + demandWindow);
+    renderModelDemand(await res.json());
+  } catch (e) {
+    renderModelDemand({ error: String(e) });
+  }
+}
+
+function setDemandWindow(w) {
+  demandWindow = w;
+  try { localStorage.setItem('demandWindow', w); } catch (e) {}
+  refreshModelDemand();
 }
 
 function renderPayoutMeter(cs) {
@@ -2902,6 +3025,7 @@ refreshTempAge();
 refreshPowerFast();
 refreshWarmup();
 refreshPriceGuard();
+refreshModelDemand();
 renderChat();
 refreshServingPulse();
 setInterval(refreshServingPulse, 1000);
@@ -2910,6 +3034,7 @@ applyLiveCadence(0);
 setInterval(refreshPowerFast, POWER_FAST_REFRESH_MS);
 setInterval(refreshWarmup, 15000);
 setInterval(refreshPriceGuard, 15000);
+setInterval(refreshModelDemand, 10 * 60 * 1000);
 </script>
 </body>
 </html>

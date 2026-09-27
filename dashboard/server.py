@@ -2325,6 +2325,50 @@ def _http_json(url, timeout=10):
         return json.loads(resp.read())
 
 
+MODEL_DEMAND_URL = "https://api.darkbloom.dev/v1/network/model-demand?window={window}"
+MODEL_DEMAND_WINDOWS = ("24h", "7d", "30d")
+# Darkbloom publishes whole UTC hours with at least an hour of lag, so
+# nothing new can appear faster than this.
+MODEL_DEMAND_CACHE_SEC = 600
+_model_demand_cache = {}
+_model_demand_lock = threading.Lock()
+
+
+def _matches_public_model(local_id, public_id):
+    """The public stats use the network alias (`gemma-4-26b`), the provider
+    plist the exact build (`gemma-4-26b-qat-4bit`)."""
+    a, b = local_id.lower(), public_id.lower()
+    return a == b or a.startswith(b + "-") or a.split("/")[-1] == b.split("/")[-1]
+
+
+def get_model_demand(window):
+    """Network-wide per-model demand and outcomes from Darkbloom's public
+    stats API (no auth). Counts only cover privacy-eligible hourly cohorts,
+    so they are a published sample, not total network demand. Each model is
+    tagged with whether this Mac is configured to serve it."""
+    if window not in MODEL_DEMAND_WINDOWS:
+        window = "24h"
+    now = time.time()
+    with _model_demand_lock:
+        cached = _model_demand_cache.get(window)
+        if cached and now - cached["at"] < MODEL_DEMAND_CACHE_SEC:
+            return cached["data"]
+    try:
+        data = _http_json(MODEL_DEMAND_URL.format(window=window), timeout=15)
+    except Exception as e:
+        # Serve stale data rather than an empty panel when the API hiccups.
+        if cached:
+            return dict(cached["data"], stale=True)
+        return {"error": str(e), "window": window, "models": []}
+    configured = get_configured_models()
+    for m in data.get("models") or []:
+        m["served_here"] = any(_matches_public_model(c, m.get("model", "")) for c in configured)
+    data["configured_models"] = configured
+    with _model_demand_lock:
+        _model_demand_cache[window] = {"at": now, "data": data}
+    return data
+
+
 def _local_day_bounds(date_obj):
     tz = datetime.now().astimezone().tzinfo
     start = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=tz)
@@ -3091,6 +3135,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # rate without dragging the whole /api/data payload with it.
             self._send_json(get_temp_age_series())
 
+        elif self.path.startswith("/api/model_demand"):
+            m = re.search(r"[?&]window=([0-9a-z]+)", self.path)
+            self._send_json(get_model_demand(m.group(1) if m else "24h"))
         elif self.path == "/api/price_guard":
             cfg = read_price_guard_config()
             live = _evaluate_price_guard(cfg)

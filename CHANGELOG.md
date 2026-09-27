@@ -1,5 +1,17 @@
 # Changelog
 
+## v46
+
+**New panel: Network Model Demand** — which models the whole Darkbloom network is actually being asked for, next to this Mac's own numbers, so choosing what to serve no longer rests on guesswork from a single provider's traffic.
+
+Darkbloom v0.9.10 (2026-09-27) started publishing per-model demand and outcomes at `GET https://api.darkbloom.dev/v1/network/model-demand?window=24h|7d|30d` — public, no auth, the same data behind the Model demand panel on console.darkbloom.dev/stats. The server proxies it at `/api/model_demand` with a 10-minute cache per window (Darkbloom publishes whole UTC hours with at least an hour of lag, so nothing new arrives faster), serves the last good copy marked `stale` if the API fails, and tags each model `served_here` when it matches the provider plist's `--model` list. Matching allows for the public alias being shorter than the local build (`gemma-4-26b` vs `gemma-4-26b-qat-4bit`).
+
+The panel lists every published model by requests and share, completion rate (green/amber/red at 98/90%), capacity+latency rejections (unmet demand — providers are short for that model), timeouts, HTTP 429s, and a per-bucket trend line where unpublished hours are gaps, not zeroes. The chosen window is remembered per browser. Rows for configured models are highlighted and labelled "configured here", deliberately not "serving": a model can sit in the plist and still never load (gemma on 48 GB).
+
+The numbers are a published sample, not total demand: Darkbloom only publishes an hour for a model once it has at least 20 requests from 3 different accounts, and its history only starts at 2026-09-27 04:44 UTC, so the 7d and 30d windows fill in over time.
+
+Verified against the live API with the server functions called directly, then by rendering the panel headlessly in Chrome against real data, before copying into ~/.darkbloom/dashboard and restarting the LaunchAgent.
+
 ## v45
 
 **energy-monitor now exits the moment launchd asks it to** — it used to ignore SIGTERM entirely and had to be SIGKILLed, holding up every logout and shutdown in the meantime.

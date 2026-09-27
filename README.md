@@ -67,6 +67,9 @@ machine it runs on:
   serve warm (not just the first one), pinging each on an interval you set
 - **Disk usage** - downloaded models and their sizes, with a one-click "copy
   remove command" for anything not currently active (never deletes for you)
+- **Network model demand** - per-model requests, completion rate, rejections,
+  timeouts and 429s across the whole Darkbloom network (24h / 7d / 30d), from
+  Darkbloom's public stats API, with the models configured here highlighted
 - **Live gauges** - CPU / GPU / Total watts (with an estimated non-SoC
   baseline added in) / RAM used / Fan speed / GPU temp / recent utilization,
   updating at ~5Hz (matching powermetrics' own sampling rate)
