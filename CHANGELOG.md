@@ -1,5 +1,18 @@
 # Changelog
 
+## v55
+
+**Network Model Demand can now act on what it shows: download, activate and load models from the list, with a recommendation per model.** Two new columns:
+
+- **Fit** — Recommended / Possible / Low demand / Won't fit, with the deciding reason under the badge and all reasons on hover. It checks the catalog's minimum RAM against this Mac, the model's memory estimate (`estimated_memory_gb` for downloaded models, catalog size × 1.12 otherwise) against the inference budget from `darkbloom status` next to the models already hosted, and free disk (10 GB headroom) before a download. Demand counts as Recommended at ≥15% of published requests, or ≥5% with ≥2% of them rejected or timed out (providers are short); Possible at ≥3%. 429s are left out since they overlap the other outcomes. A rough guide from published demand, not an earnings forecast.
+- **This Mac** — state (Not downloaded / Downloaded / Hosted · loaded or not loaded) and the buttons that fit it: **Download** (`darkbloom models download`), **Activate** (host it in addition — only offered when it fits next to the current models), **Replace** (host only this one), **Deactivate** (not offered for the last hosted model) and **Load** (one-token request so it loads now; the same request warm-up already sends).
+
+Activate, Replace and Deactivate run `darkbloom switch --timeout 120`, which drains running requests and changes models without a restart, and take a second click to confirm. After a successful switch the provider plist's `--model` flags are rewritten to match, because `switch` only updates `provider.toml` and Price Guard / serving mode restart the provider from the plist — the next pause would otherwise quietly undo the switch. Removing models stays with the Disk Usage panel's copy-command, as before.
+
+Every action is a background job per model (POST `/api/model_action`), switches are serialized, the page polls every 4 s while one runs and shows its latest output line, and each start and outcome is logged to `~/.darkbloom/model-actions.log`. "configured here" became **hosted here** and now follows the running daemon's `advertised_models` instead of the plist.
+
+Verified: all refusals (load of a non-hosted model, deactivating the only model, downloading a downloaded or non-catalog model, unknown action), a real Load of gpt-oss-20b, and the plist rewrite on a copy (round trip is byte-identical). A real download or switch was not run.
+
 ## v54
 
 **Network Model Demand shows each model's size.** A new Size column gives the weights' download size, and hovering it shows the minimum RAM Darkbloom requires to serve the model, so you can tell whether a model in demand even fits this Mac before chasing it.

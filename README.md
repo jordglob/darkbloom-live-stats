@@ -70,7 +70,9 @@ machine it runs on:
   remove command" for anything not currently active (never deletes for you)
 - **Network model demand** - per-model requests, completion rate, rejections,
   timeouts and 429s across the whole Darkbloom network (24h / 7d / 30d), from
-  Darkbloom's public stats API, with the models configured here highlighted
+  Darkbloom's public stats API, with each model's size, the models hosted here
+  highlighted, a fit recommendation for this Mac (RAM, memory budget, disk,
+  demand) and Download / Activate / Replace / Deactivate / Load buttons
 - **Live gauges** - CPU / GPU / Total watts (with an estimated non-SoC
   baseline added in) / RAM used / Fan speed / GPU temp / recent utilization,
   updating at ~5Hz (matching powermetrics' own sampling rate)

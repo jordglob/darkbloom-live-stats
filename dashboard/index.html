@@ -222,6 +222,11 @@
   .demand-share { display: inline-block; height: 6px; border-radius: 3px; background: var(--series-cost); vertical-align: middle; margin-right: 6px; }
   .demand-spark { width: 90px; height: 20px; vertical-align: middle; }
   .demand-spark polyline { fill: none; stroke: var(--series-cost); stroke-width: 1.5; }
+  .fit-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 8px; white-space: nowrap; border: 1px solid currentColor; cursor: help; }
+  .fit-reason { font-size: 11px; color: var(--text-muted); margin-top: 2px; max-width: 260px; white-space: normal; }
+  .model-actions { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .model-state { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+  .model-job { font-size: 11px; color: var(--text-muted); max-width: 240px; white-space: normal; }
   table.rotation-table td.num, table.rotation-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .rotation-summary { font-size: 12px; color: var(--text-secondary); margin: 10px 0; }
   .rotation-summary strong { color: var(--text-primary); }
@@ -1642,13 +1647,15 @@ function renderModelDemand(d) {
         <th class="num" title="Timed out before finishing.">Timeouts</th>
         <th class="num" title="HTTP 429 responses. Overlaps the other outcomes, so it is not added to them.">429s</th>
         <th title="Requests per bucket over the window. Gaps are hours that were not published.">Trend</th>
+        <th title="Suitability for this Mac: whether it fits (RAM, the inference memory budget next to the models already hosted, free disk) and whether network demand makes it worth serving. Hover the badge for all reasons. A rough guide from published demand, not an earnings forecast.">Fit</th>
+        <th title="Download fetches the weights. Activate adds it to the models this provider hosts (darkbloom switch, drains running requests first, no restart); Replace hosts only this one. Load forces a hosted model into memory with a one-token request. Switches are also written to the provider plist so Price Guard restarts keep them.">This Mac</th>
       </tr></thead>
       <tbody>
         ${models.map(m => {
           const rate = pct(m.completed, m.requests);
           const rejected = (m.capacity_rejected || 0) + (m.latency_rejected || 0);
           return `<tr class="${m.served_here ? 'demand-mine' : ''}">
-            <td>${escapeHtml(m.model)}${m.served_here ? '<span class="demand-badge" title="In the --model list of the provider plist. Says nothing about whether it actually loads or is serving right now.">configured here</span>' : ''}</td>
+            <td>${escapeHtml(m.model)}${m.served_here ? '<span class="demand-badge" title="Hosted by the running provider (advertised to the network). Loaded or not is shown under This Mac.">hosted here</span>' : ''}</td>
             <td class="num"${m.min_ram_gb ? ` title="Needs at least ${m.min_ram_gb} GB RAM"` : ''}>${m.size_gb != null ? m.size_gb.toFixed(1) + ' GB' : '–'}</td>
             <td class="num"><span class="demand-share" style="width:${Math.max(2, m.requests / maxReq * 60).toFixed(0)}px"></span>${fmtNum(m.requests)} <span style="color:var(--text-muted)">${pct(m.requests, total).toFixed(1)}%</span></td>
             <td class="num" style="color:${rateColor(rate)}">${rate == null ? '–' : rate.toFixed(1) + '%'}</td>
@@ -1656,6 +1663,8 @@ function renderModelDemand(d) {
             <td class="num">${m.timed_out ? fmtNum(m.timed_out) : '–'}</td>
             <td class="num">${m.http_429 ? fmtNum(m.http_429) : '–'}</td>
             <td>${demandSparkline(m.time_series)}</td>
+            <td>${fitCell(m)}</td>
+            <td>${modelActionsCell(m)}</td>
           </tr>`;
         }).join('')}
       </tbody>
@@ -1664,10 +1673,105 @@ function renderModelDemand(d) {
   `;
 }
 
+const FIT_STYLES = {
+  recommended: ['var(--status-good)', 'Recommended'],
+  possible: ['var(--status-warning)', 'Possible'],
+  low: ['var(--text-muted)', 'Low demand'],
+  unsuitable: ['var(--status-critical)', 'Won\'t fit'],
+  unknown: ['var(--text-muted)', 'Unknown'],
+};
+
+function fitCell(m) {
+  const r = m.recommendation;
+  if (!r) return '–';
+  const [color, label] = FIT_STYLES[r.level] || FIT_STYLES.unknown;
+  const reasons = r.reasons || [];
+  // Show the most decision-relevant reason inline: a blocker if there is one,
+  // otherwise the demand line.
+  const key = reasons.find(t => /fit|free disk|Needs|catalog|evict/.test(t)) || reasons[reasons.length - 1] || '';
+  return `<span class="fit-badge" style="color:${color}" title="${escapeHtml(reasons.join('\n'))}">${label}</span>
+    ${key ? `<div class="fit-reason">${escapeHtml(key)}</div>` : ''}`;
+}
+
+// Actions that change what the provider serves take a second click, so a stray
+// click can't drain and switch the provider.
+let pendingModelConfirm = null;
+
+function modelActionsCell(m) {
+  const l = m.local;
+  if (!l) return '–';
+  const id = escapeHtml(m.model);
+  const job = l.job;
+  const running = job && job.state === 'running';
+  const btn = (action, label, title, disabled) => {
+    const confirming = pendingModelConfirm && pendingModelConfirm.model === m.model && pendingModelConfirm.action === action;
+    return `<button class="copy-cmd-btn" ${disabled || running ? 'disabled' : ''} title="${escapeHtml(title)}"
+      onclick="modelAction('${action}', this.dataset.model)" data-model="${id}">${confirming ? 'Confirm ' + label.toLowerCase() + '?' : label}</button>`;
+  };
+  const state = l.hosted ? (l.loaded ? 'Hosted · loaded' : 'Hosted · not loaded')
+    : l.downloaded ? 'Downloaded' : 'Not downloaded';
+  const blocked = m.recommendation && m.recommendation.level === 'unsuitable';
+  const buttons = [];
+  if (!l.downloaded) {
+    if (m.size_gb != null) buttons.push(btn('download', 'Download',
+      `Download ${m.size_gb.toFixed(1)} GB with darkbloom models download`, blocked || l.disk_ok === false));
+  } else if (!l.hosted) {
+    if (l.fits_alongside !== false) buttons.push(btn('activate', 'Activate', 'Host it in addition to the current models', blocked));
+    buttons.push(btn('replace', 'Replace', 'Host only this model - the others stop being offered to the network', blocked));
+  } else {
+    if (!l.loaded) buttons.push(btn('load', 'Load', 'Send a one-token request so the model loads into memory now'));
+    buttons.push(btn('deactivate', 'Deactivate', 'Stop hosting it; the other hosted models stay',
+      (lastModelDemand?.hosted_models || []).length < 2));
+  }
+  let jobLine = '';
+  if (job) {
+    const verb = { download: 'Downloading', activate: 'Activating', replace: 'Switching', deactivate: 'Deactivating', load: 'Loading' }[job.action] || job.action;
+    const color = job.state === 'error' ? 'var(--status-critical)' : job.state === 'ok' ? 'var(--status-good)' : 'var(--text-muted)';
+    const text = running ? `${verb}…${job.message ? ' ' + job.message : ''}` : job.message;
+    jobLine = `<div class="model-job" style="color:${color}">${escapeHtml(text)}</div>`;
+  }
+  return `<div class="model-actions"><span class="model-state">${state}</span>${buttons.join('')}</div>${jobLine}`;
+}
+
+async function modelAction(action, model) {
+  const needsConfirm = ['activate', 'replace', 'deactivate'].includes(action);
+  if (needsConfirm && !(pendingModelConfirm && pendingModelConfirm.model === model && pendingModelConfirm.action === action)) {
+    pendingModelConfirm = { model, action };
+    setTimeout(() => {
+      if (pendingModelConfirm && pendingModelConfirm.model === model && pendingModelConfirm.action === action) {
+        pendingModelConfirm = null;
+        if (lastModelDemand) renderModelDemand(lastModelDemand);
+      }
+    }, 5000);
+    if (lastModelDemand) renderModelDemand(lastModelDemand);
+    return;
+  }
+  pendingModelConfirm = null;
+  try {
+    const res = await fetch('/api/model_action', { method: 'POST', body: JSON.stringify({ action, model }) });
+    const r = await res.json();
+    if (!r.ok) {
+      const d = lastModelDemand;
+      const row = d && (d.models || []).find(x => x.model === model);
+      if (row && row.local) row.local.job = { action, state: 'error', message: r.message };
+      if (d) renderModelDemand(d);
+      return;
+    }
+  } catch (e) { /* the refresh below shows the state */ }
+  refreshModelDemand();
+}
+
+let lastModelDemand = null;
+let modelJobPoll = null;
+
 async function refreshModelDemand() {
   try {
     const res = await fetch('/api/model_demand?window=' + demandWindow);
-    renderModelDemand(await res.json());
+    lastModelDemand = await res.json();
+    renderModelDemand(lastModelDemand);
+    const busy = (lastModelDemand.models || []).some(m => m.local && m.local.job && m.local.job.state === 'running');
+    clearTimeout(modelJobPoll);
+    if (busy) modelJobPoll = setTimeout(refreshModelDemand, 4000);
   } catch (e) {
     renderModelDemand({ error: String(e) });
   }

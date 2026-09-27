@@ -616,6 +616,7 @@ STATUS_PATTERNS = {
     "last_error": re.compile(r"Last model-load error:\s*(.+)"),
     "local_models": re.compile(r"Local MLX models:\s*(\d+)"),
     "authorization": re.compile(r"^Authorization:\s*(.+)"),
+    "inference_memory_gb": re.compile(r"Inference memory:\s*([\d.]+)\s*GB"),
 }
 
 
@@ -761,6 +762,27 @@ def get_configured_models():
     return []
 
 
+def _ping_model(conf, model, timeout):
+    """One-token chat completion against the provider's local endpoint - MLX
+    loads a model on its first request, so this forces it into memory."""
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }).encode()
+    req = urllib.request.Request(
+        conf["base_url"].rstrip("/") + "/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {conf['api_key']}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        resp.read()
+
+
 def send_warmup_ping():
     """Sends a minimal chat completion per configured model to the provider's
     local endpoint, forcing each into memory - the same daemon that serves the
@@ -783,23 +805,8 @@ def send_warmup_ping():
 
     all_ok = True
     for model in models:
-        body = json.dumps({
-            "model": model,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
-        }).encode()
-        req = urllib.request.Request(
-            conf["base_url"].rstrip("/") + "/chat/completions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {conf['api_key']}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                resp.read()
+            _ping_model(conf, model, timeout=90)
             log_warmup(f"OK: warmed up {model}")
         except urllib.error.HTTPError as e:
             if e.code == 429:
@@ -2422,6 +2429,335 @@ def get_model_demand(window):
     return data
 
 
+# --- Model actions from the Network Model Demand panel -----------------------
+#
+# Download, activate (host), deactivate and load run as background jobs, one
+# per model, so a 20 GB download never blocks the request that started it.
+# Switches are serialized: two overlapping `darkbloom switch` calls would race
+# on the same drain barrier. Removing a model is deliberately not offered here,
+# same as the Disk Usage panel - the dashboard never deletes files for you.
+
+MODEL_ACTION_LOG = HOME / ".darkbloom" / "model-actions.log"
+MODEL_SWITCH_TIMEOUT_SEC = 120
+# Weights are not the whole footprint (KV cache, activations). For models not
+# downloaded yet there is no estimated_memory_gb, so scale the catalog size by
+# the ratio seen on the downloaded ones (13.5/12.1 .. 23.8/21.3, ~1.12).
+MODEL_MEMORY_OVERHEAD = 1.12
+DISK_HEADROOM_GB = 10
+_model_jobs = {}
+_model_jobs_lock = threading.Lock()
+_model_switch_lock = threading.Lock()
+
+
+def log_model_action(line):
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with open(MODEL_ACTION_LOG, "a") as f:
+        f.write(f"[{ts}] {line}\n")
+
+
+def _local_model_inventory():
+    """Downloaded models with their memory estimate, uncached so a finished
+    download shows up at once."""
+    try:
+        out = subprocess.run(
+            [str(DARKBLOOM_BIN), "models", "list", "--json", "--all"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        return {m["id"]: m for m in json.loads(out).get("models", []) if m.get("id")}
+    except Exception:
+        return {}
+
+
+def _daemon_model_state():
+    """Hosted and warm models as the running daemon reports them. Falls back
+    to the plist when the daemon is down, so hosted still means something."""
+    try:
+        data = json.loads(DAEMON_STATE_PATH.read_text())
+        if data.get("pid"):
+            return list(data.get("advertised_models") or []), list(data.get("warm_models") or [])
+    except Exception:
+        pass
+    return get_configured_models(), []
+
+
+def _resolve_local_id(public_id, local_ids):
+    for lid in local_ids:
+        if _matches_public_model(lid, public_id):
+            return lid
+    return None
+
+
+def _sync_plist_models(models):
+    """Rewrite the provider plist's --model flags to the new selection.
+    `darkbloom switch` only updates provider.toml, but Price Guard and serving
+    mode restart the provider from the plist's arguments - without this, the
+    next pause/resume would quietly revert the switch."""
+    with open(PROVIDER_PLIST, "rb") as f:
+        plist = plistlib.load(f)
+    args = plist.get("ProgramArguments", [])
+    kept, insert_at, i = [], None, 0
+    while i < len(args):
+        if args[i] == "--model" and i + 1 < len(args):
+            if insert_at is None:
+                insert_at = len(kept)
+            i += 2
+            continue
+        kept.append(args[i])
+        i += 1
+    if insert_at is None:
+        insert_at = len(kept)
+    kept[insert_at:insert_at] = [x for m in models for x in ("--model", m)]
+    plist["ProgramArguments"] = kept
+    tmp = PROVIDER_PLIST.with_name(PROVIDER_PLIST.name + ".tmp")
+    with open(tmp, "wb") as f:
+        plistlib.dump(plist, f)
+    os.replace(tmp, PROVIDER_PLIST)
+
+
+def _set_job(model, **fields):
+    with _model_jobs_lock:
+        job = _model_jobs.setdefault(model, {})
+        job.update(fields)
+
+
+def _run_download(model):
+    proc = subprocess.Popen(
+        [str(DARKBLOOM_BIN), "models", "download", model],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    # Progress output rewrites one line with \r, so split on both and keep
+    # the latest non-empty line as the job's message.
+    buf = b""
+    last = ""
+    while True:
+        chunk = proc.stdout.read(256)
+        if not chunk:
+            break
+        buf += chunk
+        parts = re.split(rb"[\r\n]", buf)
+        buf = parts.pop()
+        for part in parts:
+            text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", part.decode(errors="replace")).strip()
+            if text:
+                last = text
+                _set_job(model, message=text[:200])
+    rc = proc.wait()
+    with _disk_lock:
+        _disk_cache["data"] = None
+    if rc != 0:
+        raise RuntimeError(last or f"download exited with {rc}")
+    return "Downloaded"
+
+
+def _run_switch(models):
+    with _model_switch_lock:
+        args = [str(DARKBLOOM_BIN), "switch", "--timeout", str(MODEL_SWITCH_TIMEOUT_SEC)]
+        for m in models:
+            args += ["--model", m]
+        r = subprocess.run(args, capture_output=True, text=True, timeout=MODEL_SWITCH_TIMEOUT_SEC + 90)
+        if r.returncode != 0:
+            lines = [l for l in (r.stderr + "\n" + r.stdout).splitlines() if l.strip()]
+            raise RuntimeError(lines[-1].strip() if lines else f"switch exited with {r.returncode}")
+        _sync_plist_models(models)
+        with _disk_lock:
+            _disk_cache["data"] = None
+    return "Now hosting " + ", ".join(models)
+
+
+def _run_load(model):
+    conf = json.loads(LOCAL_JSON.read_text())
+    try:
+        _ping_model(conf, model, timeout=300)
+    except urllib.error.HTTPError as e:
+        # 429 means it is busy with real traffic for this model - already loaded.
+        if e.code != 429:
+            raise RuntimeError(f"HTTP {e.code} {e.reason}")
+    return "Loaded"
+
+
+def _model_job_thread(model, action, fn):
+    try:
+        msg = fn()
+        _set_job(model, state="ok", message=msg, finished=time.time())
+        log_model_action(f"OK: {action} {model}: {msg}")
+    except Exception as e:
+        _set_job(model, state="error", message=str(e)[:300], finished=time.time())
+        log_model_action(f"ERROR: {action} {model}: {e}")
+
+
+def start_model_action(action, public_id):
+    """Validates against the catalog and the local inventory, then starts the
+    job. Returns (ok, message)."""
+    catalog = get_model_catalog()
+    local = _local_model_inventory()
+    local_id = _resolve_local_id(public_id, local)
+    entry = catalog.get(public_id.lower())
+    hosted, _ = _daemon_model_state()
+
+    with _model_jobs_lock:
+        job = _model_jobs.get(public_id)
+        if job and job.get("state") == "running":
+            return False, f"{job.get('action')} already running for this model"
+
+    if action == "download":
+        if not entry:
+            return False, "Not in the coordinator catalog"
+        if local_id:
+            return False, "Already downloaded"
+        fn = lambda: _run_download(entry["id"])
+    elif action in ("activate", "replace"):
+        if not local_id:
+            return False, "Download it first"
+        if _model_switch_lock.locked():
+            return False, "Another model switch is in progress"
+        if action == "activate":
+            models = hosted + [local_id] if local_id not in hosted else hosted
+        else:
+            models = [local_id]
+        fn = lambda: _run_switch(models)
+    elif action == "deactivate":
+        if local_id not in hosted:
+            return False, "Not hosted here"
+        models = [m for m in hosted if m != local_id]
+        if not models:
+            return False, "It is the only hosted model - activate another one instead"
+        if _model_switch_lock.locked():
+            return False, "Another model switch is in progress"
+        fn = lambda: _run_switch(models)
+    elif action == "load":
+        if local_id not in hosted:
+            return False, "Activate it first - only hosted models can be loaded"
+        if not LOCAL_JSON.exists():
+            return False, "local.json missing - the provider needs --local-endpoint"
+        fn = lambda: _run_load(local_id)
+    else:
+        return False, "Unknown action"
+
+    _set_job(public_id, action=action, state="running", started=time.time(), finished=None, message="")
+    log_model_action(f"START: {action} {public_id}")
+    threading.Thread(target=_model_job_thread, args=(public_id, action, fn), daemon=True).start()
+    return True, "Started"
+
+
+def _recommend_model(m, share, ctx):
+    """Suitability for this Mac: does it fit (RAM, disk, next to what is
+    already hosted) and is there enough network demand to be worth it.
+    Returns (level, reasons); level is one of recommended, possible, low,
+    unsuitable, unknown."""
+    reasons = []
+    min_ram = m.get("min_ram_gb")
+    ram = ctx["ram_gb"]
+    if min_ram and ram and min_ram > ram:
+        return "unsuitable", [f"Needs {min_ram} GB RAM, this Mac has {ram:.0f} GB."]
+    if m.get("size_gb") is None and not m["local"]["downloaded"]:
+        return "unknown", ["Not in the coordinator catalog, so it cannot be downloaded here."]
+
+    req = m.get("requests") or 0
+    unmet = (m.get("capacity_rejected") or 0) + (m.get("latency_rejected") or 0) + (m.get("timed_out") or 0)
+    unmet_pct = unmet / req * 100 if req else 0
+    reasons.append(f"{share:.1f}% of published network requests.")
+    if unmet_pct >= 1:
+        reasons.append(f"{unmet_pct:.1f}% rejected or timed out - providers are short on it.")
+    if share >= 15 or (share >= 5 and unmet_pct >= 2):
+        level = "recommended"
+    elif share >= 3:
+        level = "possible"
+    else:
+        level = "low"
+
+    mem = m["local"]["memory_gb"]
+    budget = ctx["budget_gb"]
+    if mem and budget:
+        others = [(h, g) for h, g in ctx["hosted_mem"].items() if h != m["local"]["local_id"]]
+        others_gb = sum(g for _, g in others)
+        if mem > budget:
+            return "unsuitable", [f"Needs ~{mem:.0f} GB, above the {budget:.0f} GB inference budget."]
+        if others and mem + others_gb > budget and not m["local"]["hosted"]:
+            names = ", ".join(h for h, _ in others)
+            reasons.append(f"~{mem:.0f} GB does not fit next to {names} (~{others_gb:.0f} GB) "
+                           f"in {budget:.0f} GB - replace instead of adding, or the models will evict each other.")
+            m["local"]["fits_alongside"] = False
+        else:
+            m["local"]["fits_alongside"] = True
+
+    size = m.get("size_gb")
+    free = ctx["free_disk_gb"]
+    if not m["local"]["downloaded"] and size and free is not None:
+        if size + DISK_HEADROOM_GB > free:
+            reasons.append(f"Only {free:.0f} GB free disk for {size:.0f} GB - remove unused models first (Disk Usage panel).")
+            m["local"]["disk_ok"] = False
+        else:
+            m["local"]["disk_ok"] = True
+    return level, reasons
+
+
+def annotate_model_demand(data):
+    """Adds live local state (downloaded / hosted / loaded / running job) and a
+    suitability recommendation to the cached demand data. Done per request,
+    not in the demand cache, because local state changes by the second."""
+    models = [dict(m) for m in data.get("models") or []]
+    local = _local_model_inventory()
+    hosted, warm = _daemon_model_state()
+    status = get_darkbloom_status()
+    ram = None
+    try:
+        ram = json.loads(DAEMON_STATE_PATH.read_text()).get("capacity", {}).get("total_memory_gb")
+    except Exception:
+        pass
+    if not ram:
+        try:
+            ram = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout) / 2**30
+        except Exception:
+            ram = None
+    bm = STATUS_PATTERNS["inference_memory_gb"].search(status.get("raw") or "")
+    budget = float(bm.group(1)) if bm else None
+    try:
+        free_disk = shutil.disk_usage(str(HOME)).free / 1e9
+    except Exception:
+        free_disk = None
+    catalog = get_model_catalog()
+
+    def mem_of(local_id, public_id):
+        lm = local.get(local_id) if local_id else None
+        if lm and lm.get("estimated_memory_gb"):
+            return lm["estimated_memory_gb"]
+        entry = catalog.get((local_id or public_id).lower()) or catalog.get(public_id.lower())
+        return entry["size_gb"] * MODEL_MEMORY_OVERHEAD if entry and entry.get("size_gb") else None
+
+    ctx = {
+        "ram_gb": ram, "budget_gb": budget, "free_disk_gb": free_disk,
+        "hosted_mem": {h: (mem_of(h, h) or 0) for h in hosted},
+    }
+    total = sum(m.get("requests") or 0 for m in models)
+    with _model_jobs_lock:
+        jobs = {k: dict(v) for k, v in _model_jobs.items()}
+    for m in models:
+        pid = m.get("model", "")
+        local_id = _resolve_local_id(pid, local)
+        m["served_here"] = local_id in hosted if local_id else any(_matches_public_model(h, pid) for h in hosted)
+        m["local"] = {
+            "local_id": local_id,
+            "downloaded": bool(local_id),
+            "hosted": bool(local_id and local_id in hosted),
+            "loaded": bool(local_id and local_id in warm),
+            "memory_gb": round(mem_of(local_id, pid), 1) if mem_of(local_id, pid) else None,
+        }
+        job = jobs.get(pid)
+        if job:
+            # Keep finished jobs visible for a minute so the outcome can be read.
+            if job.get("state") == "running" or time.time() - (job.get("finished") or 0) < 60:
+                m["local"]["job"] = job
+        share = (m.get("requests") or 0) / total * 100 if total else 0
+        level, reasons = _recommend_model(m, share, ctx)
+        m["recommendation"] = {"level": level, "reasons": reasons}
+    out = dict(data)
+    out["models"] = models
+    out["hosted_models"] = hosted
+    out["inference_budget_gb"] = budget
+    out["free_disk_gb"] = round(free_disk, 1) if free_disk is not None else None
+    return out
+
+
 def _local_day_bounds(date_obj):
     tz = datetime.now().astimezone().tzinfo
     start = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=tz)
@@ -3207,7 +3543,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif self.path.startswith("/api/model_demand"):
             m = re.search(r"[?&]window=([0-9a-z]+)", self.path)
-            self._send_json(get_model_demand(m.group(1) if m else "24h"))
+            self._send_json(annotate_model_demand(get_model_demand(m.group(1) if m else "24h")))
         elif self.path == "/api/price_guard":
             cfg = read_price_guard_config()
             live = _evaluate_price_guard(cfg)
@@ -3281,6 +3617,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             ok = set_serving_mode(body.get("mode"))
             self._send_json({"ok": ok, "serving_mode": read_serving_mode()})
+
+        elif self.path == "/api/model_action":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            ok, msg = start_model_action(str(body.get("action", "")), str(body.get("model", "")))
+            self._send_json({"ok": ok, "message": msg})
 
         elif self.path == "/api/max_power":
             length = int(self.headers.get("Content-Length", 0))
