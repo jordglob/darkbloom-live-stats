@@ -1854,6 +1854,9 @@ def _compute_hourly_rate_comparison(raw, duration_stats):
     }
 
 
+ACCOUNT_PERIODS = {"1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600}
+
+
 def _build_account_view(raw, age_sec):
     """Aggregates the raw earnings list per model and computes the same
     'local estimate vs. real payout' comparison as before. base_reward-style
@@ -1870,13 +1873,31 @@ def _build_account_view(raw, age_sec):
     raw = dict(raw)
     raw["earnings"] = _load_earnings_history() or raw.get("earnings", [])
     per_model = {}
+    now = time.time()
     for e in raw.get("earnings", []):
         model = e.get("model") or "unknown"
-        d = per_model.setdefault(model, {"amount_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "jobs": 0})
-        d["amount_usd"] += (e.get("amount_micro_usd", 0) or 0) / 1e6
+        d = per_model.setdefault(model, {
+            "amount_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0, "jobs": 0,
+            "periods": {k: {"jobs": 0, "tokens": 0, "amount_usd": 0.0} for k in ACCOUNT_PERIODS},
+        })
+        amount = (e.get("amount_micro_usd", 0) or 0) / 1e6
+        tokens = (e.get("prompt_tokens", 0) or 0) + (e.get("completion_tokens", 0) or 0)
+        d["amount_usd"] += amount
         d["prompt_tokens"] += e.get("prompt_tokens", 0) or 0
         d["completion_tokens"] += e.get("completion_tokens", 0) or 0
         d["jobs"] += 1
+        # The whole history window is ~48h and says nothing about what is
+        # being served now, so also count fixed periods back from now.
+        try:
+            age = now - _parse_iso_ts(e["created_at"])
+        except Exception:
+            continue
+        for key, sec in ACCOUNT_PERIODS.items():
+            if age <= sec:
+                pd = d["periods"][key]
+                pd["jobs"] += 1
+                pd["tokens"] += tokens
+                pd["amount_usd"] += amount
 
     total_local_est = 0.0
     total_real = 0.0

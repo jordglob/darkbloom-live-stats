@@ -1829,6 +1829,16 @@ function renderPayoutMeter(cs) {
     </div>`;
 }
 
+const ACCOUNT_PERIOD_KEYS = ['1h', '6h', '24h'];
+
+function lastHourLine(account) {
+  const served = Object.entries(account.per_model || {})
+    .filter(([m, d]) => m !== 'base_reward' && d.periods && d.periods['1h'] && d.periods['1h'].jobs)
+    .sort((a, b) => b[1].periods['1h'].jobs - a[1].periods['1h'].jobs)
+    .map(([m, d]) => `${escapeHtml(m)} (${fmtNum(d.periods['1h'].jobs)} jobs, $${d.periods['1h'].amount_usd.toFixed(4)})`);
+  return `<div class="rotation-summary" style="margin-top:8px">Served in the last hour: ${served.length ? `<strong>${served.join(', ')}</strong>` : 'nothing - no paid jobs in the ledger.'}</div>`;
+}
+
 function renderAccount(account) {
   const el = document.getElementById('account');
   if (!account) { el.innerHTML = ''; return; }
@@ -1848,6 +1858,7 @@ function renderAccount(account) {
   let showEst = false;
   try { showEst = localStorage.getItem('db-show-estimate-cols') === '1'; } catch (e) {}
 
+  const winLabel = account.sample_window_hours != null ? `${Math.round(account.sample_window_hours)}h` : 'window';
   const rows = Object.entries(account.per_model || {})
     .sort((a, b) => b[1].jobs - a[1].jobs)
     .map(([model, d]) => {
@@ -1856,7 +1867,11 @@ function renderAccount(account) {
       return `
       <tr>
         <td>${isFloor ? '<span title="Not a model: the base reward Darkbloom pays just for being online and hardware-trusted, per time slot. Usually the biggest line here.">base reward (being online)</span>' : model}</td>
-        <td>${fmtNum(d.jobs)}</td>
+        ${ACCOUNT_PERIOD_KEYS.map(k => {
+          const pd = (d.periods || {})[k];
+          return `<td class="num" title="${pd ? `${fmtNum(pd.jobs)} jobs, $${pd.amount_usd.toFixed(6)}${isFloor ? '' : `, ${fmtNum(pd.tokens)} tokens`} in the last ${k}` : ''}">${pd && pd.jobs ? fmtNum(pd.jobs) : '–'}</td>`;
+        }).join('')}
+        <td class="num">${fmtNum(d.jobs)}</td>
         <td title="${isFloor ? '' : `${tokensAsText(d.prompt_tokens + d.completion_tokens)} (${fmtNum(d.prompt_tokens)} in prompts, ${fmtNum(d.completion_tokens)} in replies). ${TOKENS_AS_TEXT_TIP}`}">${isFloor ? '–' : fmtNum(d.prompt_tokens + d.completion_tokens)}${isFloor ? '' : `<br><span style="font-size:11px;color:var(--text-muted)">${tokensAsText(d.prompt_tokens + d.completion_tokens)}</span>`}</td>
         <td>$${d.amount_usd.toFixed(6)}</td>
         ${showEst ? `<td>${isFloor ? '–' : '$' + d.local_estimate_usd.toFixed(6)}</td><td class="${cutClass}">${isFloor ? '–' : fmtPct(d.cut_pct)}</td>` : ''}
@@ -1890,10 +1905,13 @@ function renderAccount(account) {
     ${renderPayoutMeter(cs)}
     <div class="table-scroll">
     <table class="rotation-table">
-      <thead><tr><th>Model</th><th>Jobs</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th>${showEst ? `<th title="What our own flat $0.048 per million tokens guess would have estimated for these same tokens - recalibrated periodically from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means it ran low.">Our estimate's error</th>` : ''}<th title="What Darkbloom actually paid per million tokens for this model - compare models by how well they pay, not just volume.">Real rate ($ per million tokens)</th></tr></thead>
+      <thead>
+      <tr><th rowspan="2">Model</th><th colspan="${ACCOUNT_PERIOD_KEYS.length + 1}" style="text-align:center" title="Jobs counted back from now. The last column is the whole locally kept ledger window, which is also what Tokens, Real payout and Real rate cover. Hover a number for its payout.">Jobs</th><th colspan="${showEst ? 5 : 3}" style="text-align:center">Whole window (${winLabel}${account.sample_window_start_at ? ', since ' + fmtTime(account.sample_window_start_at) : ''})</th></tr>
+      <tr>${ACCOUNT_PERIOD_KEYS.map(k => `<th class="num">${k}</th>`).join('')}<th class="num">${winLabel}</th><th>Tokens</th><th title="What Darkbloom's ledger actually paid.">Real payout</th>${showEst ? `<th title="What our own flat $0.048 per million tokens guess would have estimated for these same tokens - recalibrated periodically from this account's real ledger, not from Darkbloom's advertised pricing.">Our local estimate</th><th title="Gap between our own local guess and the real payout. This is about the accuracy of OUR estimate, not a claim about Darkbloom - positive just means our guess ran high, negative means it ran low.">Our estimate's error</th>` : ''}<th title="What Darkbloom actually paid per million tokens for this model - compare models by how well they pay, not just volume.">Real rate ($ per million tokens)</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     </div>
+    ${lastHourLine(account)}
     <div class="rotation-summary" style="margin-top:10px">
       <label style="cursor:pointer;font-size:12px;color:var(--text-muted)" title="Adds two columns comparing this dashboard's own rough per-token revenue guess against what Darkbloom really paid. It's a check on our guess's accuracy - not a fee, not a claim about Darkbloom."><input type="checkbox" id="show-estimate-cols" ${showEst ? 'checked' : ''}> Show estimate columns (nerdy)</label>
       ${showEst ? `<br>Totals — real payout: <strong>$${(cs.total_real_usd ?? 0).toFixed(6)}</strong> ·

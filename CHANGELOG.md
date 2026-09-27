@@ -1,5 +1,13 @@
 # Changelog
 
+## v59
+
+**The per-model earnings table says which period each number covers, and shows what was served recently.** "Jobs" used to be a single count over the whole locally kept ledger window - about 48 hours, never stated - so a model served only yesterday looked just as current as one served a minute ago (on 2026-09-27 the table showed 880 gemma-4-26b-qat-4bit jobs although gemma had not been hosted all day).
+
+Jobs is now split into **1h / 6h / 24h** counted back from now, plus the whole window, whose length and start are in the header. Tokens, Real payout and Real rate are grouped under that whole-window header since they cover the same span. Hovering a period count shows its payout (and tokens). Under the table, a **Served in the last hour** line names each model with its jobs and payout, or says nothing was served.
+
+`/api/data`'s `account.per_model` entries gained `periods: {1h, 6h, 24h}` with `jobs`, `tokens` and `amount_usd`.
+
 ## v58
 
 **Disk Usage no longer calls every unused model "safe to remove - it re-downloads if needed".** That was wrong in both directions on 2026-09-27: `qwen3-vl-30b-a3b-instruct` (18.3 GB) is no longer in Darkbloom's catalog, so it can't be downloaded again - but it can't be served either, so it is the one model truly worth deleting - while the two qwen models listed as "unused" were the most-demanded models on the network (43% and 24%), and removing them would cost ~20 GB each to get back.
