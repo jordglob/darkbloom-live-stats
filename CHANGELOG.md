@@ -1,5 +1,9 @@
 # Changelog
 
+## v66
+
+**The chat no longer throws away Qwen answers as "reasoning ran long".** v65 treated any reply from a Qwen thinking model without a closing `</think>` as cut-off reasoning. But Qwen sometimes answers without thinking first, and then the whole correct answer was replaced by "[the model's reasoning ran long and got cut off …]" (seen twice in a row on 2026-09-27 for "berätta ett skämt" and "5 jokes please", both of which answer fine when replayed). The chat now asks the server instead: only `finish_reason: "length"` counts as cut off, and then the message says how many tokens it used.
+
 ## v65
 
 **The chat panel works with Qwen's thinking models.** With qwen3.6-35b-a3b the whole chain of thought came back as the answer, ending in a stray `</think>` before the real reply. Qwen's chat template opens `<think>` inside the prompt, so the reply carries only the closing tag; the splitter only knew gpt-oss's harmony channels. It now splits on the last `</think>` (reasoning goes behind the existing Show reasoning toggle), treats an unclosed block from a thinking model as cut-off reasoning, and also reads a separate `reasoning_content` field if a server sends one. Qwen 3.5+ models get 8192 max tokens instead of 2048, since their reasoning alone often runs past 2048. gpt-oss and other models are unchanged.

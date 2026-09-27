@@ -1278,7 +1278,7 @@ def _split_chat_content(content, thinking_model=False):
         head, _, tail = content.rpartition("</think>")
         reasoning = head.replace("<think>", "", 1).strip() or None
         return tail.strip() or "[the model finished thinking but gave no answer - try again]", reasoning
-    if content.lstrip().startswith("<think>") or (thinking_model and content.strip()):
+    if (content.lstrip().startswith("<think>") and "</think>" not in content) or (thinking_model and content.strip()):
         return "[the model's reasoning ran long and got cut off before its final answer - try a shorter question or try again]", content.replace("<think>", "", 1).strip()
     final_m = CHAT_FINAL_CHANNEL_RE.search(content)
     analysis_m = CHAT_ANALYSIS_CHANNEL_RE.search(content)
@@ -1335,9 +1335,18 @@ def _proxy_local_chat(model, messages):
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
-        msg = data["choices"][0]["message"]
+        choice = data["choices"][0]
+        msg = choice["message"]
         content = msg.get("content") or ""
-        final_text, reasoning = _split_chat_content(content, thinking_model=bool(CHAT_THINKING_MODEL_RE.search(model)) and "</think>" not in content and not msg.get("reasoning_content"))
+        # Only the server knows whether generation hit max_tokens. Guessing
+        # from a missing "</think>" also threw away answers Qwen gave without
+        # thinking first, so a thinking model's reply counts as cut off only
+        # when finish_reason says "length".
+        cut_off = choice.get("finish_reason") == "length"
+        final_text, reasoning = _split_chat_content(content, thinking_model=bool(CHAT_THINKING_MODEL_RE.search(model)) and cut_off and "</think>" not in content and not msg.get("reasoning_content"))
+        if cut_off and "</think>" not in content and CHAT_THINKING_MODEL_RE.search(model):
+            used = (data.get("usage") or {}).get("completion_tokens")
+            final_text = f"[the model was still reasoning when it hit the {used or 'max'}-token limit - try a shorter or more specific question]"
         # Some servers return the reasoning in its own field instead.
         if not reasoning and msg.get("reasoning_content"):
             final_text, reasoning = content.strip(), msg["reasoning_content"].strip()
