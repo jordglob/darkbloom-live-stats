@@ -1250,11 +1250,15 @@ def price_guard_loop():
 
 
 CHAT_MAX_TOKENS = 2048
+# Models whose chat template opens a <think> block in the prompt. A reply
+# from them without "</think>" is cut-off reasoning, not an answer.
+CHAT_THINKING_MODEL_RE = re.compile(r"qwen3\.[5-9]|qwen3-", re.IGNORECASE)
+CHAT_THINKING_MAX_TOKENS = 8192
 CHAT_FINAL_CHANNEL_RE = re.compile(r"<\|channel\|>final<\|message\|>(.*?)(?:<\|(?:end|return)\|>|$)", re.DOTALL)
 CHAT_ANALYSIS_CHANNEL_RE = re.compile(r"<\|channel\|>analysis<\|message\|>(.*?)(?:<\|end\|>|<\|start\|>|$)", re.DOTALL)
 
 
-def _split_chat_content(content):
+def _split_chat_content(content, thinking_model=False):
     """gpt-oss-20b's local endpoint doesn't parse its own 'harmony' response
     format - it returns the raw generated text, internal <|channel|>analysis
     reasoning included, with the actual reply buried after a
@@ -1266,6 +1270,16 @@ def _split_chat_content(content):
     channel, final_text says so plainly rather than showing a page of raw
     internal reasoning as if it were the answer - the cut-off reasoning
     itself is still returned so the toggle can reveal it."""
+    # Qwen-style thinking: the chat template already opens <think> in the
+    # prompt, so the reply usually carries only the closing tag (seen with
+    # qwen3.6-35b-a3b on 2026-09-27: reasoning, then "</think>", then the
+    # answer). An opening tag without a close means it was cut off.
+    if "</think>" in content:
+        head, _, tail = content.rpartition("</think>")
+        reasoning = head.replace("<think>", "", 1).strip() or None
+        return tail.strip() or "[the model finished thinking but gave no answer - try again]", reasoning
+    if content.lstrip().startswith("<think>") or (thinking_model and content.strip()):
+        return "[the model's reasoning ran long and got cut off before its final answer - try a shorter question or try again]", content.replace("<think>", "", 1).strip()
     final_m = CHAT_FINAL_CHANNEL_RE.search(content)
     analysis_m = CHAT_ANALYSIS_CHANNEL_RE.search(content)
     reasoning = analysis_m.group(1).strip() if analysis_m else None
@@ -1307,7 +1321,7 @@ def _proxy_local_chat(model, messages):
     body = json.dumps({
         "model": model,
         "messages": messages,
-        "max_tokens": CHAT_MAX_TOKENS,
+        "max_tokens": CHAT_THINKING_MAX_TOKENS if CHAT_THINKING_MODEL_RE.search(model) else CHAT_MAX_TOKENS,
     }).encode()
     req = urllib.request.Request(
         conf["base_url"].rstrip("/") + "/chat/completions",
@@ -1321,8 +1335,12 @@ def _proxy_local_chat(model, messages):
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
-        content = data["choices"][0]["message"]["content"]
-        final_text, reasoning = _split_chat_content(content)
+        msg = data["choices"][0]["message"]
+        content = msg.get("content") or ""
+        final_text, reasoning = _split_chat_content(content, thinking_model=bool(CHAT_THINKING_MODEL_RE.search(model)) and "</think>" not in content and not msg.get("reasoning_content"))
+        # Some servers return the reasoning in its own field instead.
+        if not reasoning and msg.get("reasoning_content"):
+            final_text, reasoning = content.strip(), msg["reasoning_content"].strip()
         return {"content": final_text, "reasoning": reasoning}
     except urllib.error.HTTPError as e:
         if e.code == 429:

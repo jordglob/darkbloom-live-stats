@@ -1,5 +1,9 @@
 # Changelog
 
+## v65
+
+**The chat panel works with Qwen's thinking models.** With qwen3.6-35b-a3b the whole chain of thought came back as the answer, ending in a stray `</think>` before the real reply. Qwen's chat template opens `<think>` inside the prompt, so the reply carries only the closing tag; the splitter only knew gpt-oss's harmony channels. It now splits on the last `</think>` (reasoning goes behind the existing Show reasoning toggle), treats an unclosed block from a thinking model as cut-off reasoning, and also reads a separate `reasoning_content` field if a server sends one. Qwen 3.5+ models get 8192 max tokens instead of 2048, since their reasoning alone often runs past 2048. gpt-oss and other models are unchanged.
+
 ## v64
 
 **After a switch the page shows only the model that is actually serving, and there is no Load button to puzzle over.** Switching from gpt-oss-20b to qwen3.5 to qwen3.6 on 2026-09-27 left three things pointing at the old models, so the page looked like it was running several at once:
