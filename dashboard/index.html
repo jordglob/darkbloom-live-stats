@@ -442,7 +442,7 @@
     <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Work volume over the full log, which the 48h earnings chart above cannot show - Darkbloom's API only returns its most recent batch of ledger entries, so real per-entry earnings build up to about two days. For what you actually earned, read that chart; this one is for the long trend.</p>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="electricity-price">
     <h2 title="Published day-ahead electricity prices (Nord Pool auction results): yesterday and today are always real, tomorrow becomes real the moment it's published (usually early-to-mid afternoon) - until then it's left blank rather than guessed. The right axis shows real Net (earnings minus this Mac's own real electricity cost) per matching 15-min slot, so you can see at a glance whether a given stretch was actually profitable.">
       Electricity Price & Profitability
       <span class="gauge-time" id="elpris-chart-stats"></span>
@@ -2050,7 +2050,7 @@ function banner(level, html) {
   return `<div class="banner ${level}"><span class="dot"></span><span class="banner-text">${html}</span></div>`;
 }
 
-function renderBanners(status, energy, doctor, daemonState, autostart) {
+function renderBanners(status, energy, doctor, daemonState, autostart, priceSourceChosen) {
   const banners = [];
   const served = status.requests_served || 0;
   // "Requests are actually succeeding" is the single most reassuring fact on
@@ -2195,6 +2195,11 @@ function renderBanners(status, energy, doctor, daemonState, autostart) {
   }
   if (infoNotes.length) {
     banners.push(banner('info', `${okLead}Notes (hover each for details): ${infoNotes.join(' · ')}.`));
+  }
+  // Fresh install: prices come from a default source that is almost
+  // certainly not the viewer's, so every cost figure is off until they pick.
+  if (priceSourceChosen === false) {
+    banners.push(banner('warning', `<strong>Set your electricity price.</strong> Costs and profit on this page use a default price until you choose your own source or enter your price per kWh. <a href="#electricity-price">Set it below ↓</a>`));
   }
   document.getElementById('banners').innerHTML = banners.join('');
 }
@@ -2912,7 +2917,7 @@ async function refresh() {
     if (data.max_power) renderMaxPower(data.max_power.level || 0);
 
     renderCards(status, energy, account, daemon_state, disk);
-    renderBanners(status, energy, doctor, daemon_state, data.autostart);
+    renderBanners(status, energy, doctor, daemon_state, data.autostart, data.price_source_chosen);
     updateChatAvailability(status, daemon_state);
     renderAccount(account);
     renderDisk(disk);
@@ -2978,7 +2983,12 @@ async function refresh() {
     // VAT on all of it, from the surcharge fields under the price chart);
     // spot alone is a fraction of the bill. Falls back to spot if no fees set.
     const kwhEl = document.getElementById('kwh-price');
-    if (elprisNow && elprisNow.nowTotal != null) {
+    if (data.price_source_chosen === false && elprisNow && elprisNow.nowVal != null) {
+      // Not the viewer's price yet - don't show another country's currency
+      // or zone as if it were theirs.
+      kwhEl.innerHTML = `⚡ electricity: <a href="#electricity-price">set your price ↓</a>`;
+      kwhEl.title = 'No electricity price chosen yet - costs use a default until you set yours in the Electricity Price panel.';
+    } else if (elprisNow && elprisNow.nowTotal != null) {
       const local = elprisNow.currency && elprisNow.currency !== 'USD'
         ? ` (${elprisNow.nowTotalLocal.toFixed(2)} ${elprisNow.currency})` : '';
       kwhEl.textContent = `⚡ electricity $${elprisNow.nowTotal.toFixed(3)}/kWh${local} right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''} · spot $${elprisNow.nowVal.toFixed(3)}`;

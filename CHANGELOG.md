@@ -1,5 +1,13 @@
 # Changelog
 
+## v53
+
+**A fresh install now asks for your electricity price instead of quietly using someone else's.** Until a price source is saved, a yellow banner reads "Set your electricity price. Costs and profit on this page use a default price until you choose your own source or enter your price per kWh. Set it below ↓", and the header shows "⚡ electricity: set your price ↓" instead of a price in another country's currency and zone.
+
+The default source is still the Swedish one - there is no neutral default that would be right (a flat rate of 0 makes every cost zero, and any real market is wrong for most people) - but it no longer passes itself off as the viewer's price. `/api/data` gained `price_source_chosen`: true once `price-source.json` exists (written the first time a source is saved in the panel) or a pre-v14 `elpris-zone.json` does, so existing installs never see the banner. The price panel got an `#electricity-price` anchor for the links.
+
+Verified with a test instance under an empty `$HOME` (banner and neutral header) next to the live one (unchanged).
+
 ## v52
 
 **Electricity cost is now counted at the all-in price, not the bare spot price** — so Accumulated electricity cost, Net, the per-slot Net in the price chart and Price Guard's break-even all compare earnings against what the bill actually charges per kWh.

@@ -33,7 +33,7 @@ RAW_POWER_LOG = Path("/tmp/darkbloom-pm-raw.log")
 PORT = 8787
 # Bumped together with the CHANGELOG entry and git tag on each release, so
 # the page can say which build is running (the live copy has no git).
-DASHBOARD_VERSION = "v52"
+DASHBOARD_VERSION = "v53"
 MAX_POINTS = 300  # downsample if the log grows large
 # Same baseline assumption as energy-monitor.sh: powermetrics cpu_power/gpu_power
 # only measures the SoC's own power rails, not the whole machine's wall power
@@ -3127,6 +3127,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "inference_durations": get_inference_duration_stats(),
                 "price_48h": get_price_48h(),
                 "dashboard_version": DASHBOARD_VERSION,
+                # False until a price source is saved (or a pre-v14 zone
+                # file exists) - the page nags until the user sets theirs.
+                "price_source_chosen": PRICE_SOURCE_CONFIG.exists() or LEGACY_ZONE_CONFIG.exists(),
                 # install.sh copies server.py into place, so its mtime is
                 # when this dashboard version went live.
                 "dashboard_installed_at": Path(__file__).stat().st_mtime,

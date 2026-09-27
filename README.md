@@ -26,9 +26,10 @@ your own Darkbloom account data - it does not modify your provider's behavior.
 **Works anywhere.** Electricity prices come from free, key-less public APIs
 you pick in the dashboard itself: Sweden and Norway (Nord Pool day-ahead),
 every European bidding zone (Energy-Charts / EPEX), UK Octopus Agile, US
-ComEd hourly pricing, or a flat rate in any currency. Defaults to Sweden
-(SE3) because that's where it was built - change it once in the Electricity
-Price panel and every cost number on the page follows. See
+ComEd hourly pricing, or a flat rate in any currency. Until you pick one,
+the page shows a "Set your electricity price" banner and keeps the header
+neutral - set it once in the Electricity Price panel and every cost number
+on the page follows. See
 [Electricity price](#electricity-price).
 
 **New to running a provider?** The dashboard's top banners are graded: grey
