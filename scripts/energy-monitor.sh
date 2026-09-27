@@ -76,8 +76,17 @@ start_macmon() {
   "$MACMON" pipe -s 0 -i 5000 >> "$MACMON_LOG" 2>/dev/null &
   MACMON_PID=$!
 }
-cleanup() { [ -n "$MACMON_PID" ] && kill "$MACMON_PID" 2>/dev/null; }
-trap cleanup EXIT INT TERM
+SLEEP_PID=""
+cleanup() {
+  [ -n "$MACMON_PID" ] && kill "$MACMON_PID" 2>/dev/null
+  [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2>/dev/null
+  return 0
+}
+# A trap that returns lets bash carry on with the loop, so INT/TERM must exit
+# explicitly - otherwise launchd's SIGTERM at logout/shutdown is swallowed and
+# the job has to be SIGKILLed after its exit timeout, stalling the shutdown.
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 start_macmon
 MACMON_OFFSET=0
 
@@ -281,5 +290,10 @@ while true; do
     log "SoC=${AVG_W}W (+baseline ${BASELINE_W}W = ${TOTAL_W}W)  cumulative energy=${CUM_WH}Wh  electricity cost=${CUM_COST}  ~revenue=${EST_REV_SEK}  net=${NET_SEK} (local currency)"
   fi
 
-  sleep "$INTERVAL"
+  # Sleep in the background and `wait` for it: bash defers traps until a
+  # foreground child exits, so a plain `sleep 300` would hold off SIGTERM for
+  # up to five minutes. `wait` returns as soon as a trapped signal arrives.
+  sleep "$INTERVAL" &
+  SLEEP_PID=$!
+  wait "$SLEEP_PID"
 done

@@ -1,5 +1,17 @@
 # Changelog
 
+## v45
+
+**energy-monitor now exits the moment launchd asks it to** — it used to ignore SIGTERM entirely and had to be SIGKILLed, holding up every logout and shutdown in the meantime.
+
+Two bugs stacked. The loop ended in a plain `sleep 300`, and bash defers every trap until a foreground child exits, so a SIGTERM could wait up to five minutes before the script even noticed. Worse, when it did, the `trap cleanup EXIT INT TERM` handler just killed macmon and *returned* — and a returning trap lets bash carry on with the loop, so the script never exited on TERM at all. launchd was left waiting out its exit timeout before a SIGKILL.
+
+Found in the macOS shutdown-stall spindumps from both the 26.5→26.7 and the 26.7→27 upgrade restarts (2026-09-26 and 2026-09-27): the only non-Apple process alive in both was this script, blocked in `wait4` on its `sleep`, with macmon still running under it. Both upgrade restarts hung and needed the power button. This is not proven to be the whole cause, but it was the one third-party process in the way both times.
+
+The fix: INT/TERM now `exit 0` explicitly (the EXIT trap still runs cleanup), and the sleep runs in the background under `wait`, which returns as soon as a trapped signal arrives. Cleanup also kills that sleep so it is not left orphaned.
+
+Verified by running the old and new script side by side under a scratch `$HOME` and sending SIGTERM mid-sleep: the old one was still alive after 5 s, the new one exited in 7 ms.
+
 ## v44
 
 **The dashboard now says how to start renting out again** — a yellow banner appears whenever the provider's launchd job is switched off, carrying the exact `launchctl enable … && launchctl bootstrap …` command with a copy button, so the answer is on the page instead of in someone's memory.
