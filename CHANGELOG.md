@@ -1,5 +1,15 @@
 # Changelog
 
+## v64
+
+**After a switch the page shows only the model that is actually serving, and there is no Load button to puzzle over.** Switching from gpt-oss-20b to qwen3.5 to qwen3.6 on 2026-09-27 left three things pointing at the old models, so the page looked like it was running several at once:
+
+- **Warm-up kept its own model list** (`warmup.json` still said `gpt-oss-20b`), pinging a model no longer hosted and logging `HTTP 404` every interval. Earlier, while gpt-oss and qwen3.6 were both selected, the same ping kept forcing gpt-oss back into memory. Warm-up now only pings models the provider hosts right now, falling back to all hosted models when none of its saved list is.
+- **The load-error note and doctor's RAM-fit note** still named qwen3.5 after it was switched away. Both are now skipped when the model they name isn't hosted any more.
+- **The model rows** could keep the pre-switch state until the next 10-minute refresh; the panel now refreshes once more a few seconds after a job ends.
+
+**Load now is gone.** A hosted model that Darkbloom unloaded after being idle is shown as "Serving · idle, loads on next job" - it reloads by itself, so there is nothing to press. Only a model whose load really failed shows "Selected, failed to load" with a **Retry loading** button (which frees the file cache first when memory was the problem). The separate **Free memory** button is removed too: Serve and Retry already do that.
+
 ## v63
 
 **Serve and Load now no longer report a failure for a model that loads a few seconds later.** On 2026-09-27 Serve for qwen3.5 said "Switched, but loading failed: Insufficient memory (29.0 GB free, need 29.8 GB)", yet ten seconds later the daemon had it warm (19.8 GB on the GPU) - the failing request raced a load that then succeeded. A load now waits up to 45 s for the daemon to list the model as warm before giving up, and only blames a load error that is newer than the attempt, so an old failure is never shown for a new try.

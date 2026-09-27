@@ -819,7 +819,12 @@ def send_warmup_ping():
         return False
 
     cfg = read_warmup_config()
-    models = cfg.get("models") or get_configured_models()
+    # Only ping models the provider hosts right now. The saved list is kept
+    # as a preference, but after a switch it named a model that was no longer
+    # hosted (404 every interval) - or, worse, one hosted next to a bigger
+    # model, where each warm-up forced it back in and evicted the other.
+    hosted, _ = _daemon_model_state()
+    models = [m for m in (cfg.get("models") or []) if m in hosted] or hosted
     if not models:
         log_warmup("ERROR: no configured models found to warm up")
         return False
@@ -2977,6 +2982,7 @@ def annotate_model_demand(data):
             "hosted": bool(local_id and local_id in hosted),
             "loaded": bool(local_id and local_id in warm),
             "memory_gb": round(mem_of(local_id, pid), 1) if mem_of(local_id, pid) else None,
+            "load_error": _load_error_for(local_id) if local_id and local_id in hosted and local_id not in warm else None,
         }
         job = jobs.get(pid)
         if job:

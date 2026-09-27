@@ -1691,13 +1691,12 @@ function renderModelDemand(d) {
 // that alone can block a load. Offer freeing it (scoped sudo rule) or say how
 // to set that up.
 function memoryNote(d) {
-  const failed = (d.models || []).some(m => m.local && m.local.hosted && !m.local.loaded)
+  const failed = (d.models || []).some(m => m.local && m.local.load_error)
     || (d.models || []).some(m => m.local && m.local.job && m.local.job.state === 'error' && /Insufficient memory/.test(m.local.job.message || ''));
-  if (d.purge_available) {
-    return `<div class="rotation-summary" style="margin-top:8px"><button class="copy-cmd-btn" onclick="freeMemory(this)" title="Runs /usr/sbin/purge through the scoped sudo rule: drops macOS's file cache, which Darkbloom counts as used memory. Load now and Serve already do this automatically when a load fails for lack of memory.">Free memory</button> <span id="free-memory-msg" style="color:var(--text-muted)"></span></div>`;
-  }
-  if (!failed) return '';
-  return `<div class="rotation-summary" style="margin-top:8px;color:var(--text-muted)">A model is selected but not loaded. If Darkbloom says "Insufficient memory", the macOS file cache is often the cause. Let the dashboard free it automatically - run once (asks for your password): <code>bash ~/.darkbloom/setup-purge-sudoers.sh</code> <button class="copy-cmd-btn" onclick="copyCmd('bash ~/.darkbloom/setup-purge-sudoers.sh', this)">Copy</button></div>`;
+  // With the purge rule installed, Serve and Retry loading free the cache by
+  // themselves - a separate button only added one more thing to understand.
+  if (d.purge_available || !failed) return '';
+  return `<div class="rotation-summary" style="margin-top:8px;color:var(--text-muted)">A model failed to load. If Darkbloom says "Insufficient memory", the macOS file cache is often the cause. Let the dashboard free it automatically - run once (asks for your password): <code>bash ~/.darkbloom/setup-purge-sudoers.sh</code> <button class="copy-cmd-btn" onclick="copyCmd('bash ~/.darkbloom/setup-purge-sudoers.sh', this)">Copy</button></div>`;
 }
 
 async function freeMemory(btn) {
@@ -1749,7 +1748,8 @@ function modelActionsCell(m) {
       onclick="modelAction('${action}', this.dataset.model)" data-model="${escapeHtml(m.model)}">${escapeHtml(label)}</button>`;
   let state, button = '';
   if (l.hosted && l.loaded) state = '<span style="color:var(--status-good)">Serving</span>';
-  else if (l.hosted) state = '<span style="color:var(--status-warning)">Selected, not loaded</span>';
+  else if (l.hosted && l.load_error) state = '<span style="color:var(--status-critical)">Selected, failed to load</span>';
+  else if (l.hosted) state = '<span title="Darkbloom unloads a model after it has been idle for a while and loads it again on the next job - nothing to do.">Serving · idle, loads on next job</span>';
   else state = l.downloaded ? 'Downloaded' : 'Not downloaded';
   if (!l.hosted || l.fits_alongside === false) {
     let label = l.serve_label || 'Serve';
@@ -1758,10 +1758,9 @@ function modelActionsCell(m) {
       button = btn('serve', label, 'One click: downloads if needed, switches the provider (running jobs finish first, no restart) and loads the model.',
         blocked || (!l.downloaded && (l.disk_ok === false || m.size_gb == null)));
     }
-  } else if (!l.loaded) {
-    // Selected but its load failed (or it was unloaded after idling) - the
-    // network keeps sending it jobs, so offer the retry right here.
-    button = btn('load', 'Load now', 'Load the model into memory. If Darkbloom reports "Insufficient memory", the macOS file cache is freed and the load retried once (needs setup-purge-sudoers.sh).');
+  } else if (l.load_error) {
+    // Only after a real failure - an idle-unloaded model reloads by itself.
+    button = btn('load', 'Retry loading', `Last attempt failed: ${l.load_error}. Retrying frees the macOS file cache first when memory was the problem.`);
   } else if (hostedCount > 1) {
     button = btn('deactivate', 'Stop serving', 'Stop offering this model; the other models keep serving.');
   }
@@ -1769,6 +1768,7 @@ function modelActionsCell(m) {
   if (job) {
     const color = job.state === 'error' ? 'var(--status-critical)' : job.state === 'ok' ? 'var(--status-good)' : 'var(--text-muted)';
     const text = running ? (job.message || 'working…') : job.message;
+    if (!running && !job.message) return `<div class="model-actions"><span class="model-state">${state}</span>${button}</div>`;
     jobLine = `<div class="model-job" style="color:${color}">${escapeHtml(text)}</div>`;
   }
   return `<div class="model-actions"><span class="model-state">${state}</span>${button}</div>${jobLine}`;
@@ -1791,6 +1791,7 @@ async function modelAction(action, model) {
 
 let lastModelDemand = null;
 let modelJobPoll = null;
+let modelJobWasBusy = false;
 
 async function refreshModelDemand() {
   try {
@@ -1799,7 +1800,14 @@ async function refreshModelDemand() {
     renderModelDemand(lastModelDemand);
     const busy = (lastModelDemand.models || []).some(m => m.local && m.local.job && m.local.job.state === 'running');
     clearTimeout(modelJobPoll);
-    if (busy) modelJobPoll = setTimeout(refreshModelDemand, 4000);
+    if (busy) {
+      modelJobPoll = setTimeout(refreshModelDemand, 4000);
+      modelJobWasBusy = true;
+    } else if (modelJobWasBusy) {
+      // The daemon can report the new state a moment after the job ends.
+      modelJobWasBusy = false;
+      modelJobPoll = setTimeout(refreshModelDemand, 5000);
+    }
   } catch (e) {
     renderModelDemand({ error: String(e) });
   }
@@ -2246,7 +2254,11 @@ function renderBanners(status, energy, doctor, daemonState, autostart, priceSour
     infoNotes.push(`<span title="Serving works right now, but the launchd job is switched off, so a reboot leaves this Mac idle until you run: ${q(cmdFor(jobs.provider))}">serving now, but it won't come back after a reboot</span>`);
   }
 
-  const loadErr = daemonState && daemonState.last_model_load_error;
+  const hostedNow = ((daemonState && daemonState.slots) || []).map(s => s.model);
+  const loadErrRaw = daemonState && daemonState.last_model_load_error;
+  // A failure for a model that has since been switched away from says nothing
+  // about what is serving now.
+  const loadErr = loadErrRaw && (!loadErrRaw.model || !hostedNow.length || hostedNow.includes(loadErrRaw.model)) ? loadErrRaw : null;
   if (loadErr) {
     // darkbloom status's own "Last model-load error" text never expires or
     // shows an age - a real failure from hours ago reads exactly like one
@@ -2262,7 +2274,7 @@ function renderBanners(status, energy, doctor, daemonState, autostart, priceSour
     } else {
       banners.push(banner('warning', `Logged load error${age ? ` (${age})` : ''}: ${full}`));
     }
-  } else if (status.last_error) {
+  } else if (status.last_error && !loadErrRaw) {
     banners.push(banner('warning', status.last_error));
   }
 
@@ -2329,6 +2341,10 @@ function renderBanners(status, energy, doctor, daemonState, autostart, priceSour
       // looks like it doesn't fit its own footprint - would explain why it
       // always lands on the active model and rotates whenever that changes.
       const isRamCheck = (f.check || '').toLowerCase().includes('fits in ram');
+      const flagged = (f.detail || '').match(/^([\w.\/-]+)/);
+      // doctor runs every 5 min, so right after a switch it can still be
+      // about the previous model.
+      if (isRamCheck && flagged && hostedNow.length && !hostedNow.includes(flagged[1])) return;
       const theoryNote = isRamCheck
         ? ` <span title="Working theory, not confirmed by Darkbloom: this check seems to compare against currently-free RAM rather than the full budget, so whichever model is already loaded (and using its own share) looks like it doesn't fit its own footprint.">(likely a known quirk in this check, not a real fit problem)</span>`
         : '';
