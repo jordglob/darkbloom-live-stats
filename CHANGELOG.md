@@ -1,5 +1,13 @@
 # Changelog
 
+## v54
+
+**Network Model Demand shows each model's size.** A new Size column gives the weights' download size, and hovering it shows the minimum RAM Darkbloom requires to serve the model, so you can tell whether a model in demand even fits this Mac before chasing it.
+
+The numbers come from the coordinator's catalog (`darkbloom models catalog --json`), which also covers models that are not downloaded here, unlike `models list`. The server caches it for 6 hours, keeps the last good copy if the CLI fails, and adds `size_gb` and `min_ram_gb` to each model in `/api/model_demand` when the ids match. Models missing from the catalog show `–`.
+
+The public alias `gemma-4-26b` is its own catalog entry (28.0 GB, 36 GB RAM), so that is the size shown, not the 15.6 GB `gemma-4-26b-qat-4bit` build that may be configured here.
+
 ## v53
 
 **A fresh install now asks for your electricity price instead of quietly using someone else's.** Until a price source is saved, a yellow banner reads "Set your electricity price. Costs and profit on this page use a default price until you choose your own source or enter your price per kWh. Set it below ↓", and the header shows "⚡ electricity: set your price ↓" instead of a price in another country's currency and zone.

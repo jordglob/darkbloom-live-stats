@@ -1635,6 +1635,7 @@ function renderModelDemand(d) {
     <table class="rotation-table">
       <thead><tr>
         <th>Model</th>
+        <th class="num" title="Download size of the weights, from the coordinator's model catalog. Hover a value for the minimum RAM Darkbloom requires to serve it.">Size</th>
         <th class="num" title="Published requests in the window, and share of the total.">Requests</th>
         <th class="num" title="Completed / requests.">Completed</th>
         <th class="num" title="Turned away because no provider had room (capacity) or could meet the latency limit. High numbers mean unmet demand - providers are short for this model.">Rejected</th>
@@ -1648,6 +1649,7 @@ function renderModelDemand(d) {
           const rejected = (m.capacity_rejected || 0) + (m.latency_rejected || 0);
           return `<tr class="${m.served_here ? 'demand-mine' : ''}">
             <td>${escapeHtml(m.model)}${m.served_here ? '<span class="demand-badge" title="In the --model list of the provider plist. Says nothing about whether it actually loads or is serving right now.">configured here</span>' : ''}</td>
+            <td class="num"${m.min_ram_gb ? ` title="Needs at least ${m.min_ram_gb} GB RAM"` : ''}>${m.size_gb != null ? m.size_gb.toFixed(1) + ' GB' : '–'}</td>
             <td class="num"><span class="demand-share" style="width:${Math.max(2, m.requests / maxReq * 60).toFixed(0)}px"></span>${fmtNum(m.requests)} <span style="color:var(--text-muted)">${pct(m.requests, total).toFixed(1)}%</span></td>
             <td class="num" style="color:${rateColor(rate)}">${rate == null ? '–' : rate.toFixed(1) + '%'}</td>
             <td class="num">${rejected ? fmtNum(rejected) : '–'}</td>

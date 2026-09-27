@@ -2362,6 +2362,33 @@ def _matches_public_model(local_id, public_id):
     return a == b or a.startswith(b + "-") or a.split("/")[-1] == b.split("/")[-1]
 
 
+MODEL_CATALOG_CACHE_SEC = 6 * 3600
+_model_catalog_cache = {"data": None, "at": 0.0}
+_model_catalog_lock = threading.Lock()
+
+
+def get_model_catalog():
+    """The coordinator's supported-model catalog, keyed by lowercased id.
+    Covers models that are not downloaded here, unlike `models list`. Returns
+    the last good copy (or {}) if the CLI fails."""
+    now = time.time()
+    with _model_catalog_lock:
+        if _model_catalog_cache["data"] is not None and now - _model_catalog_cache["at"] < MODEL_CATALOG_CACHE_SEC:
+            return _model_catalog_cache["data"]
+    try:
+        out = subprocess.run(
+            [str(DARKBLOOM_BIN), "models", "catalog", "--json"],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
+        catalog = {m["id"].lower(): m for m in json.loads(out) if m.get("id")}
+    except Exception:
+        return _model_catalog_cache["data"] or {}
+    with _model_catalog_lock:
+        _model_catalog_cache["data"] = catalog
+        _model_catalog_cache["at"] = now
+    return catalog
+
+
 def get_model_demand(window):
     """Network-wide per-model demand and outcomes from Darkbloom's public
     stats API (no auth). Counts only cover privacy-eligible hourly cohorts,
@@ -2382,8 +2409,13 @@ def get_model_demand(window):
             return dict(cached["data"], stale=True)
         return {"error": str(e), "window": window, "models": []}
     configured = get_configured_models()
+    catalog = get_model_catalog()
     for m in data.get("models") or []:
         m["served_here"] = any(_matches_public_model(c, m.get("model", "")) for c in configured)
+        entry = catalog.get(m.get("model", "").lower())
+        if entry:
+            m["size_gb"] = round(entry["size_gb"], 1) if entry.get("size_gb") is not None else None
+            m["min_ram_gb"] = entry.get("min_ram_gb")
     data["configured_models"] = configured
     with _model_demand_lock:
         _model_demand_cache[window] = {"at": now, "data": data}
