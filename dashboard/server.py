@@ -3658,9 +3658,14 @@ def get_temp_age_series():
     except Exception:
         pass
 
+    # Hand over to the CSV where macmon's coverage actually starts, not at a
+    # fixed age: energy-monitor.sh truncates macmon.jsonl every time it
+    # starts (reboot, install.sh), so right after a restart macmon holds only
+    # minutes of data and a fixed 24h handover left a day-long hole.
     fine_cutoff = now - TEMP_AGE_FINE_MAX_SEC
-    temp_samples = ([(t, g) for t, g, _c in fine if t >= fine_cutoff]
-                    + [s for s in csv_temp if s[0] < fine_cutoff])
+    fine_in_window = [(t, g) for t, g, _c in fine if t >= fine_cutoff]
+    handover = min((t for t, _g in fine_in_window), default=now)
+    temp_samples = fine_in_window + [s for s in csv_temp if s[0] < handover]
     # CPU temperature exists only in macmon, so this series simply stops where
     # macmon's coverage does rather than being faked from the CSV.
     cpu_samples = [(t, c) for t, _g, c in fine if c is not None]

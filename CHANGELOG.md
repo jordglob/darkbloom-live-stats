@@ -1,5 +1,9 @@
 # Changelog
 
+## v68
+
+**The GPU Temp & Fan chart no longer loses the last day after a restart.** The chart takes the last 24 h of temperature from macmon's ~5 s log and older ages from the 5-minute CSV. But `energy-monitor.sh` empties the macmon log every time it starts (reboot, `install.sh`), so right after a restart macmon held only a few minutes and the temperature line jumped straight from a day ago to "now" (seen 2026-09-27 after a reboot and two installs: an 80 °C inference stretch ten minutes earlier was missing). The CSV now fills in everything older than macmon's first sample.
+
 ## v67
 
 **Wall power is calibrated against a real wall meter.** The Total gauge and the cost log divided the Mac's SMC system-power reading by an assumed 90% PSU efficiency. On 2026-09-27 a plug meter on this M4 Pro Mac mini (nothing else plugged in) gave two points: idle 11 W at the wall vs. 7.9 W SMC, and full inference load ~99.5 W (the meter swung 83-116 W) vs. 87.5 W SMC averaged over the same two minutes. A pure ratio can't fit both (0.72 at idle, ~0.88 under load), so the conversion is now a line through them: `wall = SMC × 1.11 + 2.2 W` (`WALL_SCALE`/`WALL_OFFSET_W` in `energy-monitor.sh` and `server.py`) - about the old 90% plus a ~2 W fixed loss. At idle the page now shows ~11 W instead of ~9 W; under load it moves up ~2 W. `/api/power` reports `wall_scale`/`wall_offset_w` instead of `psu_efficiency`. The raw readings are kept in `~/.darkbloom/wall-meter-calibration.csv`.
