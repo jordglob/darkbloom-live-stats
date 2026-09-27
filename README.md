@@ -160,6 +160,46 @@ at ~5Hz by default (edit the `-i` value, in milliseconds, in
 past 300MB by restarting the LaunchAgent, since `powermetrics -o` truncates
 its target file on start.
 
+### Letting model loads free memory (optional, one-time, needs your password)
+
+The **Network Model Demand** panel can switch this Mac to another model with
+one click. Sometimes the switch succeeds but the model then fails to load:
+
+```
+Insufficient memory (29.7 GB free, need 30.3 GB) and all loaded models are actively serving
+```
+
+even with nothing else loaded. Darkbloom counts macOS's *active* memory as
+used, and a switch reads every weight file to hash it, so ~12 GB of model
+file cache can sit in active memory right when the new model needs it
+(measured on a 48 GB M4 Pro: darkbloom itself 121 MB, all processes together
+~3 GB). That cache is safe to drop - `/usr/sbin/purge` does exactly that - but
+it needs root.
+
+Same approach as powermetrics: the installer writes a script that installs a
+sudoers rule allowing **only** `/usr/sbin/purge` without a password. You run
+it yourself, once:
+
+```bash
+bash ~/.darkbloom/setup-purge-sudoers.sh
+```
+
+It asks for your password, checks the rule with `visudo -c` before installing
+it as `/etc/sudoers.d/darkbloom-purge`, and prints `SUDOERS_INSTALLED_OK`.
+From then on:
+
+- **Load now** and **Serve** free the file cache and retry once by themselves
+  when Darkbloom reports "Insufficient memory" - no extra click.
+- A **Free memory** button appears under the Network Model Demand table.
+- Each purge is logged to `~/.darkbloom/model-actions.log`.
+
+Without the rule nothing breaks: the panel just shows the command above with a
+Copy button whenever a selected model isn't loaded. Purging only drops cached
+file data (it is re-read from disk when needed), so the cost is some extra
+disk reads right afterwards. It does not free memory a model genuinely needs:
+if two models don't fit together, Fit says so and Serve offers
+"Serve instead of ...".
+
 ## Electricity price
 
 One configured source feeds everything price-related - the 48h chart, the
@@ -340,6 +380,9 @@ this just works out of the box - nothing to configure.
   only. This tool never has your password and never prompts for one - if the
   rule isn't installed, the recovery loop just logs that it can't act and
   leaves everything as-is.
+- `setup-purge-sudoers.sh` (optional) scopes NOPASSWD to `/usr/sbin/purge`
+  only, a command that takes no arguments and only drops file cache. The
+  dashboard checks for the rule with `sudo -n -l`, which never prompts.
 - No credentials are ever created or duplicated by this tool. It only *reads*
   the device token `darkbloom login` already wrote to
   `~/.darkbloom/auth_token` (server-side, never sent to the browser or logged)
@@ -366,7 +409,7 @@ for svc in dashboard powermetrics energy-monitor; do
   launchctl bootout gui/$(id -u)/io.darkbloom.$svc 2>/dev/null
   rm -f ~/Library/LaunchAgents/io.darkbloom.$svc.plist
 done
-sudo rm -f /etc/sudoers.d/darkbloom-powermetrics
+sudo rm -f /etc/sudoers.d/darkbloom-powermetrics /etc/sudoers.d/darkbloom-purge
 rm -rf ~/.darkbloom/dashboard ~/.darkbloom/*.sh ~/.darkbloom/energy-log.csv \
        ~/.darkbloom/warmup.json ~/.darkbloom/warmup.log ~/.darkbloom/trust-changes.log \
        ~/.darkbloom/inference-durations.csv ~/.darkbloom/elpris-zone.json \

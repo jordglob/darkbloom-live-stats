@@ -1683,7 +1683,35 @@ function renderModelDemand(d) {
       </tbody>
     </table>
     </div>
+    ${memoryNote(d)}
   `;
+}
+
+// Darkbloom counts macOS's file cache as used memory; after a model switch
+// that alone can block a load. Offer freeing it (scoped sudo rule) or say how
+// to set that up.
+function memoryNote(d) {
+  const failed = (d.models || []).some(m => m.local && m.local.hosted && !m.local.loaded)
+    || (d.models || []).some(m => m.local && m.local.job && m.local.job.state === 'error' && /Insufficient memory/.test(m.local.job.message || ''));
+  if (d.purge_available) {
+    return `<div class="rotation-summary" style="margin-top:8px"><button class="copy-cmd-btn" onclick="freeMemory(this)" title="Runs /usr/sbin/purge through the scoped sudo rule: drops macOS's file cache, which Darkbloom counts as used memory. Load now and Serve already do this automatically when a load fails for lack of memory.">Free memory</button> <span id="free-memory-msg" style="color:var(--text-muted)"></span></div>`;
+  }
+  if (!failed) return '';
+  return `<div class="rotation-summary" style="margin-top:8px;color:var(--text-muted)">A model is selected but not loaded. If Darkbloom says "Insufficient memory", the macOS file cache is often the cause. Let the dashboard free it automatically - run once (asks for your password): <code>bash ~/.darkbloom/setup-purge-sudoers.sh</code> <button class="copy-cmd-btn" onclick="copyCmd('bash ~/.darkbloom/setup-purge-sudoers.sh', this)">Copy</button></div>`;
+}
+
+async function freeMemory(btn) {
+  btn.disabled = true;
+  const msg = document.getElementById('free-memory-msg');
+  if (msg) msg.textContent = 'Freeing…';
+  try {
+    const r = await (await fetch('/api/free_memory', { method: 'POST' })).json();
+    if (msg) msg.textContent = r.message;
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  }
+  btn.disabled = false;
+  refreshModelDemand();
 }
 
 const FIT_STYLES = {
@@ -1733,7 +1761,7 @@ function modelActionsCell(m) {
   } else if (!l.loaded) {
     // Selected but its load failed (or it was unloaded after idling) - the
     // network keeps sending it jobs, so offer the retry right here.
-    button = btn('load', 'Load now', 'Load the model into memory. If it fails with "Insufficient memory", free memory first and try again.');
+    button = btn('load', 'Load now', 'Load the model into memory. If Darkbloom reports "Insufficient memory", the macOS file cache is freed and the load retried once (needs setup-purge-sudoers.sh).');
   } else if (hostedCount > 1) {
     button = btn('deactivate', 'Stop serving', 'Stop offering this model; the other models keep serving.');
   }

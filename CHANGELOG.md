@@ -1,5 +1,11 @@
 # Changelog
 
+## v62
+
+**Model loads can free macOS's file cache themselves, after a one-time setup.** v61 found why qwen3.6 would not load with nothing else loaded: Darkbloom counts active memory as used, and a switch reads every weight file to hash it, leaving ~12 GB of file cache in active memory. `sudo purge` drops it, but the dashboard never runs sudo on its own.
+
+Same pattern as powermetrics: install.sh now writes `~/.darkbloom/setup-purge-sudoers.sh`, which you run once. It installs `/etc/sudoers.d/darkbloom-purge`, allowing only `/usr/sbin/purge` without a password (checked with `visudo -c` first). With it in place, **Load now** and **Serve** purge and retry once when Darkbloom reports "Insufficient memory", and a **Free memory** button (POST `/api/free_memory`) sits under the Network Model Demand table. Without it, a selected-but-unloaded model shows the setup command with a Copy button. The dashboard looks for a `NOPASSWD` entry for purge in `sudo -n -l` (which never prompts); a plain `sudo -n -l /usr/sbin/purge` succeeds for any admin and would wrongly report the rule as installed. The README's new section "Letting model loads free memory" explains the procedure, and the uninstall steps remove the rule.
+
 ## v61
 
 **A selected model whose load failed now has a Load now button.** After v60's one-click Serve, qwen3.6 ended up as the only selected model but not loaded ("Insufficient memory (29.7 GB free, need 30.3 GB)"), and its row had no button at all - the only way to retry was the terminal. Rows in the state Selected, not loaded now offer **Load now**.

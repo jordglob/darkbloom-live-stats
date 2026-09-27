@@ -2634,7 +2634,67 @@ def _run_switch(models):
     return "Now hosting " + ", ".join(models)
 
 
-def _run_load(model):
+PURGE_BIN = "/usr/sbin/purge"
+_purge_check = {"ok": None, "at": 0.0}
+
+
+def purge_available():
+    """True once setup-purge-sudoers.sh has installed the scoped NOPASSWD
+    rule. `sudo -n -l <cmd>` is not enough: it succeeds for any admin user,
+    who may run purge *with* a password. So look for the NOPASSWD entry in
+    the listing (`sudo -n -l` never prompts)."""
+    now = time.time()
+    if _purge_check["ok"] is not None and now - _purge_check["at"] < 60:
+        return _purge_check["ok"]
+    try:
+        out = subprocess.run(["sudo", "-n", "-l"], capture_output=True, text=True, timeout=5).stdout
+        ok = bool(re.search(r"NOPASSWD:.*(?<![\w/])" + re.escape(PURGE_BIN) + r"\b", out))
+    except Exception:
+        ok = False
+    _purge_check.update(ok=ok, at=now)
+    return ok
+
+
+def purge_file_cache():
+    """Drop macOS's file cache. Darkbloom counts active pages as used, and a
+    model switch reads every weight file to hash it, so ~12 GB of cache can
+    block a load that would otherwise fit. Returns (ok, message)."""
+    if not purge_available():
+        return False, "Not set up - run: bash ~/.darkbloom/setup-purge-sudoers.sh"
+    try:
+        r = subprocess.run(["sudo", "-n", PURGE_BIN], capture_output=True, text=True, timeout=180)
+    except Exception as e:
+        return False, str(e)
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip() or f"purge exited with {r.returncode}"
+    log_model_action("OK: purged file cache")
+    return True, "File cache freed"
+
+
+def _run_load(model, _retried=False):
+    try:
+        return _load_once(model)
+    except RuntimeError as e:
+        # One automatic retry after freeing the file cache, so "Insufficient
+        # memory" caused by cache alone needs no extra click.
+        if _retried or "Insufficient memory" not in str(e) or not purge_available():
+            raise
+        _set_job_for_local(model, "freeing file cache…")
+        ok, _ = purge_file_cache()
+        if not ok:
+            raise
+        _set_job_for_local(model, "loading into memory…")
+        return _run_load(model, _retried=True)
+
+
+def _set_job_for_local(local_id, message):
+    with _model_jobs_lock:
+        for pid, job in _model_jobs.items():
+            if job.get("state") == "running" and _matches_public_model(local_id, pid):
+                job["message"] = message
+
+
+def _load_once(model):
     conf = json.loads(LOCAL_JSON.read_text())
     try:
         _ping_model(conf, model, timeout=300)
@@ -2909,6 +2969,7 @@ def annotate_model_demand(data):
     out["models"] = models
     out["hosted_models"] = hosted
     out["inference_budget_gb"] = budget
+    out["purge_available"] = purge_available()
     out["free_disk_gb"] = round(free_disk, 1) if free_disk is not None else None
     return out
 
@@ -3806,6 +3867,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
             ok, msg = start_model_action(str(body.get("action", "")), str(body.get("model", "")))
+            self._send_json({"ok": ok, "message": msg})
+
+        elif self.path == "/api/free_memory":
+            ok, msg = purge_file_cache()
             self._send_json({"ok": ok, "message": msg})
 
         elif self.path == "/api/max_power":

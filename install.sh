@@ -84,6 +84,27 @@ echo "SUDOERS_INSTALLED_OK"
 SETUP
 chmod +x "$TARGET/setup-powermetrics-sudoers.sh"
 
+# Same pattern for freeing macOS's file cache (/usr/sbin/purge) before a
+# model load - optional; without it the dashboard just shows the command.
+cat > "$TARGET/setup-purge-sudoers.sh" <<SETUP
+#!/bin/bash
+set -euo pipefail
+RULE_FILE=/tmp/darkbloom-purge-sudoers-tmp
+DEST=/etc/sudoers.d/darkbloom-purge
+
+cat > "\$RULE_FILE" <<'EOF'
+$CURRENT_USER ALL=(root) NOPASSWD: /usr/sbin/purge
+EOF
+
+sudo visudo -c -f "\$RULE_FILE"
+sudo cp "\$RULE_FILE" "\$DEST"
+sudo chmod 440 "\$DEST"
+sudo chown root:wheel "\$DEST"
+rm -f "\$RULE_FILE"
+echo "SUDOERS_INSTALLED_OK"
+SETUP
+chmod +x "$TARGET/setup-purge-sudoers.sh"
+
 # Same pattern, for the optional fan-recovery helper - only relevant if you've
 # already built it (see README), so only offered when the binary exists.
 if [ -x "$TARGET/bin/darkbloom-fan-helper" ]; then
@@ -127,5 +148,8 @@ echo ""
 echo "One more step for electricity-cost tracking (needs your password once, ever):"
 echo "  1. Run:  bash $TARGET/setup-powermetrics-sudoers.sh"
 echo "  2. Then: launchctl bootstrap gui/\$(id -u) $LAUNCH_AGENTS/io.darkbloom.powermetrics.plist"
+echo ""
+echo "Optional, lets model loads free macOS's file cache (needs your password once):"
+echo "  bash $TARGET/setup-purge-sudoers.sh"
 echo ""
 echo "See README.md for how each piece works. Account data syncs live automatically if darkbloom login has already run on this Mac."
