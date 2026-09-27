@@ -156,7 +156,8 @@ while true; do
   # in use so this script and the charts can never disagree. ---
   if [ $((NOW - ELPRIS_TS)) -gt 900 ]; then
     RESP=$(curl -s --max-time 10 "$DASHBOARD_URL/api/price_now" || true)
-    NEWVAL=$(echo "$RESP" | jq -r '.price_per_kwh // empty' 2>/dev/null || true)
+    # All-in price (spot + fees + VAT); spot only from an older dashboard.
+    NEWVAL=$(echo "$RESP" | jq -r '.total_per_kwh // .price_per_kwh // empty' 2>/dev/null || true)
     NEWRATE=$(echo "$RESP" | jq -r '.local_per_usd // empty' 2>/dev/null || true)
     if [ -n "${NEWVAL:-}" ]; then
       ELPRIS_VAL=$NEWVAL

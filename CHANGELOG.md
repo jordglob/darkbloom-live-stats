@@ -1,5 +1,15 @@
 # Changelog
 
+## v52
+
+**Electricity cost is now counted at the all-in price, not the bare spot price** — so Accumulated electricity cost, Net, the per-slot Net in the price chart and Price Guard's break-even all compare earnings against what the bill actually charges per kWh.
+
+Until now energy-monitor.sh priced every 5-minute interval at `/api/price_now`'s `price_per_kwh`, which is spot only. In SE3 on 2026-09-27 that was 0.26 SEK/kWh against an all-in 1.10 SEK/kWh once grid fee (0.26), energy tax (0.36) and 25% VAT on all of it were added: cost was understated about 4x, and Price Guard would have kept serving at prices where it was really losing money.
+
+`/api/price_now` gained `total_per_kwh`, computed with the same formula and the same fee/VAT fields as the chart's "Incl. fees & tax" line and v51's header. energy-monitor.sh now logs that (falling back to `price_per_kwh` against an older dashboard). Price Guard and the per-slot cost read the price from the energy log, so they follow without changes of their own.
+
+From now on only: rows already in `energy-log.csv` keep the spot price they were logged with, and the `elpris_sek_kwh` column name is unchanged although it now holds the all-in price. The switch takes effect at energy-monitor's next price fetch (every 15 minutes).
+
 ## v51
 
 **The header's electricity price is now what a kWh actually costs, not the bare spot price:** `⚡ electricity $0.111/kWh (1.10 SEK) right now incl. fees & VAT (SE3) · spot $0.026`.

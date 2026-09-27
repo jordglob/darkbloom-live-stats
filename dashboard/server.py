@@ -33,7 +33,7 @@ RAW_POWER_LOG = Path("/tmp/darkbloom-pm-raw.log")
 PORT = 8787
 # Bumped together with the CHANGELOG entry and git tag on each release, so
 # the page can say which build is running (the live copy has no git).
-DASHBOARD_VERSION = "v51"
+DASHBOARD_VERSION = "v52"
 MAX_POINTS = 300  # downsample if the log grows large
 # Same baseline assumption as energy-monitor.sh: powermetrics cpu_power/gpu_power
 # only measures the SoC's own power rails, not the whole machine's wall power
@@ -2750,11 +2750,21 @@ def get_price_now():
     if price is None:
         price = latest_past  # e.g. real-time sources lagging a few minutes
     rate = data["local_per_usd"] or 1.0
+    # All-in price: (spot + grid fee + energy tax) plus VAT on all of it - the
+    # same formula as the chart's "Incl. fees & tax" line. This is what
+    # energy-monitor.sh prices each interval at, so cost, Net and Price
+    # Guard's break-even all compare against what the bill actually charges.
+    total = None
+    if price is not None:
+        sc = data.get("surcharge") or {}
+        total = (price + (sc.get("grid_fee_per_kwh") or 0) + (sc.get("energy_tax_per_kwh") or 0)) \
+            * (1 + (sc.get("vat_pct") or 0) / 100)
     return {
         "source": data["source"],
         "zone": data["zone"],
         "currency": data["currency"],
         "price_per_kwh": price,
+        "total_per_kwh": total,
         "local_per_usd": rate,
         "price_usd_per_kwh": (price / rate) if price is not None else None,
     }
