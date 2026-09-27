@@ -255,7 +255,7 @@
     <h1>Darkbloom Live & Stats</h1>
     <div style="text-align:right;">
       <div id="kwh-price" style="font-size:13px; font-weight:600; color:var(--text-secondary);"></div>
-      <div id="updated">loading…</div>
+      <div id="updated" title="Running versions of the Darkbloom provider and of this dashboard, and when this page last fetched fresh numbers (every 10 s). Nothing is installed or updated at that time.">loading…</div>
     </div>
   </header>
 
@@ -2959,7 +2959,7 @@ async function refresh() {
     const verBits = [];
     if (status && status.version) verBits.push(`darkbloom ${status.version}`);
     if (data.dashboard_version) verBits.push(`L&S ${data.dashboard_version}`);
-    verBits.push('updated ' + new Date().toLocaleTimeString('en-GB'));
+    verBits.push('data refreshed ' + new Date().toLocaleTimeString('en-GB'));
     document.getElementById('updated').textContent = verBits.join(' · ');
     document.getElementById('kwh-price').textContent = elprisNow && elprisNow.nowVal != null
       ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';

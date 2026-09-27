@@ -33,7 +33,7 @@ RAW_POWER_LOG = Path("/tmp/darkbloom-pm-raw.log")
 PORT = 8787
 # Bumped together with the CHANGELOG entry and git tag on each release, so
 # the page can say which build is running (the live copy has no git).
-DASHBOARD_VERSION = "v48"
+DASHBOARD_VERSION = "v49"
 MAX_POINTS = 300  # downsample if the log grows large
 # Same baseline assumption as energy-monitor.sh: powermetrics cpu_power/gpu_power
 # only measures the SoC's own power rails, not the whole machine's wall power

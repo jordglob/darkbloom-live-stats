@@ -1,5 +1,9 @@
 # Changelog
 
+## v49
+
+**The header's timestamp now reads "data refreshed 16:18:05" instead of "updated 16:18:05".** Sitting right after two version numbers, "updated" read as "something was updated at 16:18" - it only ever meant the page's 10-second data refresh. The line also has a tooltip saying so.
+
 ## v48
 
 **24-hour clock everywhere, and the header now says which versions are running** — `darkbloom 0.9.10 · L&S v48 · updated 16:16:37` instead of `updated 4:07:54 PM`.
