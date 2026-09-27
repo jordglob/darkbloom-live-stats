@@ -612,6 +612,7 @@ STATUS_PATTERNS = {
     "warm_models": re.compile(r"Warm models:\s*(.+)"),
     "last_error": re.compile(r"Last model-load error:\s*(.+)"),
     "local_models": re.compile(r"Local MLX models:\s*(\d+)"),
+    "authorization": re.compile(r"^Authorization:\s*(.+)"),
 }
 
 
@@ -646,6 +647,7 @@ def get_darkbloom_status():
         "warm_models": None,
         "last_error": None,
         "local_models": 0,
+        "authorization": None,
         "raw": out,
     }
     for line in out.splitlines():
@@ -678,6 +680,17 @@ def get_darkbloom_status():
         if m:
             result["local_models"] = int(m.group(1))
             continue
+        m = STATUS_PATTERNS["authorization"].search(line)
+        if m:
+            result["authorization"] = m.group(1).strip()
+            continue
+    # Since 0.9.10 most `darkbloom status` runs print only an Authorization
+    # line and the Trust line shows up just now and then. App Attest
+    # authorizing the connection is the hardware-trust state, so read it as
+    # that rather than leaving trust empty (which the page shows as Unknown).
+    if result["trust"] is None and result["authorization"] \
+            and "authorizes this connection" in result["authorization"]:
+        result["trust"] = "hardware (App Attest)"
     # trust-reason (the "→" line directly after the Trust line)
     lines = out.splitlines()
     for i, line in enumerate(lines):
@@ -1321,7 +1334,9 @@ def trust_monitor_loop():
                     elif not was_hw and now_hw:
                         notify_mac("Darkbloom Live & Stats", f"Trust recovered: {trust}")
                         log_trust_change(f"RECOVER {last_trust} -> {trust}")
-                    else:
+                    elif not (was_hw and now_hw):
+                        # hardware <-> hardware is just the status wording
+                        # alternating (Trust line vs. App Attest line).
                         log_trust_change(f"{last_trust} -> {trust}")
                 last_trust = trust
         except Exception:
@@ -2089,7 +2104,10 @@ def get_disk_usage():
             return _disk_cache["data"]
     try:
         out = subprocess.run(
-            [str(DARKBLOOM_BIN), "models", "list", "--json"],
+            # --all: without it the list is filtered by the config's
+            # enabled_models, which `darkbloom switch` fills in - the unused
+            # models this panel exists to show would disappear.
+            [str(DARKBLOOM_BIN), "models", "list", "--json", "--all"],
             capture_output=True, text=True, timeout=15,
         ).stdout
         data = json.loads(out)

@@ -773,7 +773,7 @@ const CARD_TOOLTIPS = {
   'Net (real balance)': 'Your real Darkbloom account balance (USD) minus accumulated electricity cost (converted to USD).',
 };
 
-function renderCards(status, energy, account, daemonState) {
+function renderCards(status, energy, account, daemonState, disk) {
   const t = trustStatus(status.trust);
   const daemonUp = status.daemon && status.daemon.startsWith('running');
   const active = daemonUp && daemonState && daemonState.inference_active === true;
@@ -802,7 +802,9 @@ function renderCards(status, energy, account, daemonState) {
   cards.push({
     label: 'Warm models',
     value: warmList.length,
-    sub: (warmList.join(', ') || '(none loaded)') + ` · ${status.local_models ?? 0} downloaded in total`
+    // Count from the Disk Usage listing (every model on disk): status's
+    // "Local MLX models" only counts the ones the config enables.
+    sub: (warmList.join(', ') || '(none loaded)') + ` · ${disk && disk.models ? disk.models.length : (status.local_models ?? 0)} downloaded in total`
   });
   if (latest) {
     const usdSek = parseFloat(latest.usd_sek) || 9.5;
@@ -2906,7 +2908,7 @@ async function refresh() {
     lastAccount = account || null;
     if (data.max_power) renderMaxPower(data.max_power.level || 0);
 
-    renderCards(status, energy, account, daemon_state);
+    renderCards(status, energy, account, daemon_state, disk);
     renderBanners(status, energy, doctor, daemon_state, data.autostart);
     updateChatAvailability(status, daemon_state);
     renderAccount(account);

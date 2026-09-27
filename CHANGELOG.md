@@ -1,5 +1,15 @@
 # Changelog
 
+## v47
+
+**Two cards were wrong after Darkbloom v0.9.10 and `darkbloom switch`: Network Trust read "Unknown" in red on a fully trusted Mac, and the Warm models card and Disk Usage panel showed 1 downloaded model when there were 5 (76 GB unused).**
+
+Trust: since 0.9.10 most `darkbloom status` runs print only `Authorization: App Attest authorizes this connection…`; the `Trust: hardware / online` line shows up in maybe one run of six. The parser only knew the Trust line, so trust was usually empty and the card fell through to Unknown. The Authorization line is now parsed too, and "authorizes this connection" is read as `hardware (App Attest)` when no Trust line is present. The trust monitor no longer logs hardware→hardware changes, since the wording now alternates between the two lines every minute; drops and recoveries are unchanged. It never fired false notifications - it already skipped empty values.
+
+Models: `darkbloom switch` writes the new selection into `provider.toml`'s `enabled_models`, and `darkbloom models list` (and status's "Local MLX models") are filtered by that list. Disk Usage now calls `models list --all`, and the card counts from that same listing.
+
+Spotted from a screenshot of the live page. Verified by sampling the parser against the running provider and by `/api/data` after the restart: trust `hardware (App Attest)`, 5 models, 76 GB reclaimable.
+
 ## v46
 
 **New panel: Network Model Demand** — which models the whole Darkbloom network is actually being asked for, next to this Mac's own numbers, so choosing what to serve no longer rests on guesswork from a single provider's traffic.
