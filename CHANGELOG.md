@@ -1,5 +1,11 @@
 # Changelog
 
+## v56
+
+**The version on the page now comes from this changelog, so it can no longer lag behind the code.** v54 and v55 both shipped still reading "L&S v53", because the number was a hand-bumped `DASHBOARD_VERSION` constant in server.py that was forgotten twice. Now the top `## vN` heading here is the only place a version is written: install.sh copies it into `~/.darkbloom/dashboard/VERSION`, and server.py reads that file (or this changelog directly when run from the repo). New releases need only the changelog entry and the tag.
+
+**install.sh no longer dies halfway on a re-run.** `launchctl bootout` returns before the job is actually gone, so the immediate `bootstrap` failed with "Bootstrap failed: 5: Input/output error", `set -e` ended the script, and the dashboard stayed down with energy-monitor never restarted. It now waits up to 10 s for the old job to disappear first. Verified with two re-runs in a row: both services came back and the page reported the new version.
+
 ## v55
 
 **Network Model Demand can now act on what it shows: download, activate and load models from the list, with a recommendation per model.** Two new columns:

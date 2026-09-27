@@ -31,9 +31,30 @@ CSV_PATH = HOME / ".darkbloom" / "energy-log.csv"
 DARKBLOOM_BIN = HOME / ".darkbloom" / "bin" / "darkbloom"
 RAW_POWER_LOG = Path("/tmp/darkbloom-pm-raw.log")
 PORT = 8787
-# Bumped together with the CHANGELOG entry and git tag on each release, so
-# the page can say which build is running (the live copy has no git).
-DASHBOARD_VERSION = "v55"
+
+
+def _read_dashboard_version():
+    """The top `## vN` heading of CHANGELOG.md is the one place a release's
+    version is written. install.sh copies it into VERSION next to the live
+    server.py (the live copy has no repo); running straight from the repo
+    reads the changelog itself. Nothing to bump by hand, so it cannot drift."""
+    here = Path(__file__).resolve().parent
+    try:
+        return (here / "VERSION").read_text().strip() or "unknown"
+    except OSError:
+        pass
+    try:
+        with open(here.parent / "CHANGELOG.md") as f:
+            for line in f:
+                m = re.match(r"##\s+(v\d+)\b", line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return "unknown"
+
+
+DASHBOARD_VERSION = _read_dashboard_version()
 MAX_POINTS = 300  # downsample if the log grows large
 # Same baseline assumption as energy-monitor.sh: powermetrics cpu_power/gpu_power
 # only measures the SoC's own power rails, not the whole machine's wall power

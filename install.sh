@@ -42,6 +42,10 @@ done
 mkdir -p "$TARGET/dashboard"
 cp "$REPO_DIR/dashboard/server.py" "$TARGET/dashboard/server.py"
 cp "$REPO_DIR/dashboard/index.html" "$TARGET/dashboard/index.html"
+# The version shown on the page comes from the top CHANGELOG heading - the
+# single place it is written - so it cannot lag behind the code.
+VERSION="$(grep -m1 -oE '^## v[0-9]+' "$REPO_DIR/CHANGELOG.md" | sed 's/^## //')"
+echo "${VERSION:-unknown}" > "$TARGET/dashboard/VERSION"
 
 for f in pm-start.sh energy-monitor.sh max-power.py; do
   cp "$REPO_DIR/scripts/$f" "$TARGET/$f"
@@ -107,6 +111,12 @@ fi
 # Start the 2 services that don't need root right away.
 for svc in dashboard energy-monitor; do
   launchctl bootout "gui/$(id -u)/io.darkbloom.$svc" >/dev/null 2>&1 || true
+  # bootout returns before the job is gone; bootstrapping too early fails with
+  # "Bootstrap failed: 5: Input/output error" and set -e ends the install.
+  for _ in $(seq 1 20); do
+    launchctl print "gui/$(id -u)/io.darkbloom.$svc" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
   launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENTS/io.darkbloom.$svc.plist"
 done
 
