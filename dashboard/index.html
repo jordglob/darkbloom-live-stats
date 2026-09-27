@@ -745,7 +745,7 @@ function tokensAsText(tokens) {
 function fmtUsdPerKwh(v) { return v == null ? '–' : fmtUsd(v) + '/kWh'; }
 function fmtTime(iso) {
   const d = new Date(iso);
-  return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hourCycle:'h23'});
 }
 function fmtPct(v) {
   if (v == null || Number.isNaN(v)) return '–';
@@ -845,7 +845,7 @@ function renderWarmup(warmup) {
   const el = document.getElementById('warmup');
   if (!warmup) { el.innerHTML = ''; return; }
 
-  const lastRun = warmup.last_run ? new Date(warmup.last_run * 1000).toLocaleTimeString('en-US') : 'never';
+  const lastRun = warmup.last_run ? new Date(warmup.last_run * 1000).toLocaleTimeString('en-GB') : 'never';
   const lastOkBadge = warmup.last_ok == null ? '' :
     warmup.last_ok ? `<span style="color:var(--status-good)">✓ ok</span>` : `<span style="color:var(--status-critical)">✗ error</span>`;
 
@@ -1809,7 +1809,7 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations, serv
 
   const hr = (account && account.connected) ? account.hourly_rate_comparison : null;
   const hourlyTooltip = hr ? `How this is computed, entirely from real local/ledger data - no advertised pricing anywhere in it:
-Active $/hr = real earnings (excl. base_reward) ÷ real active-serving seconds, both counted only from ${new Date(hr.window_start_at * 1000).toLocaleString('en-US')} onward - the exact moment this dashboard's local duration tracker started watching the daemon's inference_active flag.
+Active $/hr = real earnings (excl. base_reward) ÷ real active-serving seconds, both counted only from ${new Date(hr.window_start_at * 1000).toLocaleString('en-US', {hourCycle:'h23'})} onward - the exact moment this dashboard's local duration tracker started watching the daemon's inference_active flag.
 Floor $/hr = base_reward earnings in that same window ÷ elapsed floor-slot time. The slot width (${hr.floor_slot_minutes.toFixed(1)} min) isn't assumed - it's the smallest real gap between two back-to-back "floor:<minute>Z:..." timestamps Darkbloom itself embeds in every base_reward job_id.
 Window so far: ${hr.active_hours.toFixed(2)}h active (${fmtNum(hr.active_jobs)} jobs, ${fmtUsd(hr.active_usd)}) vs ${hr.floor_hours.toFixed(2)}h floor (${fmtNum(hr.floor_slots)} slots, ${fmtUsd(hr.floor_usd)}).
 Grows more reliable the longer the dashboard keeps running - resets to empty on every restart.
@@ -2956,7 +2956,11 @@ async function refresh() {
       ? `${fmtCompact(tokNow)} tokens · ≈ ${fmtCompact(tokNow * 0.75)} words since ${fmtTime(rows.timestamps[0])}`
       : '';
 
-    document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString('en-US');
+    const verBits = [];
+    if (status && status.version) verBits.push(`darkbloom ${status.version}`);
+    if (data.dashboard_version) verBits.push(`L&S ${data.dashboard_version}`);
+    verBits.push('updated ' + new Date().toLocaleTimeString('en-GB'));
+    document.getElementById('updated').textContent = verBits.join(' · ');
     document.getElementById('kwh-price').textContent = elprisNow && elprisNow.nowVal != null
       ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';
     // Prefer the live gauge's method: the CSV's first row after a restart is

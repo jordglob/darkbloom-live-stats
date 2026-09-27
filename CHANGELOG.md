@@ -1,5 +1,13 @@
 # Changelog
 
+## v48
+
+**24-hour clock everywhere, and the header now says which versions are running** — `darkbloom 0.9.10 · L&S v48 · updated 16:16:37` instead of `updated 4:07:54 PM`.
+
+Every time on the page (the header's updated stamp, warmup's last run, the shared date+time format and the active-$/hr window note) now uses a 24-hour clock; month names stay English. The Darkbloom version was only in the footer at the bottom of a long page, and the dashboard's own version was nowhere, which made "is the fix live yet?" a guessing game. `server.py` gained `DASHBOARD_VERSION`, bumped with each CHANGELOG entry and tag and sent in `/api/data` as `dashboard_version`, since the installed copy in `~/.darkbloom/dashboard` has no git to ask.
+
+Verified with a headless Chrome screenshot of the live page after the restart.
+
 ## v47
 
 **Two cards were wrong after Darkbloom v0.9.10 and `darkbloom switch`: Network Trust read "Unknown" in red on a fully trusted Mac, and the Warm models card and Disk Usage panel showed 1 downloaded model when there were 5 (76 GB unused).**
