@@ -1,5 +1,9 @@
 # Changelog
 
+## v67
+
+**Wall power is calibrated against a real wall meter.** The Total gauge and the cost log divided the Mac's SMC system-power reading by an assumed 90% PSU efficiency. On 2026-09-27 a plug meter on this M4 Pro Mac mini (nothing else plugged in) gave two points: idle 11 W at the wall vs. 7.9 W SMC, and full inference load ~99.5 W (the meter swung 83-116 W) vs. 87.5 W SMC averaged over the same two minutes. A pure ratio can't fit both (0.72 at idle, ~0.88 under load), so the conversion is now a line through them: `wall = SMC × 1.11 + 2.2 W` (`WALL_SCALE`/`WALL_OFFSET_W` in `energy-monitor.sh` and `server.py`) - about the old 90% plus a ~2 W fixed loss. At idle the page now shows ~11 W instead of ~9 W; under load it moves up ~2 W. `/api/power` reports `wall_scale`/`wall_offset_w` instead of `psu_efficiency`. The raw readings are kept in `~/.darkbloom/wall-meter-calibration.csv`.
+
 ## v66
 
 **The chat no longer throws away Qwen answers as "reasoning ran long".** v65 treated any reply from a Qwen thinking model without a closing `</think>` as cut-off reasoning. But Qwen sometimes answers without thinking first, and then the whole correct answer was replaced by "[the model's reasoning ran long and got cut off …]" (seen twice in a row on 2026-09-27 for "berätta ett skämt" and "5 jokes please", both of which answer fine when replayed). The chat now asks the server instead: only `finish_reason: "length"` counts as cut off, and then the message says how many tokens it used.

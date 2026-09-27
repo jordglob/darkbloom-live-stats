@@ -123,8 +123,10 @@ GPU_ACTIVE_RESIDENCY_RE = re.compile(r"^GPU HW active residency:\s*([\d.]+)%")
 
 MACMON_LOG = HOME / ".darkbloom" / "macmon.jsonl"
 # SMC's system-power sensor sits after the power supply; wall draw is higher
-# by the PSU's conversion loss. Keep in sync with energy-monitor.sh.
-PSU_EFFICIENCY = 0.90
+# by the PSU's losses: wall = SMC * WALL_SCALE + WALL_OFFSET_W, calibrated
+# 2026-09-27 against a wall meter (see energy-monitor.sh). Keep in sync.
+WALL_SCALE = 1.11
+WALL_OFFSET_W = 2.2
 
 
 def _latest_smc_system_w():
@@ -204,7 +206,7 @@ def get_live_power():
         # powermetrics sample, so at the start of a burst it can read below
         # what the chip alone is drawing right now. The whole Mac can never
         # use less than its chip plus the idle board draw - floor it there.
-        total_w, total_method = max(sys_w / PSU_EFFICIENCY, estimate_w), "smc"
+        total_w, total_method = max(sys_w * WALL_SCALE + WALL_OFFSET_W, estimate_w), "smc"
     else:
         total_w, total_method = estimate_w, "soc+baseline"
     return {
@@ -213,7 +215,8 @@ def get_live_power():
         "total_w": round(total_w, 3),
         "total_method": total_method,
         "baseline_w": BASELINE_W,
-        "psu_efficiency": PSU_EFFICIENCY,
+        "wall_scale": WALL_SCALE,
+        "wall_offset_w": WALL_OFFSET_W,
         "sample_time": sample_time,
         # GPU busy-ness (0-100%), read directly from powermetrics' own "GPU HW
         # active residency" line - a real measurement, not derived/estimated

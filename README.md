@@ -244,7 +244,12 @@ flat baseline can't be right at both ends, and the old 7W guess made busy
 hours look 2-2.5x cheaper than they were. If
 [`macmon`](https://github.com/vladkens/macmon) is installed, the energy
 monitor runs it in the background and uses that whole-system reading,
-divided by an assumed 90% power-supply efficiency to approximate the wall.
+mapped to the wall as `SMC × 1.11 + 2.2 W`. That line was calibrated on
+2026-09-27 with a wall meter on an M4 Pro Mac mini (nothing else plugged in):
+idle 7.9 W SMC vs. 11 W at the wall, full inference load 87.5 W vs. ~99.5 W -
+roughly a 90% efficient PSU plus ~2 W fixed loss. Re-measure with a plug meter
+if your Mac differs (`WALL_SCALE`/`WALL_OFFSET_W` in `scripts/energy-monitor.sh`
+and `dashboard/server.py`).
 Without it, cost tracking falls back to CPU+GPU plus a flat 7W. The page
 footer says which method is in use, and the CSV logs it per row
 (`power_method`: `smc` or `soc+baseline`). A smart plug is still the only

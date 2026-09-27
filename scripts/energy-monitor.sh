@@ -13,7 +13,7 @@
 #
 # POWER: if `macmon` (brew install macmon) is on PATH, whole-system power is
 # read from the Mac's own SMC sensor (covers RAM, SSD, fans, everything - not
-# just CPU+GPU), divided by PSU_EFFICIENCY to approximate wall draw. Without
+# just CPU+GPU), mapped to wall draw by WALL_SCALE/WALL_OFFSET_W. Without
 # it, falls back to powermetrics CPU+GPU plus a flat BASELINE_W guess.
 
 set -uo pipefail
@@ -35,10 +35,14 @@ DARKBLOOM="$HOME/.darkbloom/bin/darkbloom"
 # macmon isn't available. Measured on an M4 Pro Mac mini: the real gap is
 # ~5W at idle and grows under load (RAM + fans), so this is a rough middle.
 BASELINE_W=7
-# SMC's system-power sensor sits after the power supply, so wall draw is a bit
-# higher. ~90% is typical for Apple's small-form-factor PSUs at these loads;
-# a smart plug is the only way to pin this down for your own unit.
-PSU_EFFICIENCY=0.90
+# SMC's system-power sensor sits after the power supply, so wall draw is
+# higher: wall = SMC * WALL_SCALE + WALL_OFFSET_W. Calibrated 2026-09-27 with a
+# wall meter on this M4 Pro Mac mini, nothing else plugged in: idle SMC 7.9W vs.
+# 11W at the wall, full inference load SMC 87.5W vs. ~99.5W (meter swung
+# 83-116W). A line through both points: ~90% PSU efficiency plus ~2W fixed
+# loss. Re-measure with a plug meter for your own unit.
+WALL_SCALE=1.11
+WALL_OFFSET_W=2.2
 MACMON="$(command -v macmon 2>/dev/null || true)"
 MACMON_LOG="$DIR/macmon.jsonl"
 MACMON_PID=""
@@ -219,7 +223,7 @@ while true; do
         SYS_W=$(tail -c +$((MACMON_OFFSET + 1)) "$MACMON_LOG" | jq -s '[.[] | select(.sys_power != null and .all_power != null and ((.sys_power - .all_power) | fabs) > 0.01) | .sys_power] | if length > 0 then add / length else empty end' 2>/dev/null || true)
         MACMON_OFFSET=$MSIZE
         if [ -n "${SYS_W:-}" ]; then
-          TOTAL_W=$(calc "scale=3; $SYS_W / $PSU_EFFICIENCY")
+          TOTAL_W=$(calc "scale=3; $SYS_W * $WALL_SCALE + $WALL_OFFSET_W")
           POWER_METHOD="smc"
         fi
       fi
@@ -286,7 +290,7 @@ while true; do
   } > "$STATE"
 
   if [ "$POWER_METHOD" = "smc" ]; then
-    log "SoC=${AVG_W}W  whole-system (SMC/${PSU_EFFICIENCY} PSU)=${TOTAL_W}W  cumulative energy=${CUM_WH}Wh  electricity cost=${CUM_COST}  ~revenue=${EST_REV_SEK}  net=${NET_SEK} (local currency)"
+    log "SoC=${AVG_W}W  whole-system (SMC*${WALL_SCALE}+${WALL_OFFSET_W})=${TOTAL_W}W  cumulative energy=${CUM_WH}Wh  electricity cost=${CUM_COST}  ~revenue=${EST_REV_SEK}  net=${NET_SEK} (local currency)"
   else
     log "SoC=${AVG_W}W (+baseline ${BASELINE_W}W = ${TOTAL_W}W)  cumulative energy=${CUM_WH}Wh  electricity cost=${CUM_COST}  ~revenue=${EST_REV_SEK}  net=${NET_SEK} (local currency)"
   fi
