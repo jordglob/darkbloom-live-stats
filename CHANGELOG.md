@@ -1,5 +1,13 @@
 # Changelog
 
+## v60
+
+**One click to serve a model, and the button says what it will do.** The Network Model Demand panel had Download / Activate / Replace / Deactivate / Load plus a confirm click - four or five clicks before a new model was earning, and it wasn't clear which ones were needed. Each row now has a single button labelled with its effect: **Serve alongside gpt-oss-20b**, **Serve instead of gpt-oss-20b**, or **Download 16 GB & serve instead of …**. One click downloads if needed, switches (running jobs finish first, no restart), writes the plist, and loads the model, reporting each stage under the button. Hosted models get **Stop serving** when others remain. The state reads Serving / Selected, not loaded / Downloaded / Not downloaded.
+
+**Fixed: the memory check let qwen3.6 be added next to gpt-oss-20b, where it can't load.** `models list`'s `estimated_memory_gb` (23.8 GB) undershoots what Darkbloom reserves to load it - "Insufficient memory (29.3 GB free, need 30.3 GB) and all loaded models are actively serving". The dashboard now remembers that real figure per model from load errors (`~/.darkbloom/model-memory-need.json`) and otherwise scales the estimate by the observed 1.27x. A hosted model that doesn't fit next to the others is flagged in Fit and offered **Serve instead of …**.
+
+**Fixed: Load reported "Loaded" for a model that failed to load.** The local endpoint answers 429 "Provider capacity is temporarily unavailable" both when a warm model is busy and when it can't be loaded at all; every 429 was counted as success. A load now succeeds only if the daemon lists the model as warm afterwards, and otherwise shows Darkbloom's own load error.
+
 ## v59
 
 **The per-model earnings table says which period each number covers, and shows what was served recently.** "Jobs" used to be a single count over the whole locally kept ledger window - about 48 hours, never stated - so a model served only yesterday looked just as current as one served a minute ago (on 2026-09-27 the table showed 880 gemma-4-26b-qat-4bit jobs although gemma had not been hosted all day).

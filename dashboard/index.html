@@ -1661,7 +1661,7 @@ function renderModelDemand(d) {
         <th class="num" title="HTTP 429 responses. Overlaps the other outcomes, so it is not added to them.">429s</th>
         <th title="Requests per bucket over the window. Gaps are hours that were not published.">Trend</th>
         <th title="Suitability for this Mac: whether it fits (RAM, the inference memory budget next to the models already hosted, free disk) and whether network demand makes it worth serving. Hover the badge for all reasons. A rough guide from published demand, not an earnings forecast.">Fit</th>
-        <th title="Download fetches the weights. Activate adds it to the models this provider hosts (darkbloom switch, drains running requests first, no restart); Replace hosts only this one. Load forces a hosted model into memory with a one-token request. Switches are also written to the provider plist so Price Guard restarts keep them.">This Mac</th>
+        <th title="One button per model, labelled with what it does. Serve downloads the model if needed, switches the provider to it - alongside the current models when they fit in memory together, otherwise instead of them - and loads it. Running jobs finish first; no restart. The choice is also written to the provider plist so Price Guard restarts keep it.">This Mac</th>
       </tr></thead>
       <tbody>
         ${models.map(m => {
@@ -1706,60 +1706,43 @@ function fitCell(m) {
     ${key ? `<div class="fit-reason">${escapeHtml(key)}</div>` : ''}`;
 }
 
-// Actions that change what the provider serves take a second click, so a stray
-// click can't drain and switch the provider.
-let pendingModelConfirm = null;
-
+// One button per row that says what it will do. "Serve" downloads if needed,
+// switches (next to the current models when they fit, otherwise instead of
+// them) and loads the model - no separate confirm or Load step.
 function modelActionsCell(m) {
   const l = m.local;
   if (!l) return '–';
-  const id = escapeHtml(m.model);
   const job = l.job;
   const running = job && job.state === 'running';
-  const btn = (action, label, title, disabled) => {
-    const confirming = pendingModelConfirm && pendingModelConfirm.model === m.model && pendingModelConfirm.action === action;
-    return `<button class="copy-cmd-btn" ${disabled || running ? 'disabled' : ''} title="${escapeHtml(title)}"
-      onclick="modelAction('${action}', this.dataset.model)" data-model="${id}">${confirming ? 'Confirm ' + label.toLowerCase() + '?' : label}</button>`;
-  };
-  const state = l.hosted ? (l.loaded ? 'Hosted · loaded' : 'Hosted · not loaded')
-    : l.downloaded ? 'Downloaded' : 'Not downloaded';
+  const hostedCount = (lastModelDemand?.hosted_models || []).length;
   const blocked = m.recommendation && m.recommendation.level === 'unsuitable';
-  const buttons = [];
-  if (!l.downloaded) {
-    if (m.size_gb != null) buttons.push(btn('download', 'Download',
-      `Download ${m.size_gb.toFixed(1)} GB with darkbloom models download`, blocked || l.disk_ok === false));
-  } else if (!l.hosted) {
-    if (l.fits_alongside !== false) buttons.push(btn('activate', 'Activate', 'Host it in addition to the current models', blocked));
-    buttons.push(btn('replace', 'Replace', 'Host only this model - the others stop being offered to the network', blocked));
-  } else {
-    if (!l.loaded) buttons.push(btn('load', 'Load', 'Send a one-token request so the model loads into memory now'));
-    buttons.push(btn('deactivate', 'Deactivate', 'Stop hosting it; the other hosted models stay',
-      (lastModelDemand?.hosted_models || []).length < 2));
+  const btn = (action, label, title, disabled) =>
+    `<button class="copy-cmd-btn" ${disabled || running ? 'disabled' : ''} title="${escapeHtml(title)}"
+      onclick="modelAction('${action}', this.dataset.model)" data-model="${escapeHtml(m.model)}">${escapeHtml(label)}</button>`;
+  let state, button = '';
+  if (l.hosted && l.loaded) state = '<span style="color:var(--status-good)">Serving</span>';
+  else if (l.hosted) state = '<span style="color:var(--status-warning)">Selected, not loaded</span>';
+  else state = l.downloaded ? 'Downloaded' : 'Not downloaded';
+  if (!l.hosted || l.fits_alongside === false) {
+    let label = l.serve_label || 'Serve';
+    if (!l.downloaded && m.size_gb != null) label = `Download ${m.size_gb.toFixed(0)} GB & ${label.toLowerCase()}`;
+    if (!(l.hosted && hostedCount === 1)) {
+      button = btn('serve', label, 'One click: downloads if needed, switches the provider (running jobs finish first, no restart) and loads the model.',
+        blocked || (!l.downloaded && (l.disk_ok === false || m.size_gb == null)));
+    }
+  } else if (hostedCount > 1) {
+    button = btn('deactivate', 'Stop serving', 'Stop offering this model; the other models keep serving.');
   }
   let jobLine = '';
   if (job) {
-    const verb = { download: 'Downloading', activate: 'Activating', replace: 'Switching', deactivate: 'Deactivating', load: 'Loading' }[job.action] || job.action;
     const color = job.state === 'error' ? 'var(--status-critical)' : job.state === 'ok' ? 'var(--status-good)' : 'var(--text-muted)';
-    const text = running ? `${verb}…${job.message ? ' ' + job.message : ''}` : job.message;
+    const text = running ? (job.message || 'working…') : job.message;
     jobLine = `<div class="model-job" style="color:${color}">${escapeHtml(text)}</div>`;
   }
-  return `<div class="model-actions"><span class="model-state">${state}</span>${buttons.join('')}</div>${jobLine}`;
+  return `<div class="model-actions"><span class="model-state">${state}</span>${button}</div>${jobLine}`;
 }
 
 async function modelAction(action, model) {
-  const needsConfirm = ['activate', 'replace', 'deactivate'].includes(action);
-  if (needsConfirm && !(pendingModelConfirm && pendingModelConfirm.model === model && pendingModelConfirm.action === action)) {
-    pendingModelConfirm = { model, action };
-    setTimeout(() => {
-      if (pendingModelConfirm && pendingModelConfirm.model === model && pendingModelConfirm.action === action) {
-        pendingModelConfirm = null;
-        if (lastModelDemand) renderModelDemand(lastModelDemand);
-      }
-    }, 5000);
-    if (lastModelDemand) renderModelDemand(lastModelDemand);
-    return;
-  }
-  pendingModelConfirm = null;
   try {
     const res = await fetch('/api/model_action', { method: 'POST', body: JSON.stringify({ action, model }) });
     const r = await res.json();

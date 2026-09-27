@@ -2486,10 +2486,15 @@ def get_model_demand(window):
 
 MODEL_ACTION_LOG = HOME / ".darkbloom" / "model-actions.log"
 MODEL_SWITCH_TIMEOUT_SEC = 120
-# Weights are not the whole footprint (KV cache, activations). For models not
-# downloaded yet there is no estimated_memory_gb, so scale the catalog size by
-# the ratio seen on the downloaded ones (13.5/12.1 .. 23.8/21.3, ~1.12).
+# Weights are not the whole footprint (KV cache, activations). `models list`'s
+# estimated_memory_gb undershoots what Darkbloom actually reserves to load:
+# qwen3.6-35b-a3b estimated 23.8 GB, but loading it required 30.3 GB
+# ("Insufficient memory ... need 30.3 GB", 2026-09-27) - 1.27x. That real
+# figure is remembered per model from load errors; until a model has one,
+# the estimate is scaled by that ratio (catalog size needs 1.12 more first).
 MODEL_MEMORY_OVERHEAD = 1.12
+MODEL_LOAD_NEED_RATIO = 1.27
+MODEL_NEED_FILE = HOME / ".darkbloom" / "model-memory-need.json"
 DISK_HEADROOM_GB = 10
 _model_jobs = {}
 _model_jobs_lock = threading.Lock()
@@ -2513,6 +2518,24 @@ def _local_model_inventory():
         return {m["id"]: m for m in json.loads(out).get("models", []) if m.get("id")}
     except Exception:
         return {}
+
+
+def _learned_memory_need():
+    """Model -> GB Darkbloom said it needed, from `last_model_load_error`
+    messages seen so far (daemon-state only keeps the latest one)."""
+    try:
+        learned = json.loads(MODEL_NEED_FILE.read_text())
+    except Exception:
+        learned = {}
+    try:
+        err = json.loads(DAEMON_STATE_PATH.read_text()).get("last_model_load_error") or {}
+        m = re.search(r"need ([\d.]+) GB", err.get("message") or "")
+        if m and err.get("model") and learned.get(err["model"]) != float(m.group(1)):
+            learned[err["model"]] = float(m.group(1))
+            MODEL_NEED_FILE.write_text(json.dumps(learned))
+    except Exception:
+        pass
+    return learned
 
 
 def _daemon_model_state():
@@ -2616,10 +2639,30 @@ def _run_load(model):
     try:
         _ping_model(conf, model, timeout=300)
     except urllib.error.HTTPError as e:
-        # 429 means it is busy with real traffic for this model - already loaded.
-        if e.code != 429:
-            raise RuntimeError(f"HTTP {e.code} {e.reason}")
+        # A 429 is only harmless when the model is already warm and busy. When
+        # it cannot be loaded at all (not enough memory) the endpoint also
+        # answers 429 "capacity temporarily unavailable" - reporting that as
+        # "Loaded" is exactly the mistake made on 2026-09-27.
+        _, warm = _daemon_model_state()
+        if e.code == 429 and model in warm:
+            return "Already loaded and busy"
+        err = _load_error_for(model)
+        raise RuntimeError(err or f"HTTP {e.code} {e.reason}")
+    _, warm = _daemon_model_state()
+    if model not in warm:
+        err = _load_error_for(model)
+        raise RuntimeError(err or "Request answered but the model is not loaded")
     return "Loaded"
+
+
+def _load_error_for(model):
+    try:
+        err = json.loads(DAEMON_STATE_PATH.read_text()).get("last_model_load_error") or {}
+    except Exception:
+        return None
+    if err.get("model") == model and time.time() - (err.get("at") or 0) < 600:
+        return err.get("message")
+    return None
 
 
 def _model_job_thread(model, action, fn):
@@ -2630,6 +2673,56 @@ def _model_job_thread(model, action, fn):
     except Exception as e:
         _set_job(model, state="error", message=str(e)[:300], finished=time.time())
         log_model_action(f"ERROR: {action} {model}: {e}")
+
+
+def _model_memory_need(local_id, public_id, local, catalog, learned):
+    if local_id and local_id in learned:
+        return learned[local_id]
+    lm = local.get(local_id) if local_id else None
+    if lm and lm.get("estimated_memory_gb"):
+        return lm["estimated_memory_gb"] * MODEL_LOAD_NEED_RATIO
+    entry = catalog.get((local_id or public_id).lower()) or catalog.get(public_id.lower())
+    return entry["size_gb"] * MODEL_MEMORY_OVERHEAD * MODEL_LOAD_NEED_RATIO if entry and entry.get("size_gb") else None
+
+
+def _inference_budget_gb():
+    bm = STATUS_PATTERNS["inference_memory_gb"].search(get_darkbloom_status().get("raw") or "")
+    return float(bm.group(1)) if bm else None
+
+
+def _serve_plan(public_id, local, hosted, catalog, learned, budget):
+    """What one "Serve" click does: host it next to the current models when
+    everything fits in the inference budget, otherwise instead of them.
+    Returns (models, label)."""
+    local_id = _resolve_local_id(public_id, local) or (catalog.get(public_id.lower()) or {}).get("id") or public_id
+    others = [h for h in hosted if h != local_id]
+    need = _model_memory_need(local_id, public_id, local, catalog, learned) or 0
+    others_gb = sum(_model_memory_need(h, h, local, catalog, learned) or 0 for h in others)
+    if others and budget and need + others_gb <= budget:
+        return others + [local_id], "Serve alongside " + ", ".join(others)
+    if others:
+        return [local_id], "Serve instead of " + ", ".join(others)
+    return [local_id], "Serve"
+
+
+def _run_serve(public_id, catalog_id, models_fn):
+    """Download if needed, switch, then load - one click, one job."""
+    if not _resolve_local_id(public_id, _local_model_inventory()):
+        _set_job(public_id, message="downloading…")
+        _run_download(catalog_id)
+    local = _local_model_inventory()
+    local_id = _resolve_local_id(public_id, local)
+    if not local_id:
+        raise RuntimeError("Download finished but the model is not listed locally")
+    models = models_fn(local)
+    _set_job(public_id, message="switching (running jobs finish first)…")
+    _run_switch(models)
+    _set_job(public_id, message="loading into memory…")
+    try:
+        _run_load(local_id)
+    except Exception as e:
+        raise RuntimeError(f"Switched, but loading failed: {e}")
+    return "Serving " + ", ".join(models)
 
 
 def start_model_action(action, public_id):
@@ -2646,7 +2739,19 @@ def start_model_action(action, public_id):
         if job and job.get("state") == "running":
             return False, f"{job.get('action')} already running for this model"
 
-    if action == "download":
+    if action == "serve":
+        if not local_id and not entry:
+            return False, "Not in the coordinator catalog"
+        if local_id and local_id in hosted and len(hosted) == 1:
+            return False, "Already the only model served"
+        if _model_switch_lock.locked():
+            return False, "Another model switch is in progress"
+        catalog_id = entry["id"] if entry else local_id
+
+        def models_fn(inv):
+            return _serve_plan(public_id, inv, hosted, catalog, _learned_memory_need(), _inference_budget_gb())[0]
+        fn = lambda: _run_serve(public_id, catalog_id, models_fn)
+    elif action == "download":
         if not entry:
             return False, "Not in the coordinator catalog"
         if local_id:
@@ -2719,10 +2824,14 @@ def _recommend_model(m, share, ctx):
         others_gb = sum(g for _, g in others)
         if mem > budget:
             return "unsuitable", [f"Needs ~{mem:.0f} GB, above the {budget:.0f} GB inference budget."]
-        if others and mem + others_gb > budget and not m["local"]["hosted"]:
+        if others and mem + others_gb > budget:
             names = ", ".join(h for h, _ in others)
-            reasons.append(f"~{mem:.0f} GB does not fit next to {names} (~{others_gb:.0f} GB) "
-                           f"in {budget:.0f} GB - replace instead of adding, or the models will evict each other.")
+            if m["local"]["hosted"]:
+                reasons.append(f"Hosted next to {names}, but ~{mem:.0f} + ~{others_gb:.0f} GB exceeds the "
+                               f"{budget:.0f} GB budget - it fails to load while the other is busy. Replace or deactivate.")
+            else:
+                reasons.append(f"~{mem:.0f} GB does not fit next to {names} (~{others_gb:.0f} GB) "
+                               f"in {budget:.0f} GB - replace instead of adding, or the models will evict each other.")
             m["local"]["fits_alongside"] = False
         else:
             m["local"]["fits_alongside"] = True
@@ -2764,12 +2873,10 @@ def annotate_model_demand(data):
         free_disk = None
     catalog = get_model_catalog()
 
+    learned = _learned_memory_need()
+
     def mem_of(local_id, public_id):
-        lm = local.get(local_id) if local_id else None
-        if lm and lm.get("estimated_memory_gb"):
-            return lm["estimated_memory_gb"]
-        entry = catalog.get((local_id or public_id).lower()) or catalog.get(public_id.lower())
-        return entry["size_gb"] * MODEL_MEMORY_OVERHEAD if entry and entry.get("size_gb") else None
+        return _model_memory_need(local_id, public_id, local, catalog, learned)
 
     ctx = {
         "ram_gb": ram, "budget_gb": budget, "free_disk_gb": free_disk,
@@ -2794,6 +2901,7 @@ def annotate_model_demand(data):
             # Keep finished jobs visible for a minute so the outcome can be read.
             if job.get("state") == "running" or time.time() - (job.get("finished") or 0) < 60:
                 m["local"]["job"] = job
+        m["local"]["serve_label"] = _serve_plan(pid, local, hosted, catalog, learned, budget)[1]
         share = (m.get("requests") or 0) / total * 100 if total else 0
         level, reasons = _recommend_model(m, share, ctx)
         m["recommendation"] = {"level": level, "reasons": reasons}
