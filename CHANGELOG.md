@@ -1,5 +1,19 @@
 # Changelog
 
+## v44
+
+**The dashboard now says how to start renting out again** — a yellow banner appears whenever the provider's launchd job is switched off, carrying the exact `launchctl enable … && launchctl bootstrap …` command with a copy button, so the answer is on the page instead of in someone's memory.
+
+Why it was missing: launchd's disabled flag lives in its own per-user override database, not in the plist, so a job switched off by hand — which is the right thing to do before an OS upgrade — stays off through every reboot and login afterwards. Nothing here could tell that apart from a crash or a price pause, because `darkbloom status` reports "not running" for all three. The one state that never resolves itself looked exactly like the two that do. Lived through precisely that: the provider was drained and disabled before the macOS 26.7 upgrade on 2026-09-26, stayed off afterwards, and the page showed only zeroes with no hint why.
+
+`/api/data` gained an `autostart` field reporting both halves per job — `enabled` (the launchctl override) and `loaded` (bootstrapped into the current GUI session) — plus `survives_reboot`, derived from the provider alone since the watchdog can only restart a job that is allowed to run in the first place. A failed lookup reports `null` rather than `true`: claiming "enabled" on an error would hide the exact state this check exists to catch. Two subprocesses per call, cached 30 seconds.
+
+Three related adjustments. The banner is pushed ahead of every other check, since it explains a page of zeroes that nothing else accounts for. Price Guard's "paused, will resume automatically" banner is suppressed while the job is disabled, because that promise cannot be kept in that state. And when the daemon is serving while its job is off, it becomes a grey note instead — working now, idle after the next reboot.
+
+Re-enabling stays a manual act, the same way the Disk Usage panel only ever hands over a remove command. The banner does link "Start serving now", which uses the existing `darkbloom start` path and lasts until the next reboot.
+
+Verified by running the page's own `renderBanners()` headlessly under node against the live `/api/data` payload with the job actually disabled.
+
 ## v43
 
 **The footer says which provider version is running and when it took over** — `darkbloom 0.9.9 · promoted 1.6d ago · auto-update on`.

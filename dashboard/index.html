@@ -209,6 +209,8 @@
   table.rotation-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   table.rotation-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border); cursor: default; }
   table.rotation-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .banner-cmd { margin-top: 6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .banner-cmd code { overflow-wrap: anywhere; }
   .copy-cmd-btn { font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
   .copy-cmd-btn:hover { background: var(--surface-2, var(--surface-1)); }
   table.rotation-table tr:last-child td { border-bottom: none; }
@@ -258,7 +260,7 @@
 
       <div class="explainer-section">
         <h4>Banners at the top (what the colors mean)</h4>
-        <p><strong>Grey</strong> — a check flagged something, but real requests are succeeding right now, so it's informational: read it when you have a minute, nothing to do urgently. Darkbloom's own <code>doctor</code> tool has produced known false positives (its RAM-fit check in particular), which is why those land here rather than in yellow. <strong>Yellow</strong> — something is actually off (trust not hardware-level, power sampling not running, running hot, serving paused by Price Guard) and the banner says what to check. <strong>Red</strong> — a model-load error within the last two minutes; if requests keep failing, that's the one to look at first.</p>
+        <p><strong>Grey</strong> — a check flagged something, but real requests are succeeding right now, so it's informational: read it when you have a minute, nothing to do urgently. Darkbloom's own <code>doctor</code> tool has produced known false positives (its RAM-fit check in particular), which is why those land here rather than in yellow. <strong>Yellow</strong> — something is actually off (trust not hardware-level, power sampling not running, running hot, serving paused by Price Guard) and the banner says what to check. <strong>Red</strong> — a model-load error within the last two minutes; if requests keep failing, that's the one to look at first. A yellow banner also appears when the provider's launchd job has been switched off (<code>launchctl disable</code> - the normal step before an OS upgrade): that one never clears by itself, so it carries the exact commands to re-enable it permanently, plus a link that starts serving for this session only.</p>
       </div>
 
       <div class="explainer-section">
@@ -1496,7 +1498,10 @@ async function sendChatMessage() {
 }
 
 function copyRemoveCmd(id, btn) {
-  const cmd = `darkbloom models remove ${id}`;
+  copyCmd(`darkbloom models remove ${id}`, btn);
+}
+
+function copyCmd(cmd, btn) {
   const orig = btn.textContent;
   const flash = (text) => { btn.textContent = text; setTimeout(() => { btn.textContent = orig; }, 1800); };
   const fallbackCopy = () => {
@@ -1917,7 +1922,7 @@ function banner(level, html) {
   return `<div class="banner ${level}"><span class="dot"></span><span class="banner-text">${html}</span></div>`;
 }
 
-function renderBanners(status, energy, doctor, daemonState) {
+function renderBanners(status, energy, doctor, daemonState, autostart) {
   const banners = [];
   const served = status.requests_served || 0;
   // "Requests are actually succeeding" is the single most reassuring fact on
@@ -1933,6 +1938,33 @@ function renderBanners(status, energy, doctor, daemonState) {
   // repeated once per note.
   const infoNotes = [];
   const q = s => String(s).replace(/"/g, '&quot;');
+
+  // launchd can have the provider switched off persistently - `launchctl
+  // disable`, which is the right thing to do before an OS upgrade but lives in
+  // launchd's override database, not in the plist, so it outlives reboots and
+  // logins. Every other status here reads that as "daemon not running",
+  // identical to a crash or a price pause, and it is the one state that never
+  // resolves itself. Hence the only banner on this page that spells out what
+  // to type: re-enabling a launchd job stays a deliberate manual act, the same
+  // way the Disk Usage panel only ever hands over a remove command.
+  const daemonRunning = /^running/.test(status.daemon || '');
+  const jobs = (autostart && autostart.jobs) || null;
+  const isOff = j => j && (j.enabled === false || j.loaded === false);
+  const providerOff = isOff(jobs && jobs.provider);
+  const offJobs = jobs ? Object.keys(jobs).map(k => jobs[k]).filter(isOff) : [];
+  const cmdFor = j => j.enabled === false
+    ? `launchctl enable ${autostart.domain}/${j.label} && launchctl bootstrap ${autostart.domain} ${autostart.plist_dir}/${j.label}.plist`
+    : `launchctl bootstrap ${autostart.domain} ${autostart.plist_dir}/${j.label}.plist`;
+  // The command contains `&&`, which has to be escaped both as text and
+  // inside the onclick attribute - the browser hands the JS back the raw form.
+  const escAmp = t => String(t).replace(/&/g, '&amp;');
+  const cmdRow = j => `<div class="banner-cmd"><code>${escAmp(cmdFor(j))}</code><button class="copy-cmd-btn" onclick="copyCmd('${escAmp(cmdFor(j))}', this)">Copy</button></div>`;
+  if (providerOff && !daemonRunning) {
+    const why = jobs.provider.enabled === false ? 'switched off in launchd' : 'not loaded in this login session';
+    banners.push(banner('warning', `<strong>Renting out is off — nothing is being served.</strong> The provider's job is ${why}, so it will <strong>not</strong> start on its own: not now, and not after the next reboot either. Run this to turn it back on for good:${offJobs.map(cmdRow).join('')}<div style="margin-top:8px">Or serve right away without re-enabling: <a href="#" onclick="postPriceGuardAction('start'); return false;">Start serving now</a> — that lasts until the next reboot.</div>`));
+  } else if (providerOff && daemonRunning) {
+    infoNotes.push(`<span title="Serving works right now, but the launchd job is switched off, so a reboot leaves this Mac idle until you run: ${q(cmdFor(jobs.provider))}">serving now, but it won't come back after a reboot</span>`);
+  }
 
   const loadErr = daemonState && daemonState.last_model_load_error;
   if (loadErr) {
@@ -1954,7 +1986,7 @@ function renderBanners(status, energy, doctor, daemonState) {
     banners.push(banner('warning', status.last_error));
   }
 
-  if (lastPriceGuard && !lastPriceGuard.daemon_running && lastPriceGuard.last_action === 'stop' && lastPriceGuard.last_action_source === 'auto') {
+  if (lastPriceGuard && !lastPriceGuard.daemon_running && !providerOff && lastPriceGuard.last_action === 'stop' && lastPriceGuard.last_action_source === 'auto') {
     // An intentional, price-driven pause looks identical to a real outage in
     // every other status on this page ("Provider: Not running"). This used to
     // only fire while still in Auto mode - so switching to Manual right after
@@ -2752,7 +2784,7 @@ async function refresh() {
     if (data.max_power) renderMaxPower(data.max_power.level || 0);
 
     renderCards(status, energy, account, daemon_state);
-    renderBanners(status, energy, doctor, daemon_state);
+    renderBanners(status, energy, doctor, daemon_state, data.autostart);
     updateChatAvailability(status, daemon_state);
     renderAccount(account);
     renderDisk(disk);

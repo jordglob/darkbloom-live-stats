@@ -63,6 +63,15 @@ WARMUP_DEFAULT_INTERVAL_MIN = 20  # same cadence as SplittyDev/darkbloom-dashboa
 DAEMON_STATE_PATH = HOME / ".darkbloom" / "daemon-state.json"
 DOCTOR_POLL_INTERVAL_SEC = 300  # doctor makes a real network call + ~2 dozen checks - too heavy for the 10s cadence
 PROVIDER_PLIST = HOME / "Library" / "LaunchAgents" / "io.darkbloom.provider.plist"
+WATCHDOG_PLIST = HOME / "Library" / "LaunchAgents" / "io.darkbloom.watchdog.plist"
+# launchd's "disabled" flag lives in its own per-user override database, not in
+# the plist file, so it outlives reboots and logins: a job switched off by hand
+# (typically a deliberate `launchctl disable` before an OS upgrade) stays off
+# silently afterwards. Nothing else on this page can tell that apart from a
+# crash or a price pause - `darkbloom status` just says the daemon isn't
+# running - so the launchd side gets checked explicitly.
+AUTOSTART_LABELS = ("io.darkbloom.provider", "io.darkbloom.watchdog")
+AUTOSTART_CACHE_SEC = 30
 PRICE_GUARD_CONFIG = HOME / ".darkbloom" / "price-guard.json"
 PRICE_GUARD_LOG = HOME / ".darkbloom" / "price-guard.log"
 PRICE_GUARD_POLL_INTERVAL_SEC = 300  # matches the account/energy poll cadence elsewhere
@@ -471,6 +480,62 @@ def get_daemon_state():
             "age_sec": round(time.time() - load_err["at"], 1) if load_err.get("at") else None,
         } if load_err else None,
     }
+
+
+_autostart_cache = {"at": 0.0, "data": None}
+_autostart_lock = threading.Lock()
+
+
+def get_autostart_state():
+    """Reports whether paid serving would come back on its own after a reboot.
+    Two independent things can be false per job: `enabled` (the persistent
+    launchctl override) and `loaded` (bootstrapped into the current GUI
+    session). Each call is two subprocesses, so it is cached - none of this
+    changes on the page's 10s cadence."""
+    now = time.time()
+    with _autostart_lock:
+        cached = _autostart_cache["data"]
+        if cached is not None and now - _autostart_cache["at"] < AUTOSTART_CACHE_SEC:
+            return cached
+    domain = "gui/%d" % os.getuid()
+    disabled = set()
+    try:
+        out = subprocess.run(["launchctl", "print-disabled", domain],
+                             capture_output=True, text=True, timeout=10).stdout
+        for line in out.splitlines():
+            m = re.search(r'"([^"]+)"\s*=>\s*(\w+)', line)
+            if m and m.group(2) == "disabled":
+                disabled.add(m.group(1))
+    except Exception:
+        # Report unknown rather than guess: claiming "enabled" on a failed
+        # lookup would hide exactly the state this check exists to catch.
+        disabled = None
+    jobs = {}
+    for label in AUTOSTART_LABELS:
+        try:
+            loaded = subprocess.run(["launchctl", "print", "%s/%s" % (domain, label)],
+                                    capture_output=True, text=True, timeout=10).returncode == 0
+        except Exception:
+            loaded = None
+        jobs[label.rsplit(".", 1)[-1]] = {
+            "label": label,
+            "enabled": (label not in disabled) if disabled is not None else None,
+            "loaded": loaded,
+        }
+    provider = jobs.get("provider") or {}
+    data = {
+        "domain": domain,
+        "plist_dir": str(HOME / "Library" / "LaunchAgents"),
+        "jobs": jobs,
+        # The provider alone decides this: the watchdog only restarts a job
+        # that is allowed to run in the first place, so it is reported (and
+        # offered in the fix) without being able to mask the real answer.
+        "survives_reboot": bool(provider.get("enabled")) and bool(provider.get("loaded")),
+    }
+    with _autostart_lock:
+        _autostart_cache["at"] = now
+        _autostart_cache["data"] = data
+    return data
 
 
 INFERENCE_POLL_SEC = 0.5
@@ -2982,6 +3047,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "utilization": get_utilization(),
                 "disk": get_disk_usage(),
                 "daemon_state": get_daemon_state(),
+                "autostart": get_autostart_state(),
                 "doctor": get_doctor_report(),
                 "inference_durations": get_inference_duration_stats(),
                 "price_48h": get_price_48h(),
