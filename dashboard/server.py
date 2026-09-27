@@ -1675,10 +1675,15 @@ def set_max_power_level(level):
     with _max_power_lock:
         proc = _max_power["proc"]
         running = bool(proc and proc.poll() is None)
+        previous = _max_power["level"]
         _max_power["level"] = level
 
     if level <= 0:
-        log_price_guard("MAX POWER: level 0 - stopping")
+        # Every server exit sets level 0 as a safety net (atexit), so only log
+        # when a load was actually running - otherwise each dashboard restart
+        # reads like something was stopped.
+        if running:
+            log_price_guard(f"MAX POWER: stopped (was {previous:.0f}%)")
         return True
     if running or not MAX_POWER_SCRIPT.exists():
         return MAX_POWER_SCRIPT.exists()

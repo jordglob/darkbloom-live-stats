@@ -1,5 +1,9 @@
 # Changelog
 
+## v57
+
+**"MAX POWER: level 0 - stopping" no longer fills price-guard.log on every dashboard restart.** The server's exit handler sets the level to 0 as a safety net so a synthetic load can never outlive the dashboard, and that logged the line every time, even with no load running - seven of them on 2026-09-27 from reboots and installs alone, which read as if something had been switched off. It is now logged only when the worker was actually running, as "MAX POWER: stopped (was N%)". The safety net itself is unchanged.
+
 ## v56
 
 **The version on the page now comes from this changelog, so it can no longer lag behind the code.** v54 and v55 both shipped still reading "L&S v53", because the number was a hand-bumped `DASHBOARD_VERSION` constant in server.py that was forgotten twice. Now the top `## vN` heading here is the only place a version is written: install.sh copies it into `~/.darkbloom/dashboard/VERSION`, and server.py reads that file (or this changelog directly when run from the repo). New releases need only the changelog entry and the tag.
