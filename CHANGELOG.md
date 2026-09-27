@@ -1,5 +1,13 @@
 # Changelog
 
+## v51
+
+**The header's electricity price is now what a kWh actually costs, not the bare spot price:** `⚡ electricity $0.111/kWh (1.10 SEK) right now incl. fees & VAT (SE3) · spot $0.026`.
+
+It is (spot + grid fee + energy tax) with VAT on all of it, from the same fee and VAT fields under the price chart and the same formula as that chart's "Incl. fees & tax" line, shown in USD and the price source's own currency. Spot stays at the end for reference. With no fees or VAT set, the header falls back to the spot price and says "spot".
+
+Only the header changed: the cost accounting in energy-monitor.sh still prices each interval at spot (`/api/price_now`'s `price_per_kwh`).
+
 ## v50
 
 **The header now says when each running version went live, not when the page last polled:** `darkbloom 0.9.10 (installed 27 Sep 12:38) · L&S v50 (installed 27 Sep 16:20)`.

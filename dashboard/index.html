@@ -1975,13 +1975,16 @@ function renderElpris(p) {
     if (lastPrice48) renderElpris(lastPrice48);
   });
 
-  let nowVal = null;
+  let nowVal = null, nowTotal = null, nowTotalLocal = null;
   const statsEl = document.getElementById('elpris-chart-stats');
   const realValues = values.filter(v => v != null);
   if (realValues.length) {
     const nowMs = Date.now();
     const nowIdx = prices.findIndex(x => new Date(x.time_end).getTime() > nowMs);
-    nowVal = (nowIdx >= 0 && values[nowIdx] != null) ? values[nowIdx] : realValues.at(-1);
+    const i = (nowIdx >= 0 && values[nowIdx] != null) ? nowIdx : values.findLastIndex(v => v != null);
+    nowVal = values[i];
+    nowTotal = hasSurcharge ? totalValues[i] : null;
+    nowTotalLocal = nowTotal != null ? nowTotal * rate : null;
     if (statsEl) {
       const tomorrowNote = !p.has_forecast ? 'real-time source, no day-ahead prices'
         : p.tomorrow_available ? 'tomorrow published' : 'tomorrow not published yet (usually appears mid-afternoon)';
@@ -1990,7 +1993,7 @@ function renderElpris(p) {
   } else if (statsEl) {
     statsEl.textContent = '';
   }
-  return { nowVal, zone: p && p.zone, source: p && p.source };
+  return { nowVal, nowTotal, nowTotalLocal, currency: p && p.currency, zone: p && p.zone, source: p && p.source };
 }
 
 function renderReal48(p) {
@@ -2971,8 +2974,20 @@ async function refresh() {
       verBits.push(`L&S ${data.dashboard_version}` + (data.dashboard_installed_at ? ` (installed ${sinceTxt(data.dashboard_installed_at)})` : ''));
     }
     document.getElementById('updated').textContent = verBits.join(' · ');
-    document.getElementById('kwh-price').textContent = elprisNow && elprisNow.nowVal != null
-      ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';
+    // Lead with what a kWh actually costs (spot + grid fee + energy tax, then
+    // VAT on all of it, from the surcharge fields under the price chart);
+    // spot alone is a fraction of the bill. Falls back to spot if no fees set.
+    const kwhEl = document.getElementById('kwh-price');
+    if (elprisNow && elprisNow.nowTotal != null) {
+      const local = elprisNow.currency && elprisNow.currency !== 'USD'
+        ? ` (${elprisNow.nowTotalLocal.toFixed(2)} ${elprisNow.currency})` : '';
+      kwhEl.textContent = `⚡ electricity $${elprisNow.nowTotal.toFixed(3)}/kWh${local} right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''} · spot $${elprisNow.nowVal.toFixed(3)}`;
+      kwhEl.title = 'Total = (spot + grid fee + energy tax) + VAT on all of it, using the fee and VAT fields under the electricity price chart. Spot alone is only part of what the bill charges per kWh.';
+    } else {
+      kwhEl.textContent = elprisNow && elprisNow.nowVal != null
+        ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh spot right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';
+      kwhEl.title = 'Spot price only - set grid fee, energy tax and VAT under the electricity price chart to see the full price.';
+    }
     // Prefer the live gauge's method: the CSV's first row after a restart is
     // always the estimate (macmon's log is empty at that instant).
     const powerMethod = lastPowerMethod || (energy.latest && energy.latest.power_method) || 'soc+baseline';
