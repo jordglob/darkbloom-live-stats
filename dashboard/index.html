@@ -1730,6 +1730,10 @@ function modelActionsCell(m) {
       button = btn('serve', label, 'One click: downloads if needed, switches the provider (running jobs finish first, no restart) and loads the model.',
         blocked || (!l.downloaded && (l.disk_ok === false || m.size_gb == null)));
     }
+  } else if (!l.loaded) {
+    // Selected but its load failed (or it was unloaded after idling) - the
+    // network keeps sending it jobs, so offer the retry right here.
+    button = btn('load', 'Load now', 'Load the model into memory. If it fails with "Insufficient memory", free memory first and try again.');
   } else if (hostedCount > 1) {
     button = btn('deactivate', 'Stop serving', 'Stop offering this model; the other models keep serving.');
   }

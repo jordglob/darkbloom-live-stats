@@ -1,5 +1,11 @@
 # Changelog
 
+## v61
+
+**A selected model whose load failed now has a Load now button.** After v60's one-click Serve, qwen3.6 ended up as the only selected model but not loaded ("Insufficient memory (29.7 GB free, need 30.3 GB)"), and its row had no button at all - the only way to retry was the terminal. Rows in the state Selected, not loaded now offer **Load now**.
+
+Why that load failed with nothing else loaded: Darkbloom's "free" counts macOS's *active* pages as used, and switching reads every weight file to hash it, so ~12 GB of model file cache sat in active memory (darkbloom itself: 121 MB; all processes together ~3 GB). 48 - 4 reserve - 12 active - 2.3 wired ≈ 29.7 GB. `sudo purge` releases that cache.
+
 ## v60
 
 **One click to serve a model, and the button says what it will do.** The Network Model Demand panel had Download / Activate / Replace / Deactivate / Load plus a confirm click - four or five clicks before a new model was earning, and it wasn't clear which ones were needed. Each row now has a single button labelled with its effect: **Serve alongside gpt-oss-20b**, **Serve instead of gpt-oss-20b**, or **Download 16 GB & serve instead of …**. One click downloads if needed, switches (running jobs finish first, no restart), writes the plist, and loads the model, reporting each stage under the button. Hosted models get **Stop serving** when others remain. The state reads Serving / Selected, not loaded / Downloaded / Not downloaded.
