@@ -2784,6 +2784,35 @@ def annotate_model_demand(data):
     return out
 
 
+def annotate_disk_usage(disk):
+    """Adds to each downloaded model whether it is still in the coordinator
+    catalog (if not, it can be neither served nor downloaded again) and its
+    share of network demand. Demand comes only from the already cached 24h
+    Network Model Demand data - /api/data must never wait on that API; the
+    page fetches it on load, so it is normally there."""
+    if not disk:
+        return disk
+    catalog = get_model_catalog()
+    with _model_demand_lock:
+        cached = _model_demand_cache.get("24h")
+    demand = (cached or {}).get("data", {}).get("models") or []
+    total = sum(m.get("requests") or 0 for m in demand)
+    models = []
+    not_in_catalog_gb = 0.0
+    for m in disk.get("models", []):
+        m = dict(m)
+        m["in_catalog"] = (m.get("id") or "").lower() in catalog if catalog else None
+        match = next((d for d in demand if _matches_public_model(m.get("id") or "", d.get("model", ""))), None)
+        m["demand_share"] = round((match.get("requests") or 0) / total * 100, 1) if match and total else (0.0 if demand else None)
+        if m["in_catalog"] is False and not m.get("active"):
+            not_in_catalog_gb += m.get("size_gb") or 0
+        models.append(m)
+    out = dict(disk)
+    out["models"] = models
+    out["not_in_catalog_gb"] = round(not_in_catalog_gb, 1)
+    return out
+
+
 def _local_day_bounds(date_obj):
     tz = datetime.now().astimezone().tzinfo
     start = datetime(date_obj.year, date_obj.month, date_obj.day, tzinfo=tz)
@@ -3514,7 +3543,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "live_power": get_live_power(),
                 "account": get_account_data(),
                 "utilization": get_utilization(),
-                "disk": get_disk_usage(),
+                "disk": annotate_disk_usage(get_disk_usage()),
                 "daemon_state": get_daemon_state(),
                 "autostart": get_autostart_state(),
                 "doctor": get_doctor_report(),

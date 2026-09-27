@@ -1553,6 +1553,17 @@ function copyCmd(cmd, btn) {
   }
 }
 
+// Same demand thresholds as the Fit column in Network Model Demand.
+function diskAdvice(m) {
+  if (m.in_catalog === false) return '<span style="color:var(--status-critical)">Not in the catalog - can\'t be served or re-downloaded. Safe to remove.</span>';
+  if (m.active) return 'Hosted now.';
+  const d = m.demand_share;
+  if (d == null) return 'Demand not loaded yet.';
+  if (d >= 15) return `<span style="color:var(--status-good)">High demand - keep if you may switch to it; ${m.size_gb} GB to download again.</span>`;
+  if (d >= 3) return `Some demand - removable, ${m.size_gb} GB to download again.`;
+  return 'Low demand - safe to remove, can be downloaded again.';
+}
+
 function renderDisk(disk) {
   const el = document.getElementById('disk');
   if (!disk || !disk.models || disk.models.length === 0) {
@@ -1561,16 +1572,18 @@ function renderDisk(disk) {
   }
   const unused = disk.models.filter(m => !m.active);
   el.innerHTML = `
-    ${unused.length ? `<div class="rotation-summary">${unused.length} model${unused.length === 1 ? '' : 's'} not currently in use — ${disk.unused_total_gb} GB reclaimable</div><div class="rotation-summary" style="color:var(--text-muted)" title="Darkbloom downloads models on its own as the network assigns them, so having several here is normal. Removing an unused one only frees disk; if that model is ever assigned again, darkbloom downloads it again. This page never deletes anything itself - the button only copies the command for you to run.">Darkbloom downloaded these itself. Unused ones are safe to remove — it re-downloads if needed. <span style="opacity:.6">(hover for details)</span></div>` : `<div class="rotation-summary">Only the active model is downloaded — nothing to reclaim.</div>`}
+    ${unused.length ? `<div class="rotation-summary">${unused.length} model${unused.length === 1 ? '' : 's'} not currently in use — ${disk.unused_total_gb} GB reclaimable</div>${disk.not_in_catalog_gb ? `<div class="rotation-summary"><strong>${disk.not_in_catalog_gb} GB</strong> of it is models no longer in Darkbloom's catalog - they can't be served, so there is no reason to keep them.</div>` : ''}<div class="rotation-summary" style="color:var(--text-muted)" title="Removing an unused model only frees disk. Models still in the catalog can be downloaded again (Network Model Demand panel), which costs their full size in download; models no longer in the catalog cannot, but they can't be served either. Demand is the model's share of published network requests over the last 24h. This page never deletes anything itself - the button only copies the command for you to run.">Unused doesn't mean worthless: check demand before removing - a model in high demand costs its full size to download again. <span style="opacity:.6">(hover for details)</span></div>` : `<div class="rotation-summary">Only the active model is downloaded — nothing to reclaim.</div>`}
     <div class="table-scroll">
     <table class="rotation-table">
-      <thead><tr><th>Model</th><th>Size</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>Model</th><th>Size</th><th>Status</th><th title="Share of published network requests over the last 24h (Network Model Demand).">Demand 24h</th><th>Advice</th><th></th></tr></thead>
       <tbody>
         ${disk.models.map(m => `
           <tr>
             <td>${m.id}</td>
             <td>${m.size_gb} GB</td>
             <td>${m.active ? '<span class="cut-negative">active</span>' : 'unused'}</td>
+            <td>${m.demand_share == null ? '–' : m.demand_share.toFixed(1) + '%'}</td>
+            <td class="fit-reason" style="margin:0">${diskAdvice(m)}</td>
             <td>${m.active ? '' : `<button class="copy-cmd-btn" onclick="copyRemoveCmd('${m.id}', this)" title="Copies the removal command - run it yourself in Terminal, this dashboard never deletes files for you">Copy remove command</button>`}</td>
           </tr>
         `).join('')}

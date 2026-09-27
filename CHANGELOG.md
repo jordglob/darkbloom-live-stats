@@ -1,5 +1,13 @@
 # Changelog
 
+## v58
+
+**Disk Usage no longer calls every unused model "safe to remove - it re-downloads if needed".** That was wrong in both directions on 2026-09-27: `qwen3-vl-30b-a3b-instruct` (18.3 GB) is no longer in Darkbloom's catalog, so it can't be downloaded again - but it can't be served either, so it is the one model truly worth deleting - while the two qwen models listed as "unused" were the most-demanded models on the network (43% and 24%), and removing them would cost ~20 GB each to get back.
+
+Each downloaded model now has a **Demand 24h** column (its share of published network requests, matched the same way as Network Model Demand, so `gemma-4-26b-qat-4bit` counts `gemma-4-26b`) and an **Advice** line: not in the catalog → safe to remove; ≥15% → keep if you may switch to it; ≥3% → removable, with the re-download size; below that → safe to remove. The summary says how many of the reclaimable GB are models no longer in the catalog.
+
+Demand is read from the already cached 24h demand data only, so `/api/data` never waits on Darkbloom's stats API; until the page has loaded it once, the column shows `–`.
+
 ## v57
 
 **"MAX POWER: level 0 - stopping" no longer fills price-guard.log on every dashboard restart.** The server's exit handler sets the level to 0 as a safety net so a synthetic load can never outlive the dashboard, and that logged the line every time, even with no load running - seven of them on 2026-09-27 from reboots and installs alone, which read as if something had been switched off. It is now logged only when the worker was actually running, as "MAX POWER: stopped (was N%)". The safety net itself is unchanged.
