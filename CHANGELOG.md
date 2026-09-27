@@ -1,5 +1,11 @@
 # Changelog
 
+## v50
+
+**The header now says when each running version went live, not when the page last polled:** `darkbloom 0.9.10 (installed 27 Sep 12:38) · L&S v50 (installed 27 Sep 16:20)`.
+
+The 10-second refresh time is gone from the header; it answered a question nobody asks. The darkbloom time is the watchdog's promotion time (after the build survived its 600s stabilisation window), already in `/api/data` as `version_meta.promoted_at`. The dashboard's own time is the mtime of the installed `server.py`, sent as `dashboard_installed_at` - install.sh and manual deploys both copy the file into place, so that is when the version went live.
+
 ## v49
 
 **The header's timestamp now reads "data refreshed 16:18:05" instead of "updated 16:18:05".** Sitting right after two version numbers, "updated" read as "something was updated at 16:18" - it only ever meant the page's 10-second data refresh. The line also has a tooltip saying so.

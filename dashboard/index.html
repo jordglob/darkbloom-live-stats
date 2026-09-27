@@ -255,7 +255,7 @@
     <h1>Darkbloom Live & Stats</h1>
     <div style="text-align:right;">
       <div id="kwh-price" style="font-size:13px; font-weight:600; color:var(--text-secondary);"></div>
-      <div id="updated" title="Running versions of the Darkbloom provider and of this dashboard, and when this page last fetched fresh numbers (every 10 s). Nothing is installed or updated at that time.">loading…</div>
+      <div id="updated" title="Running versions of the Darkbloom provider and of this dashboard, and when each one went live. For darkbloom that is when the watchdog promoted the build, after it survived its 600s stabilisation window.">loading…</div>
     </div>
   </header>
 
@@ -2956,10 +2956,20 @@ async function refresh() {
       ? `${fmtCompact(tokNow)} tokens · ≈ ${fmtCompact(tokNow * 0.75)} words since ${fmtTime(rows.timestamps[0])}`
       : '';
 
+    // When each running version went live, not when the page last polled.
+    const sinceTxt = ts => {
+      const d = new Date(ts * 1000);
+      const mon = d.toLocaleString('en-US', {month: 'short'});
+      return `${d.getDate()} ${mon} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    };
     const verBits = [];
-    if (status && status.version) verBits.push(`darkbloom ${status.version}`);
-    if (data.dashboard_version) verBits.push(`L&S ${data.dashboard_version}`);
-    verBits.push('data refreshed ' + new Date().toLocaleTimeString('en-GB'));
+    if (status && status.version) {
+      const pm = data.version_meta || {};
+      verBits.push(`darkbloom ${status.version}` + (pm.promoted_at ? ` (installed ${sinceTxt(pm.promoted_at)})` : ''));
+    }
+    if (data.dashboard_version) {
+      verBits.push(`L&S ${data.dashboard_version}` + (data.dashboard_installed_at ? ` (installed ${sinceTxt(data.dashboard_installed_at)})` : ''));
+    }
     document.getElementById('updated').textContent = verBits.join(' · ');
     document.getElementById('kwh-price').textContent = elprisNow && elprisNow.nowVal != null
       ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';
