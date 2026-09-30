@@ -608,15 +608,34 @@ def fault(state, seg, snap, ts):
         return None
     seg.pop("down_since", None)
     if snap.get("pid") and seg.get("pid") and snap["pid"] != seg["pid"]:
-        seg["crashes"] = seg.get("crashes", 0) + 1
         seg["pid"] = snap["pid"]
+        proc = ((read_json(DAEMON_STATE, {}).get("app_attest") or {}).get("process") or {})
+        if proc.get("start_reason") == "update" and proc.get("previous_exit") == "clean":
+            # Darkbloom's auto-update drains and restarts the provider cleanly
+            # (0.9.12 -> 0.9.13 at 2026-09-30 20:31 was first counted as a
+            # crash and ended a working nemotron segment). Not the model's fault.
+            seg["updates"] = seg.get("updates", 0) + 1
+            event("provider_updated", arm=seg["arm"], version=snap.get("version"))
+            return None
+        seg["crashes"] = seg.get("crashes", 0) + 1
         event("provider_restarted", arm=seg["arm"], crashes=seg["crashes"])
         if seg["arm"] != BASELINE and (not has_gpt or seg["crashes"] >= 2):
             return f"provider restarted {seg['crashes']}x while serving {', '.join(seg['models'])}"
     # A model of this arm failed to load after we applied it.
     err = read_json(DAEMON_STATE, {}).get("last_model_load_error") or {}
-    if err.get("model") in seg["models"] and (err.get("at") or 0) > seg["applied_at"] \
+    if err.get("model") in seg["models"] and (err.get("at") or 0) > seg.get("reloaded_at", seg["applied_at"]) \
             and err["model"] not in snap.get("warm", []) and seg["arm"] != BASELINE:
+        # Darkbloom unloads idle models and reloads on the next job; that
+        # reload can fail on file cache alone (gemma, 2026-09-30 18:06, five
+        # minutes after loading fine). Free the cache and load once more
+        # before blaming the model.
+        if seg.get("reloads", 0) < 1:
+            seg["reloads"] = seg.get("reloads", 0) + 1
+            ok, msg, sec = apply_models(seg["models"], "experiment reload after load error")
+            seg["reloaded_at"] = now()
+            event("reload", arm=seg["arm"], ok=ok, message=msg, error=str(err.get("message", ""))[:150])
+            if ok:
+                return None
         return "load error: " + str(err.get("message", ""))[:150]
     if since < SETTLE_MIN * 60:
         return None

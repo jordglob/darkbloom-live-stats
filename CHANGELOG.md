@@ -1,5 +1,12 @@
 # Changelog
 
+## v75
+
+**The experiment no longer blames a model for Darkbloom's own restarts and cache hiccups.** The first day ended two segments early for reasons that had nothing to do with the model:
+
+- **Auto-update counted as a crash.** At 20:31 the provider drained and updated itself from 0.9.12 to 0.9.13. `daemon-state.json` says `start_reason: update`, `previous_exit: clean`. The new PID looked like a crash, so nemotron was cut off after 45 minutes and 5 paid jobs, and blacklisted as `load_failed`. A clean update restart is now logged as `provider_updated` and the segment continues. Nemotron has been reset to ready, and the correction is noted in `events.jsonl`.
+- **One failed reload ended a scheduled arm.** gemma-4-26b (arm E, block d1s2) loaded fine at 18:01. Five minutes later, a reload (Darkbloom unloads idle models) failed with "Insufficient memory (19.9 GB free, need 23.9 GB)", and the arm ended at once. A load error now first triggers one more purge-and-load. Only a second failure ends the segment.
+
 ## v74
 
 **The GPU gauge shows load, not just time awake.** "GPU Busy" was powermetrics' GPU active residency, the share of time the GPU is awake at any clock. With no inference at all (2026-09-30 15:23, 0 jobs since the last switch), it read 28-35%, because the window server, RustDesk screen sharing and this page's redraws keep the GPU awake at its lowest clock (338 MHz) for about 0.2 W. The gauge is now **GPU Load**: residency × average active clock ÷ top clock (1578 MHz on an M4 Pro, taken from the frequency steps powermetrics lists). The same moment reads 7%. A line under the gauge shows the raw figures ("awake 34% at 338 of 1578 MHz"). `/api/power` adds `gpu_load_pct`, `gpu_active_mhz` and `gpu_max_mhz`; `gpu_active_pct` is unchanged. The "Serving load (last hour)" gauge still averages plain residency from the energy log.
