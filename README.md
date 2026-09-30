@@ -99,6 +99,10 @@ machine it runs on:
 - **Real earnings vs. cost, last 48h** - every ledger entry Darkbloom paid
   (including the base reward for being online) added up against measured
   electricity cost. The one chart that lines up with your real balance
+- **Permanent ledger archive** - the dashboard itself works on a rolling 48h
+  window, but every ledger entry it sees is also appended to
+  `~/.darkbloom/earnings-archive/earnings-YYYY-MM.jsonl` and never pruned,
+  so per-model earnings can be compared over weeks (~1.5 MB per busy day)
 - **Real whole-system power** - with [`macmon`](https://github.com/vladkens/macmon)
   installed, cost tracking uses the Mac's own SMC system-power sensor (RAM,
   SSD, fans included) instead of CPU+GPU plus a guess. Measured on an M4 Pro

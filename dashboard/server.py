@@ -116,6 +116,10 @@ ACCOUNT_API_LIMIT = 1000
 ACCOUNT_POLL_INTERVAL_SEC = 30  # how often we actually hit Darkbloom's API
 EARNINGS_HISTORY_PATH = HOME / ".darkbloom" / "earnings-history.jsonl"
 EARNINGS_HISTORY_MAX_AGE_SEC = 48 * 3600  # keep 2 days locally, margin over the ~36h target
+# Permanent, append-only copy of every ledger entry ever seen, one file per
+# month (by created_at, UTC). Never pruned or rewritten - the 48h file above
+# is rewritten on every poll, so it can't grow without bound; this one can.
+EARNINGS_ARCHIVE_DIR = HOME / ".darkbloom" / "earnings-archive"
 
 SAMPLE_HEADER_RE = re.compile(r"\*\*\* Sampled system activity \((.+?)\) \((.+?)\) \*\*\*")
 GPU_ACTIVE_RESIDENCY_RE = re.compile(r"^GPU HW active residency:\s*([\d.]+)%")
@@ -2052,6 +2056,14 @@ def _update_earnings_history(fresh_entries):
                             continue
         except Exception:
             existing = {}
+        # Seed the archive from the current 48h file the first time, so
+        # history already collected isn't lost when the archive ships.
+        if not EARNINGS_ARCHIVE_DIR.exists():
+            _append_to_earnings_archive(existing.values())
+        _append_to_earnings_archive(
+            e for e in fresh_entries
+            if e.get("id") is not None and e["id"] not in existing
+        )
         for e in fresh_entries:
             if e.get("id") is not None:
                 existing[e["id"]] = e
@@ -2070,6 +2082,27 @@ def _update_earnings_history(fresh_entries):
                     f.write(json.dumps(e) + "\n")
         except Exception:
             pass
+
+
+def _append_to_earnings_archive(entries):
+    """Appends entries to the monthly archive files. Callers pass only ids
+    not already in the 48h file, so an entry is archived once: the API only
+    ever returns the most recent 1000, all younger than that file's window."""
+    by_month = {}
+    for e in entries:
+        month = str(e.get("created_at", ""))[:7] or "unknown"
+        by_month.setdefault(month, []).append(e)
+    if not by_month:
+        return
+    try:
+        EARNINGS_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        for month, rows in by_month.items():
+            rows.sort(key=lambda e: (e.get("created_at", ""), e.get("id", 0)))
+            with open(EARNINGS_ARCHIVE_DIR / f"earnings-{month}.jsonl", "a") as f:
+                for e in rows:
+                    f.write(json.dumps(e) + "\n")
+    except Exception:
+        pass
 
 
 def _load_earnings_history():

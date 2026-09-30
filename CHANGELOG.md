@@ -1,5 +1,9 @@
 # Changelog
 
+## v69
+
+**Every ledger entry is now kept for good, not just 48 hours.** Darkbloom's API returns only the latest 1000 entries, and the dashboard's own copy (`earnings-history.jsonl`) is pruned to 48 h, since it is rewritten on every poll. That was too short to check a question like "does serving two models at once lower demand over a week?" (asked 2026-09-30, when per-model data only went back to 09-28 17:10). New entries are now also appended to `~/.darkbloom/earnings-archive/earnings-YYYY-MM.jsonl` (one file per month by `created_at`, UTC), which is never pruned or rewritten. On first start the archive is seeded with what the 48h file already holds. Growth is roughly 1.5 MB per busy day. Nothing on the page changes.
+
 ## v68
 
 **The GPU Temp & Fan chart no longer loses the last day after a restart.** The chart takes the last 24 h of temperature from macmon's ~5 s log and older ages from the 5-minute CSV. But `energy-monitor.sh` empties the macmon log every time it starts (reboot, `install.sh`), so right after a restart macmon held only a few minutes and the temperature line jumped straight from a day ago to "now" (seen 2026-09-27 after a reboot and two installs: an 80 °C inference stretch ten minutes earlier was missing). The CSV now fills in everything older than macmon's first sample.
