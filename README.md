@@ -99,6 +99,10 @@ machine it runs on:
 - **Real earnings vs. cost, last 48h** - every ledger entry Darkbloom paid
   (including the base reward for being online) added up against measured
   electricity cost. The one chart that lines up with your real balance
+- **Model experiment** - `experiment.py` switches between fixed sets of models
+  in randomized 3-hour blocks over 8 days and reports jobs, pay, base reward
+  and network-demand index per arm (`python3 ~/.darkbloom/experiment.py
+  plan` to start, `report` to read, pause/resume in the panel)
 - **Permanent ledger archive** - the dashboard itself works on a rolling 48h
   window, but every ledger entry it sees is also appended to
   `~/.darkbloom/earnings-archive/earnings-YYYY-MM.jsonl` and never pruned,

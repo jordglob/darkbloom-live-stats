@@ -2941,6 +2941,65 @@ def start_model_action(action, public_id):
     return True, "Started"
 
 
+def set_hosted_models(models, reason=""):
+    """Host exactly `models` (switch if the set differs) and load each one.
+    Synchronous, for scripts such as experiment.py; the page's buttons go
+    through start_model_action's background jobs instead. Returns (ok, msg)."""
+    models = [m for m in models if m]
+    if not models:
+        return False, "No models given"
+    local = _local_model_inventory()
+    missing = [m for m in models if m not in local]
+    if missing:
+        return False, "Not downloaded: " + ", ".join(missing)
+    if _model_switch_lock.locked():
+        return False, "Another model switch is in progress"
+    log_model_action(f"START: set {', '.join(models)}" + (f" ({reason})" if reason else ""))
+    try:
+        hosted, _ = _daemon_model_state()
+        if sorted(hosted) != sorted(models):
+            # Only one set of weights fits at a time when swapping between
+            # ~30 GB models, and the switch hashes every weight file, which
+            # fills the file cache Darkbloom counts as used.
+            if purge_available():
+                purge_file_cache()
+            _run_switch(models)
+        for m in models:
+            _run_load(m)
+    except Exception as e:
+        log_model_action(f"ERROR: set {', '.join(models)}: {e}")
+        return False, str(e)
+    log_model_action(f"OK: set {', '.join(models)}")
+    return True, "Serving " + ", ".join(models)
+
+
+EXPERIMENT_SCRIPT = HOME / ".darkbloom" / "experiment.py"
+
+
+def experiment_view():
+    """Status and the last day's report from experiment.py, for the panel."""
+    if not EXPERIMENT_SCRIPT.exists():
+        return {"installed": False}
+    def run(*args):
+        r = subprocess.run([sys.executable, str(EXPERIMENT_SCRIPT), *args],
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout
+    try:
+        status = json.loads(run("status"))
+    except Exception as e:
+        return {"installed": True, "error": str(e)}
+    return {"installed": True, "status": status, "report": run("report", "--hours", "24") if status.get("planned") else ""}
+
+
+def experiment_action(action):
+    if action not in ("pause", "resume") or not EXPERIMENT_SCRIPT.exists():
+        return False, "Unknown action"
+    r = subprocess.run([sys.executable, str(EXPERIMENT_SCRIPT), action, "from the dashboard"] if action == "pause"
+                       else [sys.executable, str(EXPERIMENT_SCRIPT), action],
+                       capture_output=True, text=True, timeout=30)
+    return r.returncode == 0, (r.stdout or r.stderr).strip()
+
+
 def _recommend_model(m, share, ctx):
     """Suitability for this Mac: does it fit (RAM, disk, next to what is
     already hosted) and is there enough network demand to be worth it.
@@ -3885,6 +3944,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/api/model_demand"):
             m = re.search(r"[?&]window=([0-9a-z]+)", self.path)
             self._send_json(annotate_model_demand(get_model_demand(m.group(1) if m else "24h")))
+        elif self.path == "/api/experiment":
+            self._send_json(experiment_view())
         elif self.path == "/api/price_guard":
             cfg = read_price_guard_config()
             live = _evaluate_price_guard(cfg)
@@ -3963,6 +4024,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
             ok, msg = start_model_action(str(body.get("action", "")), str(body.get("model", "")))
+            self._send_json({"ok": ok, "message": msg})
+
+        elif self.path == "/api/model_set":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            ok, msg = set_hosted_models([str(m) for m in body.get("models") or []], str(body.get("reason", "")))
+            self._send_json({"ok": ok, "message": msg})
+
+        elif self.path == "/api/experiment":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            ok, msg = experiment_action(str(body.get("action", "")))
             self._send_json({"ok": ok, "message": msg})
 
         elif self.path == "/api/free_memory":

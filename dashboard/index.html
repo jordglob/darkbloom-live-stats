@@ -368,6 +368,11 @@
   </div>
 
   <div class="panel">
+    <h2 title="Pre-registered, randomized experiment: every 3 hours ~/.darkbloom/experiment.py switches to the next arm (a fixed set of models) and records paid jobs, base reward and network demand, to learn which models get traffic here and whether a second model hurts gpt-oss. Learning first, income second - blocks run their full length even when an arm earns nothing.">Model Experiment <span id="experiment-when" class="gauge-time"></span></h2>
+    <div id="experiment"></div>
+  </div>
+
+  <div class="panel">
     <h2 title="Periodically pings the provider's local endpoint to keep the active model loaded in memory, so it's ready the instant real traffic arrives.">Warmup</h2>
     <div id="warmup"></div>
   </div>
@@ -904,6 +909,36 @@ function renderWarmup(warmup) {
       postWarmupConfig({ models });
     });
   });
+}
+
+function renderExperiment(d) {
+  const el = document.getElementById('experiment');
+  if (!d || !d.installed) { el.innerHTML = '<div class="warmup-status">Not installed.</div>'; return; }
+  if (d.error) { el.innerHTML = `<div class="warmup-status">Error: ${escapeHtml(d.error)}</div>`; return; }
+  const st = d.status;
+  if (!st.planned) { el.innerHTML = '<div class="warmup-status">No experiment planned. Run <code>python3 ~/.darkbloom/experiment.py plan</code>.</div>'; return; }
+  const hhmm = s => s ? s.slice(11, 16) : '';
+  const cur = st.current;
+  let line = st.finished ? 'Finished - back on gpt-oss alone.'
+    : cur ? `Now <strong>${escapeHtml(cur.id)}</strong>: arm ${cur.arm} · ${escapeHtml(cur.label)} until ${hhmm(new Date(cur.end * 1000).toTimeString())}`
+          + (cur.applied && cur.applied.fell_back ? ' · <span style="color:var(--status-serious)">could not switch, running gpt-oss</span>' : '')
+    : 'Waiting for the first block.';
+  if (st.next) line += ` · next ${escapeHtml(st.next.id)} (${escapeHtml(st.next.label)}) at ${escapeHtml(st.next.start_local.slice(5, 16).replace('T', ' '))}`;
+  const btn = st.paused
+    ? `<button class="copy-cmd-btn" style="font-size:12px;padding:4px 10px" onclick="postExperiment('resume')">Resume experiment</button> <span class="warmup-status" style="color:var(--status-serious)">Paused: ${escapeHtml(st.pause_reason || '')}</span>`
+    : `<button class="copy-cmd-btn" style="font-size:12px;padding:4px 10px" onclick="postExperiment('pause')">Pause experiment (keep current models)</button>`;
+  el.innerHTML = `<div class="warmup-status">${line} · ${st.blocks_done}/${st.blocks_total} blocks done</div>
+    <div class="warmup-row">${btn}</div>
+    <details><summary class="warmup-status" style="cursor:pointer">Report, last 24 h</summary><pre class="warmup-log" style="max-height:420px;white-space:pre">${escapeHtml(d.report || '')}</pre></details>`;
+}
+
+async function refreshExperiment() {
+  try { renderExperiment(await (await fetch('/api/experiment')).json()); } catch (e) {}
+}
+
+async function postExperiment(action) {
+  try { await fetch('/api/experiment', { method: 'POST', body: JSON.stringify({ action }) }); } catch (e) {}
+  refreshExperiment();
 }
 
 async function postWarmupConfig(body) {
@@ -3235,6 +3270,7 @@ refreshPowerFast();
 refreshWarmup();
 refreshPriceGuard();
 refreshModelDemand();
+refreshExperiment();
 renderChat();
 refreshServingPulse();
 setInterval(refreshServingPulse, 1000);
@@ -3244,6 +3280,7 @@ setInterval(refreshPowerFast, POWER_FAST_REFRESH_MS);
 setInterval(refreshWarmup, 15000);
 setInterval(refreshPriceGuard, 15000);
 setInterval(refreshModelDemand, 10 * 60 * 1000);
+setInterval(refreshExperiment, 60 * 1000);
 </script>
 </body>
 </html>
