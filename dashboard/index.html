@@ -1857,36 +1857,65 @@ function setDemandWindow(w) {
   refreshModelDemand();
 }
 
-function renderPayoutMeter(cs) {
-  // Expected (our own per-token estimate) vs. actual (what Darkbloom's ledger
-  // paid) for the same token jobs. A calibration check on our guess - not a
-  // fee, not a claim about Darkbloom - so the wording keeps saying so.
-  const expected = cs && cs.total_local_estimate_usd;
-  const actual = cs && cs.total_real_usd;
-  if (expected == null || actual == null || (expected <= 0 && actual <= 0)) return '';
-  const gapPct = expected > 0 ? ((expected - actual) / expected) * 100 : null;
-  const max = Math.max(expected, actual, 1e-9);
-  const bar = (label, value, color) => `
+function renderPayoutMeter(cs, cc) {
+  // Served vs. paid: the provider's own counters against the paid ledger
+  // entries over the same span. A gap is work done here that Darkbloom did
+  // not pay for - failed or rejected jobs. The per-token estimate check that
+  // used to be the whole panel is kept as one line underneath.
+  const rateLine = (() => {
+    const expected = cs && cs.total_local_estimate_usd;
+    const actual = cs && cs.total_real_usd;
+    if (!(expected > 0) || actual == null) return '';
+    const gap = (expected - actual) / expected * 100;
+    const text = Math.abs(gap) <= 10 ? `within ${Math.abs(gap).toFixed(0)}%` : `ran ${Math.abs(gap).toFixed(0)}% ${gap > 0 ? 'high' : 'low'}`;
+    return `<div style="font-size:11px;color:var(--text-muted);margin-top:4px" title="Tokens in the paid jobs × one flat rate per million tokens, calibrated from past payouts, against what those same jobs paid. Only a check on our own price guess: failed jobs are not in the ledger, so they cannot show up here.">Our per-token price estimate ${text} for the paid jobs (calibration only, not a failure signal).</div>`;
+  })();
+  if (!cc) return rateLine ? `<div class="rotation-summary" style="margin:10px 0">${rateLine}</div>` : '';
+  const since = new Date(cc.since * 1000);
+  const sameDay = since.toDateString() === new Date().toDateString();
+  const sinceText = since.toLocaleString('en-GB', sameDay ? { hour: '2-digit', minute: '2-digit' } : { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const partial = cc.archive_starts != null && cc.archive_starts > cc.since + 60;
+  const gap = cc.served_jobs - cc.paid_jobs;
+  let verdict, color;
+  if (partial) {
+    verdict = 'ledger archive starts after this provider run - comparison incomplete';
+    color = 'var(--text-muted)';
+  } else if (cc.served_jobs === 0) {
+    verdict = 'no jobs served since the provider started';
+    color = 'var(--text-muted)';
+  } else if (gap > cc.tolerance_jobs) {
+    verdict = `${fmtNum(gap)} of ${fmtNum(cc.served_jobs)} served jobs (${(gap / cc.served_jobs * 100).toFixed(1)}%) never showed up as paid`;
+    color = 'var(--status-serious)';
+  } else if (gap < -cc.tolerance_jobs) {
+    verdict = `ledger has ${fmtNum(-gap)} more jobs than the provider counted - counter likely reset`;
+    color = 'var(--status-warning)';
+  } else {
+    verdict = `every served job was paid (${fmtNum(cc.paid_jobs)} of ${fmtNum(cc.served_jobs)})`;
+    color = 'var(--status-good)';
+  }
+  const max = (a, b) => Math.max(a, b, 1);
+  const bar = (label, value, top, color) => `
     <div style="display:flex;align-items:center;gap:8px;font-size:12px;margin:3px 0">
       <span style="width:150px;color:var(--text-secondary)">${label}</span>
-      <span style="flex:1;height:10px;background:var(--surface-2,rgba(128,128,128,.15));border-radius:5px;overflow:hidden"><span style="display:block;height:100%;width:${(value / max * 100).toFixed(1)}%;background:${color}"></span></span>
-      <strong style="width:80px;text-align:right">${fmtUsd(value)}</strong>
+      <span style="flex:1;height:10px;background:var(--surface-2,rgba(128,128,128,.15));border-radius:5px;overflow:hidden"><span style="display:block;height:100%;width:${(value / top * 100).toFixed(1)}%;background:${color}"></span></span>
+      <strong style="width:80px;text-align:right">${fmtNum(value)}</strong>
     </div>`;
-  let verdict, verdictColor;
-  if (gapPct == null) { verdict = 'no token jobs in this window yet'; verdictColor = 'var(--text-muted)'; }
-  else if (Math.abs(gapPct) <= 10) { verdict = `estimate within ${Math.abs(gapPct).toFixed(0)}% — well calibrated`; verdictColor = 'var(--status-good)'; }
-  else if (gapPct > 0) { verdict = `estimate ran ${gapPct.toFixed(0)}% high`; verdictColor = 'var(--status-warning)'; }
-  else { verdict = `estimate ran ${Math.abs(gapPct).toFixed(0)}% low`; verdictColor = 'var(--status-warning)'; }
-  const tip = 'Expected = tokens served × a flat rate per million tokens, which this dashboard calibrates from your own past payouts (currently $0.048/M, last recalibrated 2026-09-10). Actual = what Darkbloom\'s ledger really paid for those same jobs. The gap measures how good OUR guess is - it is not a fee and not a claim about Darkbloom, whose alpha terms advertise 0%. Base reward is left out on both sides since it is not paid per token. A drifting gap usually means the network\'s pricing or the prompt/reply mix has shifted and the rate needs recalibrating. Per-model detail: tick "Show estimate columns" below.';
+  const jobsMax = max(cc.served_jobs, cc.paid_jobs);
+  const tokMax = max(cc.served_tokens, cc.paid_tokens);
+  const gaps = cc.usage_gaps ? ` · <span style="color:var(--status-warning)">provider reports ${cc.usage_gaps} usage gap${cc.usage_gaps === 1 ? '' : 's'}</span>` : '';
+  const tip = `Served = the provider's own counters (requests_served, tokens_generated) since it last started. Paid = ledger entries in the same span, base reward left out. If Darkbloom does not pay for a job this Mac finished - it failed, timed out or was rejected - the served side runs ahead. The ledger is polled every 30 s, so a few of the newest jobs may be missing for a moment (allowed: ${cc.tolerance_jobs}). A job lost before the provider counted it (a crash mid-job) shows as a provider restart instead.`;
   return `
     <div class="rotation-summary" style="margin:10px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px" title="${tip.replace(/"/g, '&quot;')}">
       <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;margin-bottom:4px">
-        <strong>Expected vs. actual payout</strong>
-        <span style="color:${verdictColor}">${verdict}</span>
-        <span style="font-size:11px;color:var(--text-muted)">recent window, token jobs only <span style="opacity:.6">(hover for details)</span></span>
+        <strong>Served vs. paid</strong>
+        <span style="color:${color}">${verdict}</span>
+        <span style="font-size:11px;color:var(--text-muted)">since the provider started, ${escapeHtml(sinceText)}${gaps} <span style="opacity:.6">(hover for details)</span></span>
       </div>
-      ${bar('Expected (our estimate)', expected, 'var(--series-revenue)')}
-      ${bar('Actual (Darkbloom paid)', actual, 'var(--series-cost)')}
+      ${bar('Jobs served here', cc.served_jobs, jobsMax, 'var(--series-revenue)')}
+      ${bar('Jobs paid', cc.paid_jobs, jobsMax, 'var(--series-cost)')}
+      ${bar('Tokens generated', cc.served_tokens, tokMax, 'var(--series-revenue)')}
+      ${bar('Tokens paid', cc.paid_tokens, tokMax, 'var(--series-cost)')}
+      ${rateLine}
     </div>`;
 }
 
@@ -1963,7 +1992,7 @@ function renderAccount(account) {
       Balance: <strong>${fmtUsd(parseFloat(account.balance_usd))}</strong> · Earned all-time: <strong>${fmtUsd(parseFloat(account.lifetime_usd))}</strong> · ${fmtNum(account.total_jobs)} jobs <span style="opacity:.6">(hover for details)</span>
     </div>
     ${plainLine ? `<div class="rotation-summary">${plainLine}</div>` : ''}
-    ${renderPayoutMeter(cs)}
+    ${renderPayoutMeter(cs, account.completion_check)}
     <div class="table-scroll">
     <table class="rotation-table">
       <thead>

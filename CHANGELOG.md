@@ -1,5 +1,9 @@
 # Changelog
 
+## v72
+
+**"Expected vs. actual payout" is now "Served vs. paid", and it can actually spot failed jobs.** The old meter compared tokens × our flat rate with what the same ledger entries paid. Both sides came from the ledger, so a job that failed and was never paid showed up on neither side. It only ever measured our price guess, although it looked like a check on whether jobs were paid. The panel now compares the provider's own counters (`requests_served`, `tokens_generated` in `daemon-state.json`, since the provider last started) with the paid ledger entries (base reward left out) over the same span, read from the permanent archive (v69), since a provider run can outlast the 48h history. When Darkbloom does not pay for work this Mac did, the served bars run ahead and the verdict turns red. A few of the newest jobs may be missing for a moment while the ledger is polled, so the check allows a gap of 3 jobs or 1%, whichever is larger. The provider's `usage_gaps` count is shown when it is non-zero. The per-token estimate check stays as one small line underneath, labelled as calibration only. On 2026-09-30 the numbers were 894 served and 892 paid since 07:21.
+
 ## v71
 
 **The model experiment ends a block early when this Mac isn't doing the job, and tests new models in the freed time.** Changed before the first block ran, and recorded as an amendment in `protocol.json`. A block is now a list of segments. The scheduled arm is ended when the provider crashes or restarts (at once for arms without gpt-oss, after two restarts for arms with it), when one of its models fails to load, when requests are served locally but under half of them show up as paid in the ledger after 30 minutes, or when the provider has not reported for 20 minutes. Arms without gpt-oss also end after 90 minutes without a paid job. gpt-oss arms never end for lack of traffic, because those gaps are what H3 is about.

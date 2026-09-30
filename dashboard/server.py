@@ -2025,7 +2025,80 @@ def _build_account_view(raw, age_sec):
             "cut_pct": ((total_local_est - total_real) / total_local_est * 100) if total_local_est > 0 else None,
         },
         "hourly_rate_comparison": _compute_hourly_rate_comparison(raw, get_inference_duration_stats()),
+        "completion_check": get_completion_check(),
     }
+
+
+# The ledger is polled every 30 s, so the newest few served jobs may not be
+# in it yet; the page allows this many (or 1%) before calling it a gap.
+COMPLETION_CHECK_TOLERANCE_JOBS = 3
+_completion_cache = {"at": 0.0, "data": None}
+
+
+def get_completion_check():
+    """Did the jobs this Mac served get paid? Compares the provider's own
+    counters (requests_served, tokens_generated, since the daemon started)
+    with the paid ledger entries in the same span. A gap means work done
+    here that Darkbloom did not count - a failing job, or one it rejected.
+    Jobs lost before the provider counted them (a crash mid-job) do not show
+    here; restarts do, as a short span. Uses the permanent archive, since a
+    provider run can outlast the 48h history."""
+    now = time.time()
+    if _completion_cache["data"] is not None and now - _completion_cache["at"] < 30:
+        return _completion_cache["data"]
+    try:
+        d = json.loads(DAEMON_STATE_PATH.read_text())
+    except Exception:
+        return None
+    started, written = d.get("started_at"), d.get("written_at")
+    stats = d.get("stats") or {}
+    if not started or not written or stats.get("requests_served") is None:
+        return None
+    served_jobs = stats["requests_served"]
+    served_tokens = stats.get("tokens_generated") or 0
+    paid_jobs = paid_tokens = 0
+    paid_usd = 0.0
+    months = {time.strftime("%Y-%m", time.gmtime(t)) for t in (started, written)}
+    seen = set()
+    for month in sorted(months):
+        path = EARNINGS_ARCHIVE_DIR / f"earnings-{month}.jsonl"
+        if not path.exists():
+            continue
+        with open(path) as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                    if e.get("model") == "base_reward" or e.get("id") in seen:
+                        continue
+                    t = _parse_iso_ts(e["created_at"])
+                except Exception:
+                    continue
+                if started <= t <= written:
+                    seen.add(e.get("id"))
+                    paid_jobs += 1
+                    paid_tokens += e.get("completion_tokens") or 0
+                    paid_usd += (e.get("amount_micro_usd") or 0) / 1e6
+    data = {
+        "since": started,
+        "until": written,
+        "served_jobs": served_jobs,
+        "paid_jobs": paid_jobs,
+        "served_tokens": served_tokens,
+        "paid_tokens": paid_tokens,
+        "paid_usd": paid_usd,
+        "usage_gaps": stats.get("usage_gaps"),
+        "tolerance_jobs": max(COMPLETION_CHECK_TOLERANCE_JOBS, round(served_jobs * 0.01)),
+        "archive_starts": None,
+    }
+    try:
+        first = next(iter(sorted(EARNINGS_ARCHIVE_DIR.glob("earnings-*.jsonl"))), None)
+        if first:
+            with open(first) as f:
+                data["archive_starts"] = min(_parse_iso_ts(json.loads(l)["created_at"]) for l in f if l.strip())
+    except Exception:
+        pass
+    _completion_cache.update(at=now, data=data)
+    return data
 
 
 _earnings_history_lock = threading.Lock()
