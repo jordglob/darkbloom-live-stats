@@ -123,6 +123,8 @@ EARNINGS_ARCHIVE_DIR = HOME / ".darkbloom" / "earnings-archive"
 
 SAMPLE_HEADER_RE = re.compile(r"\*\*\* Sampled system activity \((.+?)\) \((.+?)\) \*\*\*")
 GPU_ACTIVE_RESIDENCY_RE = re.compile(r"^GPU HW active residency:\s*([\d.]+)%")
+GPU_ACTIVE_FREQ_RE = re.compile(r"^GPU HW active frequency:\s*([\d.]+)\s*MHz")
+GPU_FREQ_STEP_RE = re.compile(r"([\d.]+) MHz:")
 
 
 MACMON_LOG = HOME / ".darkbloom" / "macmon.jsonl"
@@ -174,6 +176,8 @@ def get_live_power():
     cpu_mw = None
     gpu_mw = None
     gpu_active_pct = None
+    gpu_active_mhz = None
+    gpu_max_mhz = None
     sample_time = None
     for line in chunk.splitlines():
         m = SAMPLE_HEADER_RE.search(line)
@@ -190,6 +194,10 @@ def get_live_power():
                 gpu_mw = float(line.split()[2])
             except (IndexError, ValueError):
                 pass
+        elif line.startswith("GPU HW active frequency:"):
+            m2 = GPU_ACTIVE_FREQ_RE.match(line)
+            if m2:
+                gpu_active_mhz = float(m2.group(1))
         elif line.startswith("GPU HW active residency:"):
             m2 = GPU_ACTIVE_RESIDENCY_RE.match(line)
             if m2:
@@ -197,6 +205,9 @@ def get_live_power():
                     gpu_active_pct = float(m2.group(1))
                 except ValueError:
                     pass
+            steps = [float(x) for x in GPU_FREQ_STEP_RE.findall(line)]
+            if steps:
+                gpu_max_mhz = max(steps)
 
     if cpu_mw is None or gpu_mw is None:
         return None
@@ -230,6 +241,16 @@ def get_live_power():
         # shouldn't break if this section is ever absent.
         "gpu_active_pct": round(gpu_active_pct, 1) if gpu_active_pct is not None else None,
         "headroom_pct": round(100 - gpu_active_pct, 1) if gpu_active_pct is not None else None,
+        # Residency counts time awake at any clock: WindowServer, screen
+        # sharing and a browser redrawing this page keep the GPU awake ~30%
+        # of the time at its lowest clock for ~0.2 W. Weighting by the
+        # average active clock over the top clock gives how much of the
+        # GPU's capacity is in use - near 0 when idle, near 100 under
+        # inference, which runs at or near the top clock.
+        "gpu_active_mhz": round(gpu_active_mhz) if gpu_active_mhz is not None else None,
+        "gpu_max_mhz": round(gpu_max_mhz) if gpu_max_mhz else None,
+        "gpu_load_pct": round(gpu_active_pct * gpu_active_mhz / gpu_max_mhz, 1)
+        if gpu_active_pct is not None and gpu_active_mhz is not None and gpu_max_mhz else None,
     }
 
 UTIL_WINDOW_MIN = 60  # how far back "recent" looks

@@ -1,5 +1,9 @@
 # Changelog
 
+## v74
+
+**The GPU gauge shows load, not just time awake.** "GPU Busy" was powermetrics' GPU active residency, the share of time the GPU is awake at any clock. With no inference at all (2026-09-30 15:23, 0 jobs since the last switch), it read 28-35%, because the window server, RustDesk screen sharing and this page's redraws keep the GPU awake at its lowest clock (338 MHz) for about 0.2 W. The gauge is now **GPU Load**: residency × average active clock ÷ top clock (1578 MHz on an M4 Pro, taken from the frequency steps powermetrics lists). The same moment reads 7%. A line under the gauge shows the raw figures ("awake 34% at 338 of 1578 MHz"). `/api/power` adds `gpu_load_pct`, `gpu_active_mhz` and `gpu_max_mhz`; `gpu_active_pct` is unchanged. The "Serving load (last hour)" gauge still averages plain residency from the energy log.
+
 ## v73
 
 **A candidate download that dies is started again.** Downloads run as a child process of the dashboard, so every `install.sh` (which restarts the dashboard) kills a running download without a trace. On 2026-09-30 the experiment's first candidate, ternary-bonsai-2-27b, started downloading at 13:03, died at a deploy shortly after, and still showed "downloading" at 15:12. It would only have been given up after 3 hours. `experiment.py` now checks on every tick whether a "downloading" candidate still has a `darkbloom models download` process. If it doesn't, the candidate is marked ready when the model is on disk, and otherwise the download is started again, up to 3 attempts. The first block itself (d1s1, qwen3.5-35b alone) switched fine at 15:04.

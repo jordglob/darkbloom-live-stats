@@ -502,8 +502,8 @@ const GAUGES = [
     tooltip: 'Fan RPM, read via `darkbloom fan status` (read-only - does not enable fan control). Apple Silicon does not expose this via powermetrics at all.' },
   { id: 'total', label: 'Total', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total',
     tooltip: 'Whole-Mac power - this is what you pay for. "Measured" = the Mac\'s own SMC system-power sensor (RAM, SSD, fans included) mapped to the wall as ×1.11 + 2.2W, calibrated against a wall meter on an M4 Pro Mac mini (idle 11W, full load ~100W). "Estimated" = CPU+GPU plus a flat 7W guess, used when macmon isn\'t installed - about right at idle, ~2.5x too low under heavy load.' },
-  { id: 'headroom', label: 'GPU Busy', source: 'power', key: 'gpu_active_pct', max: 100, unit: '%', color: '--gauge-total',
-    tooltip: 'How busy the GPU is right now, straight from the GPU active-residency figure powermetrics reports every sample. Previously shown inverted as "GPU Headroom", which read like wasted capacity when it meant the opposite. Idle is not 0%: background OS/WindowServer load alone typically keeps it around 15-25% even at rest, rising toward 100% under real inference.' },
+  { id: 'headroom', label: 'GPU Load', source: 'power', key: 'gpu_load_pct', max: 100, unit: '%', color: '--gauge-total',
+    tooltip: 'How much of the GPU\'s capacity is in use right now: the share of time it is awake (powermetrics "GPU HW active residency") weighted by how fast it runs while awake (average active clock over its top clock). Residency alone read 20-35% at rest, because the window server, screen sharing and this page keep the GPU awake at its lowest clock for about 0.2 W. Weighted by clock that is a few percent, and real inference, which runs at or near the top clock, still reads close to 100%. The line underneath shows both raw figures.' },
   { id: 'cpu', label: 'CPU', source: 'power', key: 'cpu_w', max: 30, unit: 'W', color: '--gauge-cpu' },
   { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
   { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
@@ -648,6 +648,11 @@ function updateGauges(data) {
     if (g.id === 'fan' && detailEl) {
       const mode = fanTemp && fanTemp.fan_mode;
       detailEl.textContent = mode === 'error' ? 'control error - see banner' : mode === 'waiting_for_temperature' ? 'auto' : '';
+    }
+    if (g.id === 'headroom' && detailEl) {
+      detailEl.textContent = power.gpu_active_pct != null && power.gpu_active_mhz != null
+        ? `awake ${power.gpu_active_pct.toFixed(0)}% at ${power.gpu_active_mhz} of ${power.gpu_max_mhz} MHz`
+        : '';
     }
     const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : g.id === 'temp' ? 1 : g.id === 'headroom' ? 1 : 2;
     numEl.textContent = val.toFixed(decimals);
