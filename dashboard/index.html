@@ -921,12 +921,15 @@ function renderExperiment(d) {
   const cur = st.current;
   let line = st.finished ? 'Finished - back on gpt-oss alone.'
     : cur ? `Now <strong>${escapeHtml(cur.id)}</strong>: arm ${cur.arm} · ${escapeHtml(cur.label)} until ${hhmm(new Date(cur.end * 1000).toTimeString())}`
-          + (cur.applied && cur.applied.fell_back ? ' · <span style="color:var(--status-serious)">could not switch, running gpt-oss</span>' : '')
+          + (cur.segment && cur.segment.arm !== cur.arm ? ` · <span style="color:var(--status-serious)">ended early, now ${escapeHtml(cur.segment.label)} (${escapeHtml(cur.segment.reason || '')})</span>` : '')
+          + (cur.segment && !cur.segment.ok ? ' · switching…' : '')
     : 'Waiting for the first block.';
   if (st.next) line += ` · next ${escapeHtml(st.next.id)} (${escapeHtml(st.next.label)}) at ${escapeHtml(st.next.start_local.slice(5, 16).replace('T', ' '))}`;
   const btn = st.paused
     ? `<button class="copy-cmd-btn" style="font-size:12px;padding:4px 10px" onclick="postExperiment('resume')">Resume experiment</button> <span class="warmup-status" style="color:var(--status-serious)">Paused: ${escapeHtml(st.pause_reason || '')}</span>`
     : `<button class="copy-cmd-btn" style="font-size:12px;padding:4px 10px" onclick="postExperiment('pause')">Pause experiment (keep current models)</button>`;
+  const cands = Object.entries(st.candidates || {}).filter(([, v]) => v && !v.startsWith('excluded'));
+  if (cands.length) line += '<br>New models: ' + cands.map(([k, v]) => `${escapeHtml(k)} (${escapeHtml(v)})`).join(', ');
   el.innerHTML = `<div class="warmup-status">${line} · ${st.blocks_done}/${st.blocks_total} blocks done</div>
     <div class="warmup-row">${btn}</div>
     <details><summary class="warmup-status" style="cursor:pointer">Report, last 24 h</summary><pre class="warmup-log" style="max-height:420px;white-space:pre">${escapeHtml(d.report || '')}</pre></details>`;

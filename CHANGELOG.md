@@ -1,5 +1,11 @@
 # Changelog
 
+## v71
+
+**The model experiment ends a block early when this Mac isn't doing the job, and tests new models in the freed time.** Changed before the first block ran, and recorded as an amendment in `protocol.json`. A block is now a list of segments. The scheduled arm is ended when the provider crashes or restarts (at once for arms without gpt-oss, after two restarts for arms with it), when one of its models fails to load, when requests are served locally but under half of them show up as paid in the ledger after 30 minutes, or when the provider has not reported for 20 minutes. Arms without gpt-oss also end after 90 minutes without a paid job. gpt-oss arms never end for lack of traffic, because those gaps are what H3 is about.
+
+The rest of the block goes to a **candidate model**. Candidates are models in Darkbloom's catalog that the fixed arms don't cover, that fit this Mac (at most ~36 GB to load, no M5-only builds) and that leave at least 20 GB of disk free. They are downloaded one at a time ahead of need (never deleted), and the least-tested one runs first. A candidate that crashes the provider, fails to load or goes unpaid is not tried again. With no candidate ready, the block falls back to gpt-oss alone. The report now lists every segment with the reason it stopped, per-arm rows for candidates, and the candidate queue. The panel shows when a block ended early and which new models are queued.
+
 ## v70
 
 **A model experiment runs by itself and shows up in its own panel.** Which model earns best here had only been guessed from a few hand switches, and the guesses kept being confounded by time of day, restarts and upgrades. `~/.darkbloom/experiment.py` (new LaunchAgent `io.darkbloom.experiment`, every 5 min) now runs a pre-registered schedule of 3-hour blocks over 8 days. Each block hosts one arm: gpt-oss alone (the baseline), gpt-oss + Qwen3.5-9B, or qwen3.6, qwen3.5-35b, gemma-4-26b or Qwen3.5-9B alone. The order is a randomized Latin square, so every arm lands in every 3-hour slot of the day equally often. Learning comes before income: an arm that earns nothing still runs its full block.
