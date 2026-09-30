@@ -1,5 +1,9 @@
 # Changelog
 
+## v73
+
+**A candidate download that dies is started again.** Downloads run as a child process of the dashboard, so every `install.sh` (which restarts the dashboard) kills a running download without a trace. On 2026-09-30 the experiment's first candidate, ternary-bonsai-2-27b, started downloading at 13:03, died at a deploy shortly after, and still showed "downloading" at 15:12. It would only have been given up after 3 hours. `experiment.py` now checks on every tick whether a "downloading" candidate still has a `darkbloom models download` process. If it doesn't, the candidate is marked ready when the model is on disk, and otherwise the download is started again, up to 3 attempts. The first block itself (d1s1, qwen3.5-35b alone) switched fine at 15:04.
+
 ## v72
 
 **"Expected vs. actual payout" is now "Served vs. paid", and it can actually spot failed jobs.** The old meter compared tokens × our flat rate with what the same ledger entries paid. Both sides came from the ledger, so a job that failed and was never paid showed up on neither side. It only ever measured our price guess, although it looked like a check on whether jobs were paid. The panel now compares the provider's own counters (`requests_served`, `tokens_generated` in `daemon-state.json`, since the provider last started) with the paid ledger entries (base reward left out) over the same span, read from the permanent archive (v69), since a provider run can outlast the 48h history. When Darkbloom does not pay for work this Mac did, the served bars run ahead and the verdict turns red. A few of the newest jobs may be missing for a moment while the ledger is polled, so the check allows a gap of 3 jobs or 1%, whichever is larger. The provider's `usage_gaps` count is shown when it is non-zero. The per-token estimate check stays as one small line underneath, labelled as calibration only. On 2026-09-30 the numbers were 894 served and 892 paid since 07:21.

@@ -78,6 +78,7 @@ CANDIDATE_MAX_NEED_GB = 36   # size x LOAD_NEED_FACTOR must stay under this
 LOAD_NEED_FACTOR = 1.45      # qwen3.6: 21.3 GB on disk, 30.3 GB to load
 DISK_KEEP_FREE_GB = 20
 DOWNLOAD_GIVE_UP_SEC = 3 * 3600
+MAX_DOWNLOAD_ATTEMPTS = 3
 DARKBLOOM_BIN = DB / "bin" / "darkbloom"
 
 BASELINE = "A"
@@ -319,6 +320,24 @@ def maintain_candidates(state):
     """Find catalog models new to this Mac that fit, and download one at a
     time ahead of need. Never deletes anything."""
     cands = state.setdefault("candidates", {})
+    # A download runs as a child of the dashboard, so restarting the
+    # dashboard (install.sh) kills it silently - seen 2026-09-30, when the
+    # bonsai download died at a deploy and sat "downloading" for hours.
+    # Check on every tick and start it again, up to MAX_DOWNLOAD_ATTEMPTS.
+    for mid, c in cands.items():
+        if c.get("status") == "downloading" and not download_running(mid) \
+                and now() - c.get("download_started", 0) > 60:
+            local = local_models() or []
+            if any(same_model(l, mid) for l in local):
+                c["status"] = "ready"
+                c["local_id"] = next(l for l in local if same_model(l, mid))
+                event("candidate_ready", model=mid)
+            elif c.get("download_attempts", 1) >= MAX_DOWNLOAD_ATTEMPTS:
+                c["status"] = "download_failed"
+                event("candidate_download_failed", model=mid, attempts=c.get("download_attempts", 1))
+            else:
+                c["download_attempts"] = c.get("download_attempts", 1) + 1
+                start_download(mid, c)
     if now() - state.get("candidates_checked_at", 0) < CANDIDATE_CHECK_SEC:
         return
     state["candidates_checked_at"] = now()
@@ -377,14 +396,26 @@ def maintain_candidates(state):
             c["status"] = f"skipped: only {free_gb:.0f} GB free"
             event("candidate_no_disk", model=mid, free_gb=round(free_gb, 1))
             continue
-        try:
-            res = post_json("/api/model_action", {"action": "download", "model": mid}, 30)
-        except Exception as e:
-            res = {"ok": False, "message": str(e)}
-        event("candidate_download", model=mid, ok=res.get("ok"), message=res.get("message"))
-        if res.get("ok"):
-            c.update(status="downloading", download_started=now())
+        c["download_attempts"] = 1
+        start_download(mid, c)
         break
+
+
+def download_running(mid):
+    import subprocess
+    r = subprocess.run(["pgrep", "-f", f"darkbloom models download {mid}"], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def start_download(mid, c):
+    try:
+        res = post_json("/api/model_action", {"action": "download", "model": mid}, 30)
+    except Exception as e:
+        res = {"ok": False, "message": str(e)}
+    event("candidate_download", model=mid, ok=res.get("ok"), message=res.get("message"),
+          attempt=c.get("download_attempts", 1))
+    if res.get("ok"):
+        c.update(status="downloading", download_started=now())
 
 
 def next_segment_arm(state, info):
