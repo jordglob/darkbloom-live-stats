@@ -294,7 +294,13 @@ def get_utilization():
                         gpu_pct = float(parts[14])
                     except ValueError:
                         gpu_pct = None
-                rows.append((ts, int(parts[8]), int(parts[9]), gpu_pct))
+                gpu_load = None
+                if len(parts) > 19 and parts[19].strip():
+                    try:
+                        gpu_load = float(parts[19])
+                    except ValueError:
+                        gpu_load = None
+                rows.append((ts, int(parts[8]), int(parts[9]), gpu_pct, gpu_load))
             except Exception:
                 continue
         rows = [r for r in rows if now - r[0] <= UTIL_WINDOW_MIN * 60]
@@ -322,11 +328,19 @@ def get_utilization():
     req_per_hour = req_total / span_hr if span_hr > 0 else None
     tok_per_hour = tok_total / span_hr if span_hr > 0 else None
 
-    gpu_samples = [r[3] for r in rows if r[3] is not None]
+    # Clock-weighted load (avg_gpu_load_pct, logged since v81) when the
+    # window has it; plain residency only for older rows, which reads
+    # 20-35% even with nothing running.
+    gpu_samples = [r[4] for r in rows if r[4] is not None]
+    gpu_method = "load"
+    if not gpu_samples:
+        gpu_samples = [r[3] for r in rows if r[3] is not None]
+        gpu_method = "residency"
     gpu_util_avg_pct = (sum(gpu_samples) / len(gpu_samples)) if gpu_samples else None
 
     return {
         "gpu_util_avg_pct": round(gpu_util_avg_pct, 1) if gpu_util_avg_pct is not None else None,
+        "gpu_util_method": gpu_method,
         "sample_count": len(rows),
         "gpu_sample_count": len(gpu_samples),
         "requests_per_hour": round(req_per_hour, 1) if req_per_hour is not None else None,

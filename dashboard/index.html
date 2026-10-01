@@ -495,17 +495,17 @@ const POWER_FAST_REFRESH_MS = 200;    // fast poll: CPU/GPU/Total watts only (ch
 // and RAM are detail and come last - they're for diagnosing, not deciding.
 const GAUGES = [
   { id: 'util', label: 'Serving load (last hour)', source: 'utilization', key: 'gpu_util_avg_pct', max: 100, unit: '%', color: '--gauge-total',
-    tooltip: 'Real average GPU busy-ness over the last hour - the same powermetrics "GPU HW active residency" figure the live GPU Busy gauge reads, averaged across every 5-min sample energy-monitor.sh has logged in that window. There is no "correct" number: it reflects how much paid traffic the network sent you, which you do not control. You still earn the base reward while idle. Replaced an earlier version that just measured how often any request arrived (a duty cycle), which could not tell one tiny request per 5-min slice from the GPU pegged at 100% the whole time.' },
+    tooltip: 'Average GPU load over the last hour - the same clock-weighted figure as the live GPU Load gauge (time awake × active clock ÷ top clock), averaged across every 5-min sample energy-monitor.sh has logged in that window. Before v81 the log only had plain residency, which reads 20-35% with nothing running; the hour after the upgrade uses whichever the rows have. There is no "correct" number: it reflects how much paid traffic the network sent you, which you do not control. You still earn the base reward while idle. Replaced an earlier version that just measured how often any request arrived (a duty cycle), which could not tell one tiny request per 5-min slice from the GPU pegged at 100% the whole time.' },
   { id: 'temp', label: 'GPU Temp', source: 'fan_temp', key: 'gpu_temp_c', max: 100, unit: '°C', color: '--gauge-gpu',
     tooltip: 'Average across all reported GPU thermal sensors, via `darkbloom fan status`. Under about 85 C is comfortable; the Running Hot banner appears above that if the fan is not keeping up.' },
   { id: 'fan', label: 'Fan Speed', source: 'fan_temp', key: 'fan_rpm', max: 4900, unit: 'RPM', color: '--gauge-cpu',
     tooltip: 'Fan RPM, read via `darkbloom fan status` (read-only - does not enable fan control). Apple Silicon does not expose this via powermetrics at all.' },
-  { id: 'total', label: 'Total', source: 'power', key: 'total_w', max: 50, unit: 'W', color: '--gauge-total',
+  { id: 'total', label: 'Total', source: 'power', key: 'total_w', max: 120, unit: 'W', color: '--gauge-total',
     tooltip: 'Whole-Mac power - this is what you pay for. "Measured" = the Mac\'s own SMC system-power sensor (RAM, SSD, fans included) mapped to the wall as ×1.11 + 2.2W, calibrated against a wall meter on an M4 Pro Mac mini (idle 11W, full load ~100W). "Estimated" = CPU+GPU plus a flat 7W guess, used when macmon isn\'t installed - about right at idle, ~2.5x too low under heavy load.' },
   { id: 'headroom', label: 'GPU Load', source: 'power', key: 'gpu_load_pct', max: 100, unit: '%', color: '--gauge-total',
     tooltip: 'How much of the GPU\'s capacity is in use right now: the share of time it is awake (powermetrics "GPU HW active residency") weighted by how fast it runs while awake (average active clock over its top clock). Residency alone read 20-35% at rest, because the window server, screen sharing and this page keep the GPU awake at its lowest clock for about 0.2 W. Weighted by clock that is a few percent, and real inference, which runs at or near the top clock, still reads close to 100%. The line underneath shows both raw figures.' },
   { id: 'cpu', label: 'CPU', source: 'power', key: 'cpu_w', max: 30, unit: 'W', color: '--gauge-cpu' },
-  { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 30, unit: 'W', color: '--gauge-gpu' },
+  { id: 'gpu', label: 'GPU', source: 'power', key: 'gpu_w', max: 40, unit: 'W', color: '--gauge-gpu' },
   { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
 ];
 let lastUtilization = null;
@@ -617,7 +617,8 @@ function updateGauges(data) {
       document.getElementById(`gauge-max-${g.id}`).textContent = `${max.toFixed(0)}${g.unit}`;
     }
     if (g.id === 'fan' && fanTemp && fanTemp.fan_max_rpm) {
-      max = fanTemp.fan_max_rpm;
+      // The reported max (4900) is not a hard limit: 5412 RPM has been logged.
+      max = Math.max(fanTemp.fan_max_rpm, val);
       document.getElementById(`gauge-max-${g.id}`).textContent = `${max}${g.unit}`;
     }
     const frac = Math.max(0, Math.min(1, val / max));

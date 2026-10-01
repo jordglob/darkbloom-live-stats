@@ -1,5 +1,16 @@
 # Changelog
 
+## v81
+
+**Gauge scales checked against what this Mac has actually recorded.** Same kind of fault as the RAM gauge in v80:
+
+- **Total** topped out at 50 W, but full load reaches ~106 W at the wall (SMC peak 93.3 W). The arc was full from half load. Now 120 W.
+- **GPU** topped out at 30 W; 31.3 W has been logged. Now 40 W.
+- **Fan Speed** used the 4900 RPM that `darkbloom fan status` reports as maximum, but 5412 RPM has been logged. The scale now stretches to the reading when it goes past.
+- **Serving load (last hour)** averaged plain GPU residency, the same figure the live gauge stopped using in v74. It read 20-35% with nothing running. `energy-monitor.sh` now also logs the clock-weighted load (residency × active clock ÷ top clock) as a new last column, `avg_gpu_load_pct`. The header of an existing log is extended once. The gauge uses this column when the hour has it, and residency only for older rows (`gpu_util_method` in `/api/data` says which). Right after the change: residency 7.0%, load 5.2%.
+
+Also checked with nothing to fix: disk sizes and free space are decimal GB on purpose, as in Darkbloom's catalog, which the fit checks compare them with. The price feed's /1000 is EUR/MWh → per kWh. The power and cost columns use the same wall formula in the script and the server.
+
 ## v80
 
 **The RAM gauge tops out at 48 GB on a 48 GB Mac.** Its maximum was `hw.memsize` ÷ 10⁹ = 51.5, while "used" comes from `top` in binary GB. With mixed units, completely full memory read 48 of 51.5 (93%), so the red zone (above 93%) could never really trigger. Total is now `hw.memsize` ÷ 2³⁰ = 48.0, the same unit as used.

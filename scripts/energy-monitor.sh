@@ -62,7 +62,9 @@ BLENDED_USD_PER_TOKEN=$(echo "scale=12; 0.048/1000000" | bc 2>/dev/null)
 [ -z "$BLENDED_USD_PER_TOKEN" ] && BLENDED_USD_PER_TOKEN=0.000000048
 
 mkdir -p "$DIR"
-[ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w,avg_gpu_active_pct,power_method,gpu_temp_c,fan_rpm,fan_max_rpm" > "$CSV"
+[ -f "$CSV" ] || echo "timestamp,avg_power_w,interval_wh,cum_wh,elpris_sek_kwh,interval_cost_sek,cum_cost_sek,usd_sek,requests_served,tokens,est_revenue_usd_approx,est_revenue_sek_approx,net_sek_approx,total_power_w,avg_gpu_active_pct,power_method,gpu_temp_c,fan_rpm,fan_max_rpm,avg_gpu_load_pct" > "$CSV"
+# Older logs lack the last column (added v81); extend the header once.
+head -1 "$CSV" | grep -q ',avg_gpu_load_pct$' || sed -i '' '1s/$/,avg_gpu_load_pct/' "$CSV"
 # Pre-v14 files have a 15-column header; add the column name so readers see it.
 if ! head -1 "$CSV" | grep -q ',power_method'; then
   sed -i '' '1s/$/,power_method/' "$CSV"
@@ -178,6 +180,7 @@ while true; do
   # --- parse new power data since last run ---
   AVG_W=0
   AVG_GPU_ACTIVE_PCT=""
+  AVG_GPU_LOAD_PCT=""
   if [ -f "$RAW_LOG" ]; then
     SIZE=$(stat -f%z "$RAW_LOG" 2>/dev/null || echo 0)
     # Self-heal: if the raw log got recreated/truncated (e.g. powermetrics
@@ -198,6 +201,17 @@ while true; do
       # Feeds the Utilization (last hour) gauge in the dashboard.
       AVG_GPU_ACTIVE_PCT=$(printf '%s\n' "$CHUNK" | awk '
         /^GPU HW active residency:/ { gsub("%", "", $5); print $5 }
+      ' | awk '{s+=$1; n++} END{ if (n>0) printf "%.1f", s/n; else print "" }')
+      # Same residency weighted by clock (active MHz / top MHz), like the
+      # dashboard's GPU Load gauge: residency alone reads 20-35% at rest,
+      # because the window server keeps the GPU awake at its lowest clock.
+      AVG_GPU_LOAD_PCT=$(printf '%s\n' "$CHUNK" | awk '
+        /^GPU HW active frequency:/ { f=$5 }
+        /^GPU HW active residency:/ {
+          r=$5; gsub("%", "", r); top=0
+          for (i=6; i<=NF; i++) if ($i == "MHz:") { v=$(i-1); gsub("[(]", "", v); if (v+0 > top) top=v+0 }
+          if (top > 0 && f != "") print r * f / top
+        }
       ' | awk '{s+=$1; n++} END{ if (n>0) printf "%.1f", s/n; else print "" }')
       LAST_OFFSET=$SIZE
       AVG_W=$(calc "scale=3; ${AVG_MW:-0} / 1000")
@@ -275,7 +289,7 @@ while true; do
   EST_REV_SEK=$(calc "scale=6; $EST_REV_USD * $USDSEK_VAL")
   NET_SEK=$(calc "scale=6; $EST_REV_SEK - $CUM_COST")
 
-  echo "$NOW_ISO,$AVG_W,$INTERVAL_WH,$CUM_WH,$ELPRIS_VAL,$INTERVAL_COST,$CUM_COST,$USDSEK_VAL,$REQS,$TOKENS,$EST_REV_USD,$EST_REV_SEK,$NET_SEK,$TOTAL_W,$AVG_GPU_ACTIVE_PCT,$POWER_METHOD,$GPU_TEMP_C,$FAN_RPM,$FAN_MAX_RPM" >> "$CSV"
+  echo "$NOW_ISO,$AVG_W,$INTERVAL_WH,$CUM_WH,$ELPRIS_VAL,$INTERVAL_COST,$CUM_COST,$USDSEK_VAL,$REQS,$TOKENS,$EST_REV_USD,$EST_REV_SEK,$NET_SEK,$TOTAL_W,$AVG_GPU_ACTIVE_PCT,$POWER_METHOD,$GPU_TEMP_C,$FAN_RPM,$FAN_MAX_RPM,$AVG_GPU_LOAD_PCT" >> "$CSV"
 
   {
     echo "LAST_OFFSET=$LAST_OFFSET"
