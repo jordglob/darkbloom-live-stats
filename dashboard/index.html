@@ -1698,9 +1698,12 @@ function renderModelDemand(d) {
         <th>Model</th>
         <th class="num" title="Download size of the weights, from the coordinator's model catalog. Hover a value for the minimum RAM Darkbloom requires to serve it.">Size</th>
         <th class="num" title="Published requests in the window, and share of the total.">Requests</th>
-        <th class="num" title="Completed / requests.">Completed</th>
+        <th class="num" title="Completed / requests, network-wide (all providers, published hours only) - not this Mac. The rest is split over the next five columns.">Completed</th>
         <th class="num" title="Turned away because no provider had room (capacity) or could meet the latency limit. High numbers mean unmet demand - providers are short for this model.">Rejected</th>
         <th class="num" title="Timed out before finishing.">Timeouts</th>
+        <th class="num" title="Failed while running (an error on the provider or in the request).">Failed</th>
+        <th class="num" title="Cancelled, usually by the client before the answer was done.">Cancelled</th>
+        <th class="num" title="Outcome not recorded by Darkbloom. Completed + rejected + timeouts + failed + cancelled + unknown = requests.">Unknown</th>
         <th class="num" title="HTTP 429 responses. Overlaps the other outcomes, so it is not added to them.">429s</th>
         <th title="Requests per bucket over the window. Gaps are hours that were not published.">Trend</th>
         <th title="Suitability for this Mac: whether it fits (RAM, the inference memory budget next to the models already hosted, free disk) and whether network demand makes it worth serving. Hover the badge for all reasons. A rough guide from published demand, not an earnings forecast.">Fit</th>
@@ -1717,6 +1720,9 @@ function renderModelDemand(d) {
             <td class="num" style="color:${rateColor(rate)}">${rate == null ? '–' : rate.toFixed(1) + '%'}</td>
             <td class="num">${rejected ? fmtNum(rejected) : '–'}</td>
             <td class="num">${m.timed_out ? fmtNum(m.timed_out) : '–'}</td>
+            <td class="num">${m.failed ? fmtNum(m.failed) : '–'}</td>
+            <td class="num">${m.cancelled ? fmtNum(m.cancelled) : '–'}</td>
+            <td class="num" title="${pct(m.unknown || 0, m.requests) != null ? pct(m.unknown || 0, m.requests).toFixed(1) + '% of requests' : ''}">${m.unknown ? fmtNum(m.unknown) : '–'}</td>
             <td class="num">${m.http_429 ? fmtNum(m.http_429) : '–'}</td>
             <td>${demandSparkline(m.time_series)}</td>
             <td>${fitCell(m)}</td>
@@ -1924,6 +1930,43 @@ function renderPayoutMeter(cs, cc) {
     </div>`;
 }
 
+function renderJobOutcomes(jo) {
+  // Every job followed from arrival (provider log) to completion (provider
+  // log) to payment (ledger, matched on job_id). Arrivals are only visible
+  // since private log data was enabled for the provider.
+  if (!jo || !jo.windows) return '';
+  const w1 = jo.windows['1h'], w24 = jo.windows['24h'];
+  const since = new Date(jo.tracking_since * 1000).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const pctOf = (a, b) => b ? ` <span style="color:var(--text-muted)">${(a / b * 100).toFixed(0)}%</span>` : '';
+  const bad = v => v ? `<strong style="color:var(--status-serious)">${fmtNum(v)}</strong>` : '0';
+  const kinds = w => Object.entries(w.incomplete_kinds || {}).map(([k, v]) => `${escapeHtml(k)} ${v}`).join(', ');
+  const row = (label, f, tip) => `<tr${tip ? ` title="${tip.replace(/"/g, '&quot;')}"` : ''}><td>${label}</td><td class="num">${f(w1)}</td><td class="num">${f(w24)}</td></tr>`;
+  const secs = w => w.median_sec == null ? '–' : `${w.median_sec}s / ${w.p90_sec}s`;
+  const models = Object.entries(w24.by_model || {}).sort((a, b) => b[1].received - a[1].received)
+    .map(([m, v]) => `${escapeHtml(m)}: ${fmtNum(v.received)} in, ${fmtNum(v.completed)} done${v.incomplete ? `, <span style="color:var(--status-serious)">${v.incomplete} not</span>` : ''}, ${fmtNum(v.paid)} paid ($${v.usd.toFixed(4)})`).join(' · ');
+  return `
+    <div class="rotation-summary" style="margin:10px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
+      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline;margin-bottom:4px">
+        <strong>How this Mac handles its jobs</strong>
+        <span style="font-size:11px;color:var(--text-muted)" title="Each job is followed by its id: 'Received inference request' and 'Complete' in the provider's own log, then the ledger entry with the same job_id. Only ids, times and token counts are stored, never prompt or reply text. Before private log data was enabled for the provider, arrivals could not be seen at all.">every job followed by its id from arrival to payment, tracked since ${escapeHtml(since)}</span>
+      </div>
+      <table class="rotation-table" style="max-width:520px">
+        <thead><tr><th></th><th class="num">Last hour</th><th class="num">Last 24 h</th></tr></thead>
+        <tbody>
+          ${row('Received', w => fmtNum(w.received), 'Jobs the coordinator sent to this Mac.')}
+          ${row('Completed', w => fmtNum(w.completed) + pctOf(w.completed, w.received - w.in_progress))}
+          ${row('Not completed', w => bad(w.incomplete) + (kinds(w) ? ` <span style="font-size:11px;color:var(--text-muted)">(${kinds(w)})</span>` : ''), 'Received but no Complete line within 15 minutes. The kind is the last error the provider logged for that job, sorted by keyword.')}
+          ${row('Completed, not paid', w => bad(w.unpaid), 'Completed more than 3 minutes ago but no ledger entry with that job_id.')}
+          ${row('Paid', w => fmtNum(w.paid))}
+          ${row('In progress', w => fmtNum(w.in_progress))}
+          ${row('Time per job, median / 90%', secs, 'From arrival to Complete, including queueing.')}
+          ${row('Reply speed, median', w => w.median_tokens_per_sec == null ? '–' : w.median_tokens_per_sec + ' tok/s', 'Completion tokens divided by the whole job time, so prompt processing is included.')}
+        </tbody>
+      </table>
+      ${models ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px">Last 24 h by model: ${models}</div>` : ''}
+    </div>`;
+}
+
 const ACCOUNT_PERIOD_KEYS = ['1h', '6h', '24h'];
 
 function lastHourLine(account) {
@@ -1998,6 +2041,7 @@ function renderAccount(account) {
     </div>
     ${plainLine ? `<div class="rotation-summary">${plainLine}</div>` : ''}
     ${renderPayoutMeter(cs, account.completion_check)}
+    ${renderJobOutcomes(account.job_outcomes)}
     <div class="table-scroll">
     <table class="rotation-table">
       <thead>

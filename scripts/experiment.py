@@ -42,6 +42,7 @@ import datetime as dt
 import fcntl
 import json
 import random
+import re
 import sys
 import time
 import urllib.request
@@ -80,6 +81,8 @@ DISK_KEEP_FREE_GB = 20
 DOWNLOAD_GIVE_UP_SEC = 3 * 3600
 MAX_DOWNLOAD_ATTEMPTS = 3
 DARKBLOOM_BIN = DB / "bin" / "darkbloom"
+JOBS_DIR = DB / "jobs"             # one row per job seen in the provider log
+JOB_GIVE_UP_SEC = 15 * 60          # received but never completed after this = incomplete
 
 BASELINE = "A"
 ARMS = {
@@ -468,6 +471,8 @@ def provider_log_counts(state):
         return {"log_error": str(e)[:100]}
     counts = {"log_lines": 0, "log_errors": 0, "log_private": 0}
     newest = last
+    open_jobs = state.setdefault("open_jobs", {})
+    hosted = daemon_snapshot().get("hosted") or []
     for line in out.splitlines():
         try:
             d = json.loads(line)
@@ -478,6 +483,7 @@ def provider_log_counts(state):
             continue
         newest = max(newest, ts)
         counts["log_lines"] += 1
+        track_job_line(open_jobs, d, ts, hosted)
         if d.get("messageType") not in ("Error", "Fault"):
             continue
         counts["log_errors"] += 1
@@ -488,7 +494,54 @@ def provider_log_counts(state):
         kind = next((k for k, words in LOG_KINDS if any(w in msg for w in words)), "other")
         counts["log_" + kind] = counts.get("log_" + kind, 0) + 1
     state["log_checked_at"] = newest if newest > last else now()
+    # Jobs received but never completed: written out as incomplete.
+    for jid, j in list(open_jobs.items()):
+        if now() - j["received"] > JOB_GIVE_UP_SEC:
+            write_job(dict(j, id=jid, outcome="incomplete"))
+            del open_jobs[jid]
     return counts
+
+
+# Per-job lifecycle, readable since private log data was enabled for the
+# provider (2026-10-01). The request id equals the ledger's job_id, so a job
+# can be followed from arrival to payment. Only ids, times and token counts
+# are kept - never prompt or reply text.
+RECEIVED_RE = re.compile(r"^Received inference request: (\S+)")
+PROCESSING_RE = re.compile(r"^Processing inference request: (\S+)")
+COMPLETE_RE = re.compile(r"^\[(\S+)\] Complete: (\d+) prompt \+ (\d+) completion tokens")
+ID_IN_MSG_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+
+
+def write_job(row):
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    month = time.strftime("%Y-%m", time.localtime(row.get("received") or row.get("completed") or now()))
+    append_jsonl(JOBS_DIR / f"jobs-{month}.jsonl", row)
+
+
+def track_job_line(open_jobs, d, ts, hosted):
+    msg = d.get("eventMessage") or ""
+    m = RECEIVED_RE.match(msg)
+    if m:
+        open_jobs[m.group(1)] = {"received": ts, "hosted": hosted}
+        return
+    m = PROCESSING_RE.match(msg)
+    if m:
+        open_jobs.setdefault(m.group(1), {"received": ts, "hosted": hosted})["processing"] = ts
+        return
+    m = COMPLETE_RE.match(msg)
+    if m:
+        j = open_jobs.pop(m.group(1), {"received": None, "hosted": hosted})
+        write_job(dict(j, id=m.group(1), completed=ts, prompt_tokens=int(m.group(2)),
+                       completion_tokens=int(m.group(3)), outcome="completed",
+                       seconds=round(ts - j["received"], 3) if j.get("received") else None))
+        return
+    # Anything else that names an open job: remember the last error kind.
+    if d.get("messageType") in ("Error", "Fault"):
+        m = ID_IN_MSG_RE.search(msg)
+        if m and m.group(1) in open_jobs:
+            low = msg.lower()
+            open_jobs[m.group(1)]["error_kind"] = next(
+                (k for k, words in LOG_KINDS if any(w in low for w in words)), "other")
 
 
 # --- block summaries --------------------------------------------------------
@@ -562,6 +615,20 @@ def summarize_segment(block, seg, state):
         for k, v in row.items():
             if k.startswith("log_") and isinstance(v, int):
                 log[k] = log.get(k, 0) + v
+    jobs = {"received": 0, "completed": 0, "incomplete": 0}
+    secs = []
+    for f in sorted(JOBS_DIR.glob("jobs-*.jsonl")):
+        for j in read_jsonl(f):
+            t = j.get("received") or j.get("completed")
+            if t is None or not (start <= t < end):
+                continue
+            jobs["received"] += 1
+            if j.get("outcome") in jobs:
+                jobs[j["outcome"]] += 1
+            if j.get("seconds") is not None:
+                secs.append(j["seconds"])
+    if secs:
+        jobs["median_sec"] = round(sorted(secs)[len(secs) // 2], 1)
     measured = max(0.0, (end - settle_end) / 3600) if seg.get("ok") else 0.0
     wh, cost = energy_between(start, end)
     base_hours = max(1e-9, (end - start) / 3600)
@@ -589,6 +656,7 @@ def summarize_segment(block, seg, state):
         "energy_wh": wh,
         "energy_cost_sek": cost,
         "log": log,
+        "jobs": jobs if jobs["received"] else None,
     }
 
 
@@ -719,6 +787,7 @@ def _tick():
     state = read_json(STATE, {})
     state.setdefault("blocks", {})
     archive_network_demand(state)
+    log_counts = provider_log_counts(state)
     try:
         maintain_candidates(state)
     except Exception as e:
@@ -757,7 +826,7 @@ def _tick():
     info = state["blocks"].setdefault(block["id"], {"arm": block["arm"], "segments": []})
     seg = info["segments"][-1] if info["segments"] else None
     append_jsonl(SAMPLES, dict(at=iso(ts), ts=ts, block=block["id"], arm=seg["arm"] if seg else block["arm"],
-                               paused=bool(state.get("paused")), **snap, **provider_log_counts(state)))
+                               paused=bool(state.get("paused")), **snap, **log_counts))
 
     if state.get("paused"):
         info["paused"] = True
@@ -913,12 +982,12 @@ def cmd_report(args):
     lines.append("")
 
     lines += ["## Per arm (after the settle period)", "",
-              "| Arm | Segments (scheduled) | Hours | Paid jobs/h | Paid $/h | Base $/h | Jobs per 100 published network requests | Longest gap, median min | Provider log errors/h |",
-              "|---|---|---|---|---|---|---|---|---|"]
+              "| Arm | Segments (scheduled) | Hours | Paid jobs/h | Paid $/h | Base $/h | Jobs per 100 published network requests | Longest gap, median min | Provider log errors/h | Jobs in / done / not done (tracked) |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
     for arm in list(ARMS) + sorted({s["arm"] for s in valid if s["arm"].startswith("X:")}):
         ss = [s for s in valid if s["arm"] == arm]
         if not ss:
-            lines.append(f"| {arm} {arm_label(state, arm)} | 0 | – | – | – | – | – | – | – |")
+            lines.append(f"| {arm} {arm_label(state, arm)} | 0 | – | – | – | – | – | – | – | – |")
             continue
         h = sum(s["measured_hours"] for s in ss)
         idx = []
@@ -943,7 +1012,7 @@ def cmd_report(args):
                     f" (job-related {job_errs / log_h:.0f})") if log_h > 0.05 else "–"
         lines.append(f"| {arm} {arm_label(state, arm)} | {len(ss)} ({sum(1 for s in ss if s['scheduled'])}) | {h:.1f} | "
                      f"{sum(s['paid_jobs'] for s in ss) / h:.0f} | {sum(s['paid_usd'] for s in ss) / h:.4f} | "
-                     f"{sum(s['base_usd'] for s in ss) / h:.4f} | {'; '.join(idx)} | {gaps[len(gaps) // 2] if gaps else 0:.0f} | {err_rate} |")
+                     f"{sum(s['base_usd'] for s in ss) / h:.4f} | {'; '.join(idx)} | {gaps[len(gaps) // 2] if gaps else 0:.0f} | {err_rate} | {jobs_cell(ss)} |")
     lines += ["", "Provider log errors: Error/Fault-level lines in the provider's own log (counted since 2026-10-01). Since 2026-10-01 11:17 private log data is enabled for the provider (a configuration profile), so they are also sorted by keyword; job-related = rejected, timeout, cancelled or failed. The ~120/h baseline is 'Failed to parse coordinator message' every 30 s, unrelated to jobs. Only counts are kept.", ""]
     lines += ["", "Published network counts are a privacy-filtered sample (872 gpt-oss requests in an evening window where this Mac alone served 2829), so the index can exceed 100: compare it between arms, not as a market share. \\* some hours not published yet (≥1 h lag).", ""]
 
@@ -1006,6 +1075,14 @@ def cmd_report(args):
         lines += ["", "## Failed switches", ""] + [f"- {e['at'][5:16]} {e.get('block')} {e.get('arm')}: {e.get('message', '')}" for e in fails[-10:]]
     print("\n".join(lines))
     return 0
+
+
+def jobs_cell(segs):
+    tracked = [s["jobs"] for s in segs if s.get("jobs")]
+    if not tracked:
+        return "–"
+    tot = {k: sum(t.get(k, 0) for t in tracked) for k in ("received", "completed", "incomplete")}
+    return f"{tot['received']} / {tot['completed']} / {tot['incomplete']}"
 
 
 def log_cell(log):

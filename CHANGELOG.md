@@ -1,5 +1,15 @@
 # Changelog
 
+## v79
+
+**Every job is now followed from arrival to payment.** With private log data enabled for the provider (v77), its log shows each job's life: `Received inference request: <id>`, `Processing inference request: <id>` and `[<id>] Complete: N prompt + N completion tokens`. The id is the ledger's `job_id`. `experiment.py` reads these on every 5-minute tick, also outside experiment blocks, and writes one row per job to `~/.darkbloom/jobs/jobs-YYYY-MM.jsonl`: arrival and completion times, token counts, hosted models, and outcome. A job with no Complete line within 15 minutes is written as incomplete, with the kind of the last error logged for it. Only ids, times and token counts are stored, never prompt or reply text.
+
+- **New panel "How this Mac handles its jobs"** (under Served vs. paid). For the last hour and 24 h it shows received, completed, not completed (with error kinds), completed but unpaid (no ledger entry 3 minutes after Complete), paid, in progress, time per job (median and 90th percentile) and reply speed, plus a per-model line.
+- **The experiment report** gets a "jobs in / done / not done" column per arm.
+- **Network Model Demand** gets Failed, Cancelled and Unknown columns. With them, completed + rejected + timeouts + failed + cancelled + unknown add up to requests. The Completed % tooltip now says it is network-wide, not this Mac.
+
+Tracking started at 12:07 on 2026-10-01: the first 5 jobs all completed in 2-12 s and were all paid.
+
 ## v78
 
 **The experiment report shows demand by hour of day.** A new section lists, for each local hour, the mean published network requests for the three busiest models (gpt-oss always included) and all models together. It also shows this Mac's gpt-oss jobs per hour while gpt-oss was hosted, from the 5-minute samples. Unpublished hours fall under Darkbloom's privacy threshold, so they show as unknown, not zero. The first two days already show the two curves do not match: published gpt-oss demand is flat at ~150-600 an hour, while this Mac's own gpt-oss traffic swings from 1 to 1181 an hour. Its peaks are mostly near-identical small jobs (340-360 prompt tokens, at most 60 completion tokens): 818 of 1181 at 21:00 on 09-30. One or a few bulk clients would explain both the swings and why the public stats miss them (a cohort is only published with requests from 3 different accounts). Not proven.

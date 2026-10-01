@@ -2047,6 +2047,7 @@ def _build_account_view(raw, age_sec):
         },
         "hourly_rate_comparison": _compute_hourly_rate_comparison(raw, get_inference_duration_stats()),
         "completion_check": get_completion_check(),
+        "job_outcomes": get_job_outcomes(),
     }
 
 
@@ -2120,6 +2121,94 @@ def get_completion_check():
         pass
     _completion_cache.update(at=now, data=data)
     return data
+
+
+JOBS_DIR = HOME / ".darkbloom" / "jobs"
+EXPERIMENT_STATE_PATH = HOME / ".darkbloom" / "experiment" / "state.json"
+JOB_OUTCOME_WINDOWS = {"1h": 3600, "24h": 86400}
+# A completed job normally reaches the ledger within a poll or two.
+JOB_PAY_GRACE_SEC = 180
+_job_outcomes_cache = {"at": 0.0, "data": None}
+
+
+def get_job_outcomes():
+    """This Mac's jobs, followed one by one: received (provider log), then
+    completed or not (provider log), then paid or not (ledger, matched on
+    job_id). Rows are written by experiment.py from the provider's own log,
+    readable since private log data was enabled on 2026-10-01; before that,
+    only completed and paid counts exist. Returns None if nothing recorded."""
+    now = time.time()
+    if _job_outcomes_cache["data"] is not None and now - _job_outcomes_cache["at"] < 30:
+        return _job_outcomes_cache["data"]
+    jobs = {}
+    for path in sorted(JOBS_DIR.glob("jobs-*.jsonl"))[-2:]:
+        with open(path) as f:
+            for line in f:
+                try:
+                    j = json.loads(line)
+                    jobs[j["id"]] = j
+                except Exception:
+                    continue
+    if not jobs:
+        return None
+    try:
+        open_jobs = json.loads(EXPERIMENT_STATE_PATH.read_text()).get("open_jobs") or {}
+    except Exception:
+        open_jobs = {}
+    paid = {}
+    months = {time.strftime("%Y-%m", time.gmtime(t)) for t in (now - 86400, now)}
+    for month in months:
+        path = EARNINGS_ARCHIVE_DIR / f"earnings-{month}.jsonl"
+        if path.exists():
+            with open(path) as f:
+                for line in f:
+                    try:
+                        e = json.loads(line)
+                        if e.get("job_id"):
+                            paid[e["job_id"]] = e
+                    except Exception:
+                        continue
+    first = min((j.get("received") or j.get("completed") or now) for j in jobs.values())
+    out = {"tracking_since": first, "windows": {}}
+    for name, span in JOB_OUTCOME_WINDOWS.items():
+        since = now - span
+        rows = [j for j in jobs.values() if (j.get("received") or j.get("completed") or 0) >= since]
+        done = [j for j in rows if j.get("outcome") == "completed"]
+        incomplete = [j for j in rows if j.get("outcome") == "incomplete"]
+        due = [j for j in done if now - j["completed"] > JOB_PAY_GRACE_SEC]
+        unpaid = [j for j in due if j["id"] not in paid]
+        secs = sorted(j["seconds"] for j in done if j.get("seconds") is not None)
+        tps = sorted(j["completion_tokens"] / j["seconds"] for j in done if j.get("seconds"))
+        by_model = {}
+        for j in rows:
+            e = paid.get(j["id"])
+            model = e["model"] if e else ("/".join(j.get("hosted") or []) or "unknown")
+            m = by_model.setdefault(model, {"received": 0, "completed": 0, "incomplete": 0, "paid": 0, "usd": 0.0})
+            m["received"] += 1
+            if j.get("outcome") == "completed":
+                m["completed"] += 1
+            elif j.get("outcome") == "incomplete":
+                m["incomplete"] += 1
+            if e:
+                m["paid"] += 1
+                m["usd"] += (e.get("amount_micro_usd") or 0) / 1e6
+        pick = lambda xs, q: xs[min(len(xs) - 1, int(len(xs) * q))] if xs else None
+        out["windows"][name] = {
+            "received": len(rows) + sum(1 for j in open_jobs.values() if j.get("received", 0) >= since),
+            "in_progress": sum(1 for j in open_jobs.values() if j.get("received", 0) >= since),
+            "completed": len(done),
+            "incomplete": len(incomplete),
+            "incomplete_kinds": {k: sum(1 for j in incomplete if j.get("error_kind", "no error logged") == k)
+                                 for k in {j.get("error_kind", "no error logged") for j in incomplete}},
+            "paid": sum(1 for j in done if j["id"] in paid),
+            "unpaid": len(unpaid),
+            "median_sec": round(pick(secs, 0.5), 1) if secs else None,
+            "p90_sec": round(pick(secs, 0.9), 1) if secs else None,
+            "median_tokens_per_sec": round(pick(tps, 0.5), 1) if tps else None,
+            "by_model": by_model,
+        }
+    _job_outcomes_cache.update(at=now, data=out)
+    return out
 
 
 _earnings_history_lock = threading.Lock()
