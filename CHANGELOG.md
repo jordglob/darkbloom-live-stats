@@ -1,5 +1,9 @@
 # Changelog
 
+## v80
+
+**The RAM gauge tops out at 48 GB on a 48 GB Mac.** Its maximum was `hw.memsize` ÷ 10⁹ = 51.5, while "used" comes from `top` in binary GB. With mixed units, completely full memory read 48 of 51.5 (93%), so the red zone (above 93%) could never really trigger. Total is now `hw.memsize` ÷ 2³⁰ = 48.0, the same unit as used.
+
 ## v79
 
 **Every job is now followed from arrival to payment.** With private log data enabled for the provider (v77), its log shows each job's life: `Received inference request: <id>`, `Processing inference request: <id>` and `[<id>] Complete: N prompt + N completion tokens`. The id is the ledger's `job_id`. `experiment.py` reads these on every 5-minute tick, also outside experiment blocks, and writes one row per job to `~/.darkbloom/jobs/jobs-YYYY-MM.jsonl`: arrival and completion times, token counts, hosted models, and outcome. A job with no Complete line within 15 minutes is written as incomplete, with the kind of the last error logged for it. Only ids, times and token counts are stored, never prompt or reply text.

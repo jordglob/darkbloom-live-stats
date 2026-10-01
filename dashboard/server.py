@@ -392,7 +392,10 @@ def get_ram_status():
         total_bytes = int(
             subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout.strip()
         )
-        total_gb = total_bytes / 1e9
+        # Binary GB, like top's "G" figures below: hw.memsize / 1e9 gave
+        # 51.5 on a 48 GB Mac, so the gauge's max sat above anything "used"
+        # could ever reach and its 93% red zone never triggered.
+        total_gb = total_bytes / 2**30
 
         def to_gb(val, unit):
             v = float(val)
