@@ -1,5 +1,9 @@
 # Changelog
 
+## v76
+
+**The experiment counts the provider's own log errors per segment.** Only finished jobs are visible: `requests_served` and the ledger agree, but nothing counts jobs that were sent here and then rejected, timed out or failed before the provider counted them. The provider does log ~120 Error-level `coordinator` messages an hour, but macOS hides their text as `<private>`. Each 5-minute tick now reads the new lines (`darkbloom logs --last …`, ~1.5 s) and stores how many Error/Fault messages there were. If private log data is enabled, it also stores how many look like rejected, timeout, cancelled or failed jobs, matched by keyword. Only counts are kept, never message text, which could carry request content. The report adds "Provider log errors/h" per arm and a per-segment column, so a model that draws more errors stands out even while their meaning is hidden.
+
 ## v75
 
 **The experiment no longer blames a model for Darkbloom's own restarts and cache hiccups.** The first day ended two segments early for reasons that had nothing to do with the model:

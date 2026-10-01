@@ -437,6 +437,55 @@ def arm_spec(state, arm):
     return ARMS[arm]
 
 
+# --- provider log ---------------------------------------------------------
+
+LOG_KINDS = (
+    ("rejected", ("429", "reject", "capacity", "busy", "overload")),
+    ("timeout", ("timeout", "timed out", "deadline")),
+    ("cancelled", ("cancel",)),
+    ("failed", ("fail", "error", "abort", "fatal", "panic")),
+)
+
+
+def provider_log_counts(state):
+    """Error/Fault-level provider log messages since the last tick. The
+    provider logs ~120 coordinator errors an hour whose text macOS hides as
+    <private>, so the count is all we get unless private log data is enabled;
+    then each message is also sorted into a kind by keyword. Only counts are
+    stored - never message text, which could carry request content."""
+    import subprocess
+    last = state.get("log_checked_at") or now() - 300
+    span = int(min(max(now() - last, 60), 3600)) + 5
+    try:
+        out = subprocess.run([str(DARKBLOOM_BIN), "logs", "--last", f"{span}s", "--debug"],
+                             capture_output=True, text=True, timeout=60).stdout
+    except Exception as e:
+        return {"log_error": str(e)[:100]}
+    counts = {"log_lines": 0, "log_errors": 0, "log_private": 0}
+    newest = last
+    for line in out.splitlines():
+        try:
+            d = json.loads(line)
+            ts = dt.datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S.%f%z").timestamp()
+        except Exception:
+            continue
+        if ts <= last:
+            continue
+        newest = max(newest, ts)
+        counts["log_lines"] += 1
+        if d.get("messageType") not in ("Error", "Fault"):
+            continue
+        counts["log_errors"] += 1
+        msg = (d.get("eventMessage") or "").lower()
+        if msg == "<private>":
+            counts["log_private"] += 1
+            continue
+        kind = next((k for k, words in LOG_KINDS if any(w in msg for w in words)), "other")
+        counts["log_" + kind] = counts.get("log_" + kind, 0) + 1
+    state["log_checked_at"] = newest if newest > last else now()
+    return counts
+
+
 # --- block summaries --------------------------------------------------------
 
 def ledger_between(start, end):
@@ -500,6 +549,14 @@ def summarize_segment(block, seg, state):
         longest_gap = max(longest_gap, t - prev)
         prev = last_job = t
     longest_gap = max(longest_gap, end - prev)
+    log = {}
+    for row in read_jsonl(SAMPLES):
+        t = row.get("ts")
+        if t is None or not (start < t <= end):
+            continue
+        for k, v in row.items():
+            if k.startswith("log_") and isinstance(v, int):
+                log[k] = log.get(k, 0) + v
     measured = max(0.0, (end - settle_end) / 3600) if seg.get("ok") else 0.0
     wh, cost = energy_between(start, end)
     base_hours = max(1e-9, (end - start) / 3600)
@@ -526,6 +583,7 @@ def summarize_segment(block, seg, state):
         "last_job_at": iso(last_job) if last_job else None,
         "energy_wh": wh,
         "energy_cost_sek": cost,
+        "log": log,
     }
 
 
@@ -693,8 +751,8 @@ def _tick():
 
     info = state["blocks"].setdefault(block["id"], {"arm": block["arm"], "segments": []})
     seg = info["segments"][-1] if info["segments"] else None
-    append_jsonl(SAMPLES, dict(at=iso(ts), block=block["id"], arm=seg["arm"] if seg else block["arm"],
-                               paused=bool(state.get("paused")), **snap))
+    append_jsonl(SAMPLES, dict(at=iso(ts), ts=ts, block=block["id"], arm=seg["arm"] if seg else block["arm"],
+                               paused=bool(state.get("paused")), **snap, **provider_log_counts(state)))
 
     if state.get("paused"):
         info["paused"] = True
@@ -822,12 +880,12 @@ def cmd_report(args):
     lines.append("")
 
     lines += ["## Per arm (after the settle period)", "",
-              "| Arm | Segments (scheduled) | Hours | Paid jobs/h | Paid $/h | Base $/h | Jobs per 100 published network requests | Longest gap, median min |",
-              "|---|---|---|---|---|---|---|---|"]
+              "| Arm | Segments (scheduled) | Hours | Paid jobs/h | Paid $/h | Base $/h | Jobs per 100 published network requests | Longest gap, median min | Provider log errors/h |",
+              "|---|---|---|---|---|---|---|---|---|"]
     for arm in list(ARMS) + sorted({s["arm"] for s in valid if s["arm"].startswith("X:")}):
         ss = [s for s in valid if s["arm"] == arm]
         if not ss:
-            lines.append(f"| {arm} {arm_label(state, arm)} | 0 | – | – | – | – | – | – |")
+            lines.append(f"| {arm} {arm_label(state, arm)} | 0 | – | – | – | – | – | – | – |")
             continue
         h = sum(s["measured_hours"] for s in ss)
         idx = []
@@ -845,9 +903,13 @@ def cmd_report(args):
             if not complete:
                 idx[-1] += "*"
         gaps = sorted(s["longest_gap_min"] for s in ss if s["longest_gap_min"] is not None)
+        logged = [s for s in ss if (s.get("log") or {}).get("log_lines") is not None and s.get("log")]
+        log_h = sum((s.get("end") or ts) - s["start"] for s in logged) / 3600
+        err_rate = f"{sum(s['log'].get('log_errors', 0) for s in logged) / log_h:.0f}" if log_h > 0.05 else "–"
         lines.append(f"| {arm} {arm_label(state, arm)} | {len(ss)} ({sum(1 for s in ss if s['scheduled'])}) | {h:.1f} | "
                      f"{sum(s['paid_jobs'] for s in ss) / h:.0f} | {sum(s['paid_usd'] for s in ss) / h:.4f} | "
-                     f"{sum(s['base_usd'] for s in ss) / h:.4f} | {'; '.join(idx)} | {gaps[len(gaps) // 2] if gaps else 0:.0f} |")
+                     f"{sum(s['base_usd'] for s in ss) / h:.4f} | {'; '.join(idx)} | {gaps[len(gaps) // 2] if gaps else 0:.0f} | {err_rate} |")
+    lines += ["", "Provider log errors: Error/Fault-level lines in the provider's own log (counted since 2026-10-01). Their text is hidden by macOS unless private log data is enabled; then they are also sorted into rejected/timeout/cancelled/failed by keyword. Only counts are kept.", ""]
     lines += ["", "Published network counts are a privacy-filtered sample (872 gpt-oss requests in an evening window where this Mac alone served 2829), so the index can exceed 100: compare it between arms, not as a market share. \\* some hours not published yet (≥1 h lag).", ""]
 
     def gpt_rates(arm):
@@ -865,7 +927,7 @@ def cmd_report(args):
 
     shown = [s for s in segs if not hours_back or (s["end"] or ts) >= ts - hours_back * 3600]
     lines += ["## Segments" + (f" (last {hours_back:.0f} h)" if hours_back else ""), "",
-              "| Block | Start | Arm | Min | Jobs | Paid $ | Base $ | Longest gap | Stopped because |", "|---|---|---|---|---|---|---|---|---|"]
+              "| Block | Start | Arm | Min | Jobs | Paid $ | Base $ | Longest gap | Log errors | Stopped because |", "|---|---|---|---|---|---|---|---|---|---|"]
     for s in shown:
         models = ", ".join(f"{k.split('-')[0]}:{v['jobs']}" for k, v in s["per_model"].items())
         why = s.get("stop_reason") or ("running" if s.get("running") else "")
@@ -875,7 +937,7 @@ def cmd_report(args):
             why = (why + "; paused").strip("; ")
         lines.append(f"| {s['block']} | {s['start_local'][5:16].replace('T', ' ')} | {s['arm']} | "
                      f"{((s['end'] or ts) - s['start']) / 60:.0f} | {s['paid_jobs']} {('(' + models + ')') if models else ''} | "
-                     f"{s['paid_usd']:.4f} | {s['base_usd']:.4f} | {fmt(s['longest_gap_min'], 0)} | {why} |")
+                     f"{s['paid_usd']:.4f} | {s['base_usd']:.4f} | {fmt(s['longest_gap_min'], 0)} | {log_cell(s.get('log'))} | {why} |")
 
     cands = state.get("candidates", {})
     if cands:
@@ -887,6 +949,15 @@ def cmd_report(args):
         lines += ["", "## Failed switches", ""] + [f"- {e['at'][5:16]} {e.get('block')} {e.get('arm')}: {e.get('message', '')}" for e in fails[-10:]]
     print("\n".join(lines))
     return 0
+
+
+def log_cell(log):
+    if not log:
+        return "–"
+    kinds = [f"{k[4:]} {v}" for k, v in sorted(log.items())
+             if k not in ("log_lines", "log_errors", "log_private") and v]
+    hidden = f", {log.get('log_private', 0)} hidden" if log.get("log_private") else ""
+    return f"{log.get('log_errors', 0)}{hidden}" + (f" ({', '.join(kinds)})" if kinds else "")
 
 
 def fmt(x, digits=1):
