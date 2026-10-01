@@ -981,8 +981,10 @@ def cmd_report(args):
         logged = [s for s in ss if (s.get("log") or {}).get("log_lines") is not None and s.get("log")]
         log_h = sum((s.get("end") or ts) - s["start"] for s in logged) / 3600
         job_errs = sum(s["log"].get("log_" + k, 0) for s in logged for k in JOB_KINDS)
+        # Job-related errors are rare, so show their count, not a rate that
+        # rounds to 0 (2 cancellations in 8 h read "job-related 0").
         err_rate = (f"{sum(s['log'].get('log_errors', 0) for s in logged) / log_h:.0f}"
-                    f" (job-related {job_errs / log_h:.0f})") if log_h > 0.05 else "–"
+                    f" (job-related: {job_errs} total)") if log_h > 0.05 else "–"
         lines.append(f"| {arm} {arm_label(state, arm)} | {len(ss)} ({sum(1 for s in ss if s['scheduled'])}) | {h:.1f} | "
                      f"{sum(s['paid_jobs'] for s in ss) / h:.0f} | {sum(s['paid_usd'] for s in ss) / h:.4f} | "
                      f"{sum(s['base_usd'] for s in ss) / h:.4f} | {'; '.join(idx)} | {gaps[len(gaps) // 2] if gaps else 0:.0f} | {err_rate} | {jobs_cell(ss)} |")

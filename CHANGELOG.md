@@ -1,5 +1,9 @@
 # Changelog
 
+## v83
+
+**Rare job errors no longer round to zero in the experiment report.** The per-arm "Provider log errors/h" column showed job-related errors as a rate per hour, so B's two client cancellations in about 8 hours read "job-related 0". The column now shows their total count next to the overall rate.
+
 ## v82
 
 **The provider log is followed continuously, so no job slips through.** The provider logs each job's arrival and completion at Info level, and macOS keeps Info messages only briefly in memory, never on disk (`log show --last 8h` finds none of them). `experiment.py` polled every 5 minutes and mostly caught them, but on 2026-10-01 a paid job was counted as never completed because its Complete line was gone before the next poll. A new LaunchAgent, `io.darkbloom.log-stream` (KeepAlive), runs `provider_log_stream.py`, which follows `log stream` for `dev.darkbloom.provider`. It writes the job rows (`~/.darkbloom/jobs/`), per-minute counts of log lines and Error/Fault kinds (`~/.darkbloom/provider-log-counts.jsonl`), and its open jobs and position (`~/.darkbloom/provider-log-stream.json`). After a restart it first catches up on what is still in memory. `experiment.py` now sums those per-minute counts instead of reading the log itself, and the job panel reads open jobs from the stream's state.
