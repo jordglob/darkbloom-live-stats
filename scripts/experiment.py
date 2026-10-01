@@ -439,7 +439,12 @@ def arm_spec(state, arm):
 
 # --- provider log ---------------------------------------------------------
 
+# Order matters: first match wins. "Failed to parse coordinator message"
+# arrives every 30 s on its own (seen 2026-10-01, provider 0.9.14), says
+# nothing about jobs, and would otherwise land in "failed".
+JOB_KINDS = ("rejected", "timeout", "cancelled", "failed")
 LOG_KINDS = (
+    ("unparsed_coordinator_msg", ("failed to parse coordinator message",)),
     ("rejected", ("429", "reject", "capacity", "busy", "overload")),
     ("timeout", ("timeout", "timed out", "deadline")),
     ("cancelled", ("cancel",)),
@@ -905,11 +910,13 @@ def cmd_report(args):
         gaps = sorted(s["longest_gap_min"] for s in ss if s["longest_gap_min"] is not None)
         logged = [s for s in ss if (s.get("log") or {}).get("log_lines") is not None and s.get("log")]
         log_h = sum((s.get("end") or ts) - s["start"] for s in logged) / 3600
-        err_rate = f"{sum(s['log'].get('log_errors', 0) for s in logged) / log_h:.0f}" if log_h > 0.05 else "–"
+        job_errs = sum(s["log"].get("log_" + k, 0) for s in logged for k in JOB_KINDS)
+        err_rate = (f"{sum(s['log'].get('log_errors', 0) for s in logged) / log_h:.0f}"
+                    f" (job-related {job_errs / log_h:.0f})") if log_h > 0.05 else "–"
         lines.append(f"| {arm} {arm_label(state, arm)} | {len(ss)} ({sum(1 for s in ss if s['scheduled'])}) | {h:.1f} | "
                      f"{sum(s['paid_jobs'] for s in ss) / h:.0f} | {sum(s['paid_usd'] for s in ss) / h:.4f} | "
                      f"{sum(s['base_usd'] for s in ss) / h:.4f} | {'; '.join(idx)} | {gaps[len(gaps) // 2] if gaps else 0:.0f} | {err_rate} |")
-    lines += ["", "Provider log errors: Error/Fault-level lines in the provider's own log (counted since 2026-10-01). Their text is hidden by macOS unless private log data is enabled; then they are also sorted into rejected/timeout/cancelled/failed by keyword. Only counts are kept.", ""]
+    lines += ["", "Provider log errors: Error/Fault-level lines in the provider's own log (counted since 2026-10-01). Since 2026-10-01 11:17 private log data is enabled for the provider (a configuration profile), so they are also sorted by keyword; "job-related" = rejected, timeout, cancelled or failed. The ~120/h baseline is "Failed to parse coordinator message" every 30 s, unrelated to jobs. Only counts are kept.", ""]
     lines += ["", "Published network counts are a privacy-filtered sample (872 gpt-oss requests in an evening window where this Mac alone served 2829), so the index can exceed 100: compare it between arms, not as a market share. \\* some hours not published yet (≥1 h lag).", ""]
 
     def gpt_rates(arm):

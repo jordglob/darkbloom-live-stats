@@ -1,5 +1,9 @@
 # Changelog
 
+## v77
+
+**The provider's hidden log errors turned out to be one harmless message.** With private log data enabled for `dev.darkbloom.provider` only (a configuration profile installed by hand on 2026-10-01 11:17; trust stayed `hardware`), the ~120 Error-level lines an hour read "Failed to parse coordinator message", one every 30 seconds. They are unrelated to jobs. They now count as `unparsed_coordinator_msg` instead of matching "failed", and the report's errors/h column shows the job-related part (rejected, timeout, cancelled, failed) separately.
+
 ## v76
 
 **The experiment counts the provider's own log errors per segment.** Only finished jobs are visible: `requests_served` and the ledger agree, but nothing counts jobs that were sent here and then rejected, timed out or failed before the provider counted them. The provider does log ~120 Error-level `coordinator` messages an hour, but macOS hides their text as `<private>`. Each 5-minute tick now reads the new lines (`darkbloom logs --last …`, ~1.5 s) and stores how many Error/Fault messages there were. If private log data is enabled, it also stores how many look like rejected, timeout, cancelled or failed jobs, matched by keyword. Only counts are kept, never message text, which could carry request content. The report adds "Provider log errors/h" per arm and a per-segment column, so a model that draws more errors stands out even while their meaning is hidden.
