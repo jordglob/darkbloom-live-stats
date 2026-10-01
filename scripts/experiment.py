@@ -916,7 +916,7 @@ def cmd_report(args):
         lines.append(f"| {arm} {arm_label(state, arm)} | {len(ss)} ({sum(1 for s in ss if s['scheduled'])}) | {h:.1f} | "
                      f"{sum(s['paid_jobs'] for s in ss) / h:.0f} | {sum(s['paid_usd'] for s in ss) / h:.4f} | "
                      f"{sum(s['base_usd'] for s in ss) / h:.4f} | {'; '.join(idx)} | {gaps[len(gaps) // 2] if gaps else 0:.0f} | {err_rate} |")
-    lines += ["", "Provider log errors: Error/Fault-level lines in the provider's own log (counted since 2026-10-01). Since 2026-10-01 11:17 private log data is enabled for the provider (a configuration profile), so they are also sorted by keyword; "job-related" = rejected, timeout, cancelled or failed. The ~120/h baseline is "Failed to parse coordinator message" every 30 s, unrelated to jobs. Only counts are kept.", ""]
+    lines += ["", "Provider log errors: Error/Fault-level lines in the provider's own log (counted since 2026-10-01). Since 2026-10-01 11:17 private log data is enabled for the provider (a configuration profile), so they are also sorted by keyword; job-related = rejected, timeout, cancelled or failed. The ~120/h baseline is 'Failed to parse coordinator message' every 30 s, unrelated to jobs. Only counts are kept.", ""]
     lines += ["", "Published network counts are a privacy-filtered sample (872 gpt-oss requests in an evening window where this Mac alone served 2829), so the index can exceed 100: compare it between arms, not as a market share. \\* some hours not published yet (≥1 h lag).", ""]
 
     def gpt_rates(arm):
