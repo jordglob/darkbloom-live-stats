@@ -1,5 +1,9 @@
 # Changelog
 
+## v78
+
+**The experiment report shows demand by hour of day.** A new section lists, for each local hour, the mean published network requests for the three busiest models (gpt-oss always included) and all models together. It also shows this Mac's gpt-oss jobs per hour while gpt-oss was hosted, from the 5-minute samples. Unpublished hours fall under Darkbloom's privacy threshold, so they show as unknown, not zero. The first two days already show the two curves do not match: published gpt-oss demand is flat at ~150-600 an hour, while this Mac's own gpt-oss traffic swings from 1 to 1181 an hour. Its peaks are mostly near-identical small jobs (340-360 prompt tokens, at most 60 completion tokens): 818 of 1181 at 21:00 on 09-30. One or a few bulk clients would explain both the swings and why the public stats miss them (a cohort is only published with requests from 3 different accounts). Not proven.
+
 ## v77
 
 **The provider's hidden log errors turned out to be one harmless message.** With private log data enabled for `dev.darkbloom.provider` only (a configuration profile installed by hand on 2026-10-01 11:17; trust stayed `hardware`), the ~120 Error-level lines an hour read "Failed to parse coordinator message", one every 30 seconds. They are unrelated to jobs. They now count as `unparsed_coordinator_msg` instead of matching "failed", and the report's errors/h column shows the job-related part (rejected, timeout, cancelled, failed) separately.

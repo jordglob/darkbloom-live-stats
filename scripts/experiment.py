@@ -838,6 +838,34 @@ def network_requests(net, local_model, start, end):
     return total
 
 
+def demand_by_hour():
+    """Per local hour of day: published network requests per model (mean over
+    the days that hour was published - unpublished hours fall under
+    Darkbloom's privacy threshold and are unknown, not zero), and this Mac's
+    gpt-oss jobs per hour while gpt-oss was hosted (from 5-min samples)."""
+    net = {}
+    for (model, hour), counts in network_by_hour().items():
+        t = parse_ts(hour)
+        h = dt.datetime.fromtimestamp(t).hour
+        net.setdefault(h, {}).setdefault(model, []).append(counts.get("requests", 0))
+    hosted_slots = set()
+    for row in read_jsonl(SAMPLES):
+        ts = row.get("ts") or (parse_ts(row["at"]) if row.get("at") else None)
+        if ts and any(m.startswith("gpt-oss") for m in row.get("hosted") or []):
+            hosted_slots.add(int(ts // 300))
+    ours, cover = {}, {}
+    for slot in hosted_slots:
+        h = dt.datetime.fromtimestamp(slot * 300).hour
+        cover[h] = cover.get(h, 0) + 300
+    if hosted_slots:
+        first = min(hosted_slots) * 300
+        for t, e in ledger_between(first, now()):
+            if e.get("model", "").startswith("gpt-oss") and int(t // 300) in hosted_slots:
+                h = dt.datetime.fromtimestamp(t).hour
+                ours[h] = ours.get(h, 0) + 1
+    return net, ours, cover
+
+
 def all_segments(state):
     """Summaries of finished blocks plus the running block's segments so far."""
     out = []
@@ -930,6 +958,28 @@ def cmd_report(args):
                   f"- B with companion: n={len(b)}, median {med(b):.0f}/h, mean {sum(b) / len(b):.0f}/h"]
         if min(len(a), len(b)) < 6:
             lines.append("- Too early to conclude while n < 6 per arm.")
+        lines.append("")
+
+    net_h, ours_h, cover_h = demand_by_hour()
+    if net_h:
+        top = sorted({m for h in net_h.values() for m in h},
+                     key=lambda m: -sum(sum(v) for h in net_h.values() for k, v in h.items() if k == m))[:3]
+        if not any(m.startswith("gpt-oss") for m in top):
+            top = [m for m in {m for h in net_h.values() for m in h} if m.startswith("gpt-oss")][:1] + top[:2]
+        lines += ["## Demand by hour of day (local time)", "",
+                  "Network: mean published requests in that hour (days published in brackets; unpublished hours are below Darkbloom's privacy threshold, not zero). Here: this Mac's gpt-oss jobs per hour while gpt-oss was hosted (hours observed in brackets).", "",
+                  "| Hour | " + " | ".join(m.split("-")[0] + " " + (m.split("-")[1] if "-" in m else "") for m in top) + " | All models | Here: gpt-oss jobs/h |",
+                  "|---|" + "---|" * (len(top) + 2)]
+        for h in range(24):
+            row = net_h.get(h, {})
+            cells = []
+            for m in top:
+                v = row.get(m)
+                cells.append(f"{sum(v) / len(v):.0f} ({len(v)})" if v else "–")
+            days = max((len(v) for v in row.values()), default=0)
+            total = f"{sum(sum(v) for v in row.values()) / days:.0f}" if days else "–"
+            here = f"{ours_h.get(h, 0) / (cover_h[h] / 3600):.0f} ({cover_h[h] / 3600:.1f})" if cover_h.get(h) else "–"
+            lines.append(f"| {h:02d} | " + " | ".join(cells) + f" | {total} | {here} |")
         lines.append("")
 
     shown = [s for s in segs if not hours_back or (s["end"] or ts) >= ts - hours_back * 3600]
