@@ -161,6 +161,13 @@ def _latest_smc_system_w():
     return None
 
 
+def _remember_gpu_max(mhz):
+    if mhz:
+        _gpu_max_mhz["v"] = float(mhz)
+        return round(mhz)
+    return None
+
+
 def get_live_power():
     """Latest SINGLE CPU/GPU sample from the raw log (not the 5-min average)."""
     if not RAW_POWER_LOG.exists():
@@ -248,7 +255,7 @@ def get_live_power():
         # GPU's capacity is in use - near 0 when idle, near 100 under
         # inference, which runs at or near the top clock.
         "gpu_active_mhz": round(gpu_active_mhz) if gpu_active_mhz is not None else None,
-        "gpu_max_mhz": round(gpu_max_mhz) if gpu_max_mhz else None,
+        "gpu_max_mhz": _remember_gpu_max(gpu_max_mhz),
         "gpu_load_pct": round(gpu_active_pct * gpu_active_mhz / gpu_max_mhz, 1)
         if gpu_active_pct is not None and gpu_active_mhz is not None and gpu_max_mhz else None,
     }
@@ -3743,6 +3750,19 @@ TEMP_AGE_FLOOR_MS = 200  # never claim resolution finer than this
 MACMON_TS_RE = re.compile(r'"timestamp":\s*"([^"]+)"')
 MACMON_GPU_TEMP_RE = re.compile(r'"gpu_temp_avg":\s*([0-9.]+)')
 MACMON_CPU_TEMP_RE = re.compile(r'"cpu_temp_avg":\s*([0-9.]+)')
+MACMON_GPU_USAGE_RE = re.compile(r'"gpu_usage":\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]')
+# Top GPU clock, for weighting macmon's residency by clock like the GPU Load
+# gauge. Refreshed from powermetrics whenever get_live_power() parses it;
+# 1578 MHz is the M4 Pro's top step.
+_gpu_max_mhz = {"v": 1578.0}
+
+
+def _macmon_gpu_load(line):
+    m = MACMON_GPU_USAGE_RE.search(line)
+    if not m:
+        return None
+    mhz, frac = float(m.group(1)), float(m.group(2))
+    return max(0.0, min(100.0, frac * mhz / _gpu_max_mhz["v"] * 100))
 # The full history (12MB of macmon + the whole CSV) is expensive to parse and
 # barely changes, while the right-hand edge of the chart changes every ~5s.
 # So the parsed SAMPLES are cached and only topped up from the tail of the log,
@@ -3750,7 +3770,8 @@ MACMON_CPU_TEMP_RE = re.compile(r'"cpu_temp_avg":\s*([0-9.]+)')
 # request. That's what lets the chart refresh at the sampling rate instead of
 # at whatever interval a full re-parse could afford.
 TEMP_AGE_FULL_RELOAD_SEC = 120
-_temp_age_samples = {"fine": [], "csv_temp": [], "csv_fan": [], "install_ts": None, "loaded_at": 0.0}
+_temp_age_samples = {"fine": [], "csv_temp": [], "csv_fan": [], "csv_load": [], "csv_jobs": [],
+                     "install_ts": None, "loaded_at": 0.0}
 _temp_age_lock = threading.Lock()
 
 
@@ -3817,7 +3838,7 @@ def _read_macmon_samples(now, max_age_sec):
                 if t < cutoff:
                     continue
                 m_c = MACMON_CPU_TEMP_RE.search(line)
-                out.append((t, float(m_v.group(1)), float(m_c.group(1)) if m_c else None))
+                out.append((t, float(m_v.group(1)), float(m_c.group(1)) if m_c else None, _macmon_gpu_load(line)))
     except Exception:
         return []
     return out
@@ -3850,7 +3871,7 @@ def _read_macmon_tail_since(since_ts, max_bytes=262144):
                 continue
             if t > since_ts:
                 m_c = MACMON_CPU_TEMP_RE.search(line)
-                out.append((t, float(m_v.group(1)), float(m_c.group(1)) if m_c else None))
+                out.append((t, float(m_v.group(1)), float(m_c.group(1)) if m_c else None, _macmon_gpu_load(line)))
     except Exception:
         return []
     return out
@@ -3875,8 +3896,9 @@ def get_temp_age_series():
     with _temp_age_lock:
         stale = now - _temp_age_samples["loaded_at"] > TEMP_AGE_FULL_RELOAD_SEC
         if stale:
-            csv_temp, csv_fan = [], []
+            csv_temp, csv_fan, csv_load, csv_jobs = [], [], [], []
             install_ts = None
+            prev_req, prev_t = None, None
             try:
                 if CSV_PATH.exists():
                     with open(CSV_PATH, newline="") as f:
@@ -3893,6 +3915,23 @@ def get_temp_age_series():
                                     csv_temp.append((t, float(gt)))
                                 except ValueError:
                                     pass
+                            gl = r.get("avg_gpu_load_pct")
+                            if gl not in (None, ""):
+                                try:
+                                    csv_load.append((t, float(gl)))
+                                except ValueError:
+                                    pass
+                            # Jobs per minute from the daemon's lifetime
+                            # counter; a drop is a restart, so the new value
+                            # is all new work.
+                            try:
+                                req = int(r.get("requests_served") or 0)
+                            except ValueError:
+                                req = None
+                            if req is not None and prev_req is not None and prev_t and t > prev_t:
+                                done = req - prev_req if req >= prev_req else req
+                                csv_jobs.append((t, done / ((t - prev_t) / 60)))
+                            prev_req, prev_t = req, t
                             rpm, mx = r.get("fan_rpm"), r.get("fan_max_rpm")
                             if rpm not in (None, "") and mx not in (None, "", "0"):
                                 try:
@@ -3905,6 +3944,8 @@ def get_temp_age_series():
                 "fine": _read_macmon_samples(now, TEMP_AGE_FINE_MAX_SEC),
                 "csv_temp": csv_temp,
                 "csv_fan": csv_fan,
+                "csv_load": csv_load,
+                "csv_jobs": csv_jobs,
                 "install_ts": install_ts,
                 "loaded_at": now,
             })
@@ -3920,6 +3961,8 @@ def get_temp_age_series():
         fine = list(_temp_age_samples["fine"])
         csv_temp = list(_temp_age_samples["csv_temp"])
         csv_fan = list(_temp_age_samples["csv_fan"])
+        csv_load = list(_temp_age_samples["csv_load"])
+        csv_jobs = list(_temp_age_samples["csv_jobs"])
         install_ts = _temp_age_samples["install_ts"]
 
     # Real sampling interval, measured rather than assumed - it sets the
@@ -3955,12 +3998,42 @@ def get_temp_age_series():
     # starts (reboot, install.sh), so right after a restart macmon holds only
     # minutes of data and a fixed 24h handover left a day-long hole.
     fine_cutoff = now - TEMP_AGE_FINE_MAX_SEC
-    fine_in_window = [(t, g) for t, g, _c in fine if t >= fine_cutoff]
+    fine_in_window = [(t, g) for t, g, _c, _l in fine if t >= fine_cutoff]
     handover = min((t for t, _g in fine_in_window), default=now)
     temp_samples = fine_in_window + [s for s in csv_temp if s[0] < handover]
     # CPU temperature exists only in macmon, so this series simply stops where
     # macmon's coverage does rather than being faked from the CSV.
-    cpu_samples = [(t, c) for t, _g, c in fine if c is not None]
+    cpu_samples = [(t, c) for t, _g, c, _l in fine if c is not None]
+    # GPU load: macmon's residency weighted by clock where macmon reaches,
+    # the energy log's clock-weighted column (v81+) before that.
+    load_fine = [(t, l) for t, _g, _c, l in fine if l is not None and t >= fine_cutoff]
+    load_handover = min((t for t, _l in load_fine), default=now)
+    load_samples = load_fine + [x for x in csv_load if x[0] < load_handover]
+    # Jobs per minute: one sample per minute (zeros included) from the job
+    # rows provider_log_stream.py writes, back to where that tracking
+    # starts; the energy log's 5-minute counter deltas before that.
+    job_minutes = {}
+    first_job = None
+    try:
+        for path in sorted(JOBS_DIR.glob("jobs-*.jsonl"))[-2:]:
+            with open(path) as f:
+                for line in f:
+                    try:
+                        j = json.loads(line)
+                    except Exception:
+                        continue
+                    t = j.get("completed")
+                    if t is None or j.get("outcome") != "completed":
+                        continue
+                    first_job = t if first_job is None else min(first_job, t)
+                    job_minutes[int(t // 60)] = job_minutes.get(int(t // 60), 0) + 1
+    except Exception:
+        pass
+    jobs_samples = []
+    if first_job is not None:
+        for minute in range(int(first_job // 60), int(now // 60)):
+            jobs_samples.append((minute * 60 + 30, float(job_minutes.get(minute, 0))))
+    jobs_samples = [x for x in csv_jobs if first_job is None or x[0] < first_job] + jobs_samples
 
     result = {
         "now": now,
@@ -3973,6 +4046,8 @@ def get_temp_age_series():
         "temp": _log_bin(temp_samples, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
         "cpu_temp": _log_bin(cpu_samples, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
         "fan": _log_bin(csv_fan, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
+        "gpu_load": _log_bin(load_samples, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
+        "jobs_per_min": _log_bin(jobs_samples, now, frame_min_ms, frame_max_ms, TEMP_AGE_BINS),
     }
     return result
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## v84
+
+**The GPU Temp & Fan chart can show GPU load and jobs per minute.** Two new tick boxes add curves on the right axis, next to fan %:
+
+- **GPU load %:** the same clock-weighted figure as the GPU Load gauge. macmon's ~5 s readings (`gpu_usage` residency × clock ÷ top clock) where macmon reaches, the energy log's `avg_gpu_load_pct` (v81+) before that.
+- **Jobs/min:** completed jobs per minute, one sample a minute with zeros included, from the provider-log job rows (v79/v82) back to where that tracking starts; before that, the energy log's 5-minute `requests_served` deltas, with a drop treated as a restart. Jobs are a count, so the curve is scaled so its busiest point fills the axis. The tooltip shows the real number.
+
+Both are off by default. `/api/temp_age` adds `gpu_load` and `jobs_per_min`.
+
 ## v83
 
 **Rare job errors no longer round to zero in the experiment report.** The per-arm "Provider log errors/h" column showed job-related errors as a rate per hour, so B's two client cancellations in about 8 hours read "job-related 0". The column now shows their total count next to the overall rate.

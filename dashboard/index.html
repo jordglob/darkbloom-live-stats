@@ -425,6 +425,8 @@
       <label class="warmup-toggle" style="font-weight:400;margin:0" title="Shaded band from each point's bin average up to the hottest reading in that bin. Its width shows how much that point is summarising - seconds near now, days at the old end."><input type="checkbox" class="series-toggle" data-series="peak" checked> <i style="background:var(--gauge-gpu);opacity:.35;display:inline-block;width:9px;height:9px;border-radius:2px"></i> Peak band</label>
       <label class="warmup-toggle" style="font-weight:400;margin:0" title="CPU die temperature, same axis as GPU. Only macmon reports it, so this series stops where macmon's coverage does."><input type="checkbox" class="series-toggle" data-series="cpu"> <i style="background:var(--series-elpris);display:inline-block;width:9px;height:9px;border-radius:2px"></i> CPU temp</label>
       <label class="warmup-toggle" style="font-weight:400;margin:0"><input type="checkbox" class="series-toggle" data-series="fan" checked> <i style="background:var(--gauge-cpu);display:inline-block;width:9px;height:9px;border-radius:2px"></i> Fan %</label>
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="GPU load on the right axis: time awake weighted by clock, the same figure as the GPU Load gauge. macmon's ~5s readings where macmon reaches, the energy log's 5-minute average (logged since v81) before that."><input type="checkbox" class="series-toggle" data-series="load"> <i style="background:var(--gauge-total);display:inline-block;width:9px;height:9px;border-radius:2px"></i> GPU load %</label>
+      <label class="warmup-toggle" style="font-weight:400;margin:0" title="Completed jobs per minute, scaled so the busiest point fills the right axis; hover for the real number. From the provider-log job rows where they exist (since 2026-10-01), the energy log's 5-minute counter before that."><input type="checkbox" class="series-toggle" data-series="jobs"> <i style="background:var(--series-revenue);display:inline-block;width:9px;height:9px;border-radius:2px"></i> Jobs/min</label>
       <span id="max-power-warning" class="warmup-status" style="margin:0;font-size:12px;color:var(--status-serious)"></span>
     </div>
     <div class="warmup-row" style="margin-bottom:4px">
@@ -1104,7 +1106,7 @@ async function postMaxPower(level) {
 // Which series the log-age chart draws. Kept here rather than read from the
 // DOM at draw time so the chart can redraw at the live cadence without
 // touching the document on every frame.
-const seriesOn = { temp: true, peak: true, cpu: false, fan: true };
+const seriesOn = { temp: true, peak: true, cpu: false, fan: true, load: false, jobs: false };
 
 let tempAgeTimer = null;
 let lastTempAge = null;
@@ -3084,6 +3086,26 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
     svg.appendChild(el);
   }
 
+  // GPU load (%) and jobs/min share the right axis with fan %. Jobs are a
+  // count, not a percent, so they are scaled to the busiest bin in view and
+  // the tooltip shows the real value.
+  const jobsMax = Math.max(1e-9, ...(ta.jobs_per_min || []).map(p => p.v));
+  const loadPts = opts.show.load
+    ? (ta.gpu_load || []).map(p => ({ x: xForAge(p.age_ms), y: yToPixelR(p.v), age: p.age_ms, v: p.v }))
+    : [];
+  const jobsPts = opts.show.jobs
+    ? (ta.jobs_per_min || []).map(p => ({ x: xForAge(p.age_ms), y: yToPixelR(p.v / jobsMax * 100), age: p.age_ms, v: p.v }))
+    : [];
+  [[loadPts, 'var(--gauge-total)'], [jobsPts, 'var(--series-revenue)']].forEach(([pts, color]) => {
+    if (pts.length < 2) return;
+    const el = mk('path');
+    el.setAttribute('d', pts.map((p, i) => (i ? 'L' : 'M') + p.x.toFixed(2) + ',' + p.y.toFixed(2)).join(' '));
+    el.setAttribute('fill', 'none');
+    el.setAttribute('stroke', color);
+    el.setAttribute('stroke-width', '1.5');
+    svg.appendChild(el);
+  });
+
   // --- hover ---
   const hoverLine = mk('line');
   hoverLine.setAttribute('class', 'crosshair');
@@ -3128,6 +3150,8 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
     const pt = nearest(tempPts, mx);
     const pf = nearest(fanPts, mx);
     const pc = nearest(cpuPts, mx);
+    const pl = nearest(loadPts, mx);
+    const pj = nearest(jobsPts, mx);
     if (!pt) return;
     hoverLine.setAttribute('x1', pt.x); hoverLine.setAttribute('x2', pt.x);
     hoverLine.style.display = 'block';
@@ -3151,6 +3175,8 @@ function renderLogAgeChart(svgId, tooltipId, ta, opts = {}) {
       (pt.peak > pt.v + 0.05 ? `<div class="t-row"><span>Peak in bin</span><strong>${pt.peak.toFixed(1)}°C</strong></div>` : '') +
       (pc ? `<div class="t-row"><span>CPU Temp</span><strong>${pc.v.toFixed(1)}°C</strong></div>` : '') +
       (pf ? `<div class="t-row"><span>Fan speed</span><strong>${pf.v.toFixed(0)}%</strong></div>` : '') +
+      (pl ? `<div class="t-row"><span>GPU load</span><strong>${pl.v.toFixed(0)}%</strong></div>` : '') +
+      (pj ? `<div class="t-row"><span>Jobs/min</span><strong>${pj.v < 10 ? pj.v.toFixed(1) : pj.v.toFixed(0)}</strong></div>` : '') +
       `<div class="t-row"><span>Source</span><strong>${src}</strong></div>`;
   });
   overlay.addEventListener('mouseleave', () => {
