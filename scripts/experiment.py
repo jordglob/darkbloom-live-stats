@@ -456,49 +456,22 @@ LOG_KINDS = (
 
 
 def provider_log_counts(state):
-    """Error/Fault-level provider log messages since the last tick. The
-    provider logs ~120 coordinator errors an hour whose text macOS hides as
-    <private>, so the count is all we get unless private log data is enabled;
-    then each message is also sorted into a kind by keyword. Only counts are
-    stored - never message text, which could carry request content."""
-    import subprocess
-    last = state.get("log_checked_at") or now() - 300
-    span = int(min(max(now() - last, 60), 3600)) + 5
-    try:
-        out = subprocess.run([str(DARKBLOOM_BIN), "logs", "--last", f"{span}s", "--debug"],
-                             capture_output=True, text=True, timeout=60).stdout
-    except Exception as e:
-        return {"log_error": str(e)[:100]}
-    counts = {"log_lines": 0, "log_errors": 0, "log_private": 0}
-    newest = last
-    open_jobs = state.setdefault("open_jobs", {})
-    hosted = daemon_snapshot().get("hosted") or []
-    for line in out.splitlines():
-        try:
-            d = json.loads(line)
-            ts = dt.datetime.strptime(d["timestamp"], "%Y-%m-%d %H:%M:%S.%f%z").timestamp()
-        except Exception:
-            continue
-        if ts <= last:
-            continue
-        newest = max(newest, ts)
-        counts["log_lines"] += 1
-        track_job_line(open_jobs, d, ts, hosted)
-        if d.get("messageType") not in ("Error", "Fault"):
-            continue
-        counts["log_errors"] += 1
-        msg = (d.get("eventMessage") or "").lower()
-        if msg == "<private>":
-            counts["log_private"] += 1
-            continue
-        kind = next((k for k, words in LOG_KINDS if any(w in msg for w in words)), "other")
-        counts["log_" + kind] = counts.get("log_" + kind, 0) + 1
-    state["log_checked_at"] = newest if newest > last else now()
-    # Jobs received but never completed: written out as incomplete.
-    for jid, j in list(open_jobs.items()):
-        if now() - j["received"] > JOB_GIVE_UP_SEC:
-            write_job(dict(j, id=jid, outcome="incomplete"))
-            del open_jobs[jid]
+    """Error/Fault-level provider log messages since the last tick, summed
+    from the per-minute counts provider_log_stream.py writes (it follows the
+    log continuously and also records every job). Only whole minutes are
+    read, so a minute is never counted twice. Only counts are stored - never
+    message text, which could carry request content."""
+    since = state.get("log_counts_until") or (int(now() // 60) * 60 - 300)
+    until = int(now() // 60) * 60 - 60  # the streamer writes a minute once it has passed
+    counts = {}
+    for row in read_jsonl(DB / "provider-log-counts.jsonl"):
+        if since <= row.get("minute", 0) < until:
+            for k, v in row.items():
+                if k.startswith("log_"):
+                    counts[k] = counts.get(k, 0) + v
+    state["log_counts_until"] = max(since, until)
+    counts.setdefault("log_lines", 0)
+    counts.setdefault("log_errors", 0)
     return counts
 
 

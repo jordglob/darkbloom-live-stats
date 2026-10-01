@@ -2141,7 +2141,7 @@ def get_completion_check():
 
 
 JOBS_DIR = HOME / ".darkbloom" / "jobs"
-EXPERIMENT_STATE_PATH = HOME / ".darkbloom" / "experiment" / "state.json"
+LOG_STREAM_STATE_PATH = HOME / ".darkbloom" / "provider-log-stream.json"
 JOB_OUTCOME_WINDOWS = {"1h": 3600, "24h": 86400}
 # A completed job normally reaches the ledger within a poll or two.
 JOB_PAY_GRACE_SEC = 180
@@ -2151,7 +2151,7 @@ _job_outcomes_cache = {"at": 0.0, "data": None}
 def get_job_outcomes():
     """This Mac's jobs, followed one by one: received (provider log), then
     completed or not (provider log), then paid or not (ledger, matched on
-    job_id). Rows are written by experiment.py from the provider's own log,
+    job_id). Rows are written by provider_log_stream.py from the provider's own log,
     readable since private log data was enabled on 2026-10-01; before that,
     only completed and paid counts exist. Returns None if nothing recorded."""
     now = time.time()
@@ -2169,7 +2169,7 @@ def get_job_outcomes():
     if not jobs:
         return None
     try:
-        open_jobs = json.loads(EXPERIMENT_STATE_PATH.read_text()).get("open_jobs") or {}
+        open_jobs = json.loads(LOG_STREAM_STATE_PATH.read_text()).get("open_jobs") or {}
     except Exception:
         open_jobs = {}
     paid = {}
