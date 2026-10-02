@@ -448,6 +448,10 @@ def arm_spec(state, arm):
 JOB_KINDS = ("rejected", "timeout", "cancelled", "failed")
 LOG_KINDS = (
     ("unparsed_coordinator_msg", ("failed to parse coordinator message",)),
+    # Connection drops say "failed"/"error" too but are not job failures
+    # (four at 2026-10-02 04:25, reconnected within seconds).
+    ("connection", ("coordinator connection", "disconnected from coordinator", "reconnect")),
+    ("update", ("auto-update",)),
     ("rejected", ("429", "reject", "capacity", "busy", "overload")),
     ("timeout", ("timeout", "timed out", "deadline")),
     ("cancelled", ("cancel",)),
@@ -553,6 +557,20 @@ def energy_between(start, end):
     return round(wh, 1), round(cost, 3)
 
 
+# "Batch-like": the near-identical small gpt-oss jobs that make up most of
+# this Mac's traffic peaks (seen 2026-09-29..10-01: 340-360 prompt tokens,
+# a few dozen completion tokens). If one bulk client sends them, their share
+# says how much of the income hangs on that one client.
+BATCH_PROMPT = (330, 370)
+BATCH_MAX_COMPLETION = 60
+
+
+def is_batch_like(e):
+    return (str(e.get("model", "")).startswith("gpt-oss")
+            and BATCH_PROMPT[0] <= (e.get("prompt_tokens") or 0) <= BATCH_PROMPT[1]
+            and (e.get("completion_tokens") or 0) <= BATCH_MAX_COMPLETION)
+
+
 def paid_jobs(models, start, end):
     return sum(1 for _, e in ledger_between(start, end)
                if e.get("model") != "base_reward" and any(same_model(m, e["model"]) or same_model(e["model"], m) for m in models))
@@ -574,6 +592,8 @@ def summarize_segment(block, seg, state):
             continue
         m = per_model.setdefault(e["model"], {"jobs": 0, "usd": 0.0, "completion_tokens": 0, "prompt_tokens": 0})
         m["jobs"] += 1
+        if is_batch_like(e):
+            m["batch_like"] = m.get("batch_like", 0) + 1
         m["usd"] += usd
         m["completion_tokens"] += e.get("completion_tokens") or 0
         m["prompt_tokens"] += e.get("prompt_tokens") or 0
@@ -630,6 +650,7 @@ def summarize_segment(block, seg, state):
         "energy_cost_sek": cost,
         "log": log,
         "jobs": jobs if jobs["received"] else None,
+        "batch_counted": True,  # summaries written before v85 lack batch_like
     }
 
 
@@ -905,6 +926,8 @@ def demand_by_hour():
             if e.get("model", "").startswith("gpt-oss") and int(t // 300) in hosted_slots:
                 h = dt.datetime.fromtimestamp(t).hour
                 ours[h] = ours.get(h, 0) + 1
+                if is_batch_like(e):
+                    ours[("batch", h)] = ours.get(("batch", h), 0) + 1
     return net, ours, cover
 
 
@@ -1011,9 +1034,9 @@ def cmd_report(args):
         if not any(m.startswith("gpt-oss") for m in top):
             top = [m for m in {m for h in net_h.values() for m in h} if m.startswith("gpt-oss")][:1] + top[:2]
         lines += ["## Demand by hour of day (local time)", "",
-                  "Network: mean published requests in that hour (days published in brackets; unpublished hours are below Darkbloom's privacy threshold, not zero). Here: this Mac's gpt-oss jobs per hour while gpt-oss was hosted (hours observed in brackets).", "",
-                  "| Hour | " + " | ".join(m.split("-")[0] + " " + (m.split("-")[1] if "-" in m else "") for m in top) + " | All models | Here: gpt-oss jobs/h |",
-                  "|---|" + "---|" * (len(top) + 2)]
+                  "Network: mean published requests in that hour (days published in brackets; unpublished hours are below Darkbloom's privacy threshold, not zero). Here: this Mac's gpt-oss jobs per hour while gpt-oss was hosted (hours observed in brackets), and the share of them that are batch-like (330-370 prompt tokens, at most 60 completion tokens - the near-identical small jobs behind the traffic peaks).", "",
+                  "| Hour | " + " | ".join(m.split("-")[0] + " " + (m.split("-")[1] if "-" in m else "") for m in top) + " | All models | Here: gpt-oss jobs/h | Here: batch-like share |",
+                  "|---|" + "---|" * (len(top) + 3)]
         for h in range(24):
             row = net_h.get(h, {})
             cells = []
@@ -1023,12 +1046,13 @@ def cmd_report(args):
             days = max((len(v) for v in row.values()), default=0)
             total = f"{sum(sum(v) for v in row.values()) / days:.0f}" if days else "–"
             here = f"{ours_h.get(h, 0) / (cover_h[h] / 3600):.0f} ({cover_h[h] / 3600:.1f})" if cover_h.get(h) else "–"
-            lines.append(f"| {h:02d} | " + " | ".join(cells) + f" | {total} | {here} |")
+            batch = f"{ours_h.get(('batch', h), 0) / ours_h[h] * 100:.0f}%" if ours_h.get(h) else "–"
+            lines.append(f"| {h:02d} | " + " | ".join(cells) + f" | {total} | {here} | {batch} |")
         lines.append("")
 
     shown = [s for s in segs if not hours_back or (s["end"] or ts) >= ts - hours_back * 3600]
     lines += ["## Segments" + (f" (last {hours_back:.0f} h)" if hours_back else ""), "",
-              "| Block | Start | Arm | Min | Jobs | Paid $ | Base $ | Longest gap | Log errors | Stopped because |", "|---|---|---|---|---|---|---|---|---|---|"]
+              "| Block | Start | Arm | Min | Jobs | gpt-oss batch-like | Paid $ | Base $ | Longest gap | Log errors | Stopped because |", "|---|---|---|---|---|---|---|---|---|---|---|"]
     for s in shown:
         models = ", ".join(f"{k.split('-')[0]}:{v['jobs']}" for k, v in s["per_model"].items())
         why = s.get("stop_reason") or ("running" if s.get("running") else "")
@@ -1038,6 +1062,7 @@ def cmd_report(args):
             why = (why + "; paused").strip("; ")
         lines.append(f"| {s['block']} | {s['start_local'][5:16].replace('T', ' ')} | {s['arm']} | "
                      f"{((s['end'] or ts) - s['start']) / 60:.0f} | {s['paid_jobs']} {('(' + models + ')') if models else ''} | "
+                     f"{batch_cell(s)} | "
                      f"{s['paid_usd']:.4f} | {s['base_usd']:.4f} | {fmt(s['longest_gap_min'], 0)} | {log_cell(s.get('log'))} | {why} |")
 
     cands = state.get("candidates", {})
@@ -1050,6 +1075,17 @@ def cmd_report(args):
         lines += ["", "## Failed switches", ""] + [f"- {e['at'][5:16]} {e.get('block')} {e.get('arm')}: {e.get('message', '')}" for e in fails[-10:]]
     print("\n".join(lines))
     return 0
+
+
+def batch_cell(seg):
+    if not seg.get("batch_counted"):
+        return "–"
+    g = [v for k, v in seg["per_model"].items() if k.startswith("gpt-oss")]
+    jobs = sum(v["jobs"] for v in g)
+    if not jobs:
+        return "–"
+    b = sum(v.get("batch_like", 0) for v in g)
+    return f"{b / jobs * 100:.0f}% ({b})"
 
 
 def jobs_cell(segs):

@@ -1,5 +1,13 @@
 # Changelog
 
+## v85
+
+**The report shows how much of the gpt-oss traffic is batch-like, and connection drops are no longer counted as job failures.**
+
+- **Batch-like share.** Most gpt-oss traffic peaks are near-identical small jobs (330-370 prompt tokens, at most 60 completion tokens), probably one bulk client. The segment table now has a "gpt-oss batch-like" column, and the demand-by-hour table shows their share per hour of day. First two days: 50-70% in the evening and around midnight, 0% from 06 to 12. Segments summarized before this version show "–", not a misleading 0%.
+- **Log error kinds.** "Coordinator connection failed", "Disconnected from coordinator" and "Reconnect ..." matched "failed" and were counted as job-related (seven at 04:25 on 10-02, when the provider reconnected within seconds). They are now `connection`. "Auto-update: v0.9.15 is quarantined after failed starts" is now `update`. Counts already written are not reclassified, so the night of 10-01/02 still shows those as failed.
+- Fixed the same day: the new hour column first read the wrong variable and broke `report`. Experiment switching was not affected.
+
 ## v84
 
 **The GPU Temp & Fan chart can show GPU load and jobs per minute.** Two new tick boxes add curves on the right axis, next to fan %:
