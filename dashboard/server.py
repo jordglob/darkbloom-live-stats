@@ -615,6 +615,10 @@ def get_autostart_state():
 
 
 INFERENCE_POLL_SEC = 0.5
+# When the current inference_active stretch began, for pages that load in
+# the middle of one (the chat panel's "Busy for ..." would otherwise start
+# counting from the page load).
+_busy_since = {"t": None}
 INFERENCE_DURATIONS_LOG = HOME / ".darkbloom" / "inference-durations.csv"
 
 
@@ -639,7 +643,9 @@ def inference_duration_tracker_loop():
         now = time.time()
         if active and active_since is None:
             active_since = now
+            _busy_since["t"] = now
         elif not active and active_since is not None:
+            _busy_since["t"] = None
             duration = now - active_since
             try:
                 with open(INFERENCE_DURATIONS_LOG, "a") as f:
@@ -4187,6 +4193,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "tokens_generated": ds.get("tokens_generated"),
                 "requests_served": ds.get("requests_served"),
                 "age_sec": ds.get("age_sec"),
+                "busy_since": _busy_since["t"],
                 "t": time.time(),
             })
         elif self.path == "/api/price_now":

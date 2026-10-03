@@ -1,5 +1,9 @@
 # Changelog
 
+## v86
+
+**The chat panel's live serving view says how long the current busy stretch has lasted.** The line under the token stream only said "N tokens since this busy stretch began". It now reads "Busy for 4 min 12 s · N tokens so far". If the page loads in the middle of a stretch, the time comes from the server (`busy_since` in `/api/serving_pulse`, from the inference tracker), not from the page load.
+
 ## v85
 
 **The report shows how much of the gpt-oss traffic is batch-like, and connection drops are no longer counted as job failures.**

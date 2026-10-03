@@ -556,6 +556,8 @@ let chatSimText = '';
 let chatSimFrac = 0;
 let chatSimLineLeft = 0;
 let chatSimStartTokens = null;
+let chatSimStartedAt = null;
+let chatSimSeenStart = false;
 const GAUGE_R = 80;
 const GAUGE_ARC_LEN = Math.PI * GAUGE_R; // half-circle arc length
 
@@ -1342,6 +1344,7 @@ async function refreshServingPulse() {
   const tok = data.tokens_generated;
   const t = data.t || (Date.now() / 1000);
   const active = data.inference_active === true;
+  p.serverBusySince = data.busy_since || null;
 
   // Active-time bookkeeping (seconds inference_active has been true).
   if (active && p.activeSince == null) p.activeSince = t;
@@ -1442,7 +1445,10 @@ function chatSimTick() {
   const totalEl = document.getElementById('chat-sim-total');
   if (totalEl && p.tokens != null && chatSimStartTokens != null) {
     const n2 = Math.max(0, p.tokens - chatSimStartTokens);
-    totalEl.textContent = n2 > 0 ? `${fmtNum(n2)} tokens since this busy stretch began (${tokensAsText(n2)})` : '';
+    const sec = chatSimStartedAt ? Math.floor((Date.now() - chatSimStartedAt) / 1000) : 0;
+    const dur = sec < 60 ? `${sec} s` : sec < 3600 ? `${Math.floor(sec / 60)} min ${sec % 60} s`
+      : `${Math.floor(sec / 3600)} h ${Math.floor(sec % 3600 / 60)} min`;
+    totalEl.textContent = `Busy for ${dur}` + (n2 > 0 ? ` · ${fmtNum(n2)} tokens so far (${tokensAsText(n2)})` : '');
   }
   const box = el.parentElement;
   if (box) box.scrollTop = box.scrollHeight;
@@ -1454,6 +1460,11 @@ function startChatSim() {
   chatSimFrac = 0;
   chatSimLineLeft = 12 + Math.floor(Math.random() * 16);  // no leading blank line
   chatSimStartTokens = servingPulse.tokens;
+  // The first stretch after a page load may have begun before it; use the
+  // server's own start time then. Later stretches start when we see them.
+  chatSimStartedAt = (!chatSimSeenStart && servingPulse.serverBusySince)
+    ? servingPulse.serverBusySince * 1000 : Date.now();
+  chatSimSeenStart = true;
   servingPulse.debt = 0;
   servingPulse.emittedSinceJump = 0;
   chatSimTimer = setInterval(chatSimTick, 100);
