@@ -1,5 +1,9 @@
 # Changelog
 
+## v87
+
+**The block experiment is paused, and Darkbloom's own Autopilot is compared with gpt-oss alone.** On 2026-10-03 the provider got an experimental Autopilot (`darkbloom autopilot`). Enrolled, it reports every downloaded model to the coordinator and, after a shadow rollout that only records proposals, decides which models stay in memory. `experiment.py compare start` plans six alternating 24-hour phases: Autopilot (AP), enrolled with all downloaded models selectable, and A, with Autopilot disabled and gpt-oss alone. Alternating whole days lets time of day and the bulk client's habits hit both sides equally. Each tick switches at phase boundaries, records the phase and Autopilot's state in the sample, and keeps sampling past the end of the 8-day block schedule. The schedule's own "finished" switch is held off while a comparison runs. The report gets an "Autopilot comparison" section: per phase paid jobs/h, $/h, base $/h, jobs received and not completed, kWh/h, which model sets served and for what share of the time, and how often they changed. It also gives a comparison matched by hour of day, so each hour weighs the same. The block experiment stays paused. Its schedule will be extended by the paused days when it resumes.
+
 ## v86
 
 **The chat panel's live serving view says how long the current busy stretch has lasted.** The line under the token stream only said "N tokens since this busy stretch began". It now reads "Busy for 4 min 12 s · N tokens so far". If the page loads in the middle of a stretch, the time comes from the server (`busy_since` in `/api/serving_pulse`, from the inference tracker), not from the page load.

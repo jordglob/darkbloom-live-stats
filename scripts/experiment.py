@@ -776,6 +776,181 @@ def fault(state, seg, snap, ts):
     return None
 
 
+# --- autopilot comparison ---------------------------------------------------
+#
+# Owner's request 2026-10-03: pause the block experiment and compare
+# Darkbloom's own Autopilot (shadow rollout at first) with gpt-oss alone, in
+# alternating 24 h phases, 3 + 3, so time of day and the bulk client's habits
+# hit both sides equally. Autopilot phases enroll with every downloaded model
+# selectable; baseline phases disable Autopilot and host gpt-oss alone. While
+# the comparison runs the block experiment stays paused.
+
+COMPARE_PHASE_HOURS = 24
+COMPARE_PHASES = 6
+
+
+def autopilot_status():
+    try:
+        out = run_cli("autopilot", "status", "--json", timeout=30)
+        return json.loads(out)
+    except Exception:
+        return {}
+
+
+def autopilot_enable():
+    import subprocess
+    r = subprocess.run([str(DARKBLOOM_BIN), "autopilot", "enable"], input="all\n",
+                       capture_output=True, text=True, timeout=600)
+    return r.returncode == 0, (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+
+
+def autopilot_disable():
+    import subprocess
+    r = subprocess.run([str(DARKBLOOM_BIN), "autopilot", "disable"], capture_output=True,
+                       text=True, timeout=600)
+    return r.returncode == 0, (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+
+
+def current_phase(cmp, ts):
+    for ph in cmp.get("phases", []):
+        if ph["start"] <= ts < ph["end"]:
+            return ph
+    return None
+
+
+def compare_tick(state):
+    """Runs the autopilot comparison if one is planned. Returns extra fields
+    for this tick's sample."""
+    cmp = state.get("compare")
+    if not cmp:
+        return {}
+    ts = now()
+    ph = current_phase(cmp, ts)
+    if ph is None:
+        if ts >= cmp["phases"][-1]["end"] and not cmp.get("finished"):
+            ok, msg = autopilot_disable()
+            res = apply_models(ARMS[BASELINE]["models"], "autopilot comparison finished")
+            cmp["finished"] = True
+            event("compare_finished", autopilot_disabled=ok, message=msg, baseline_ok=res[0])
+        return {}
+    if cmp.get("applied") != ph["id"]:
+        if ph["arm"] == "AP":
+            ok, msg = autopilot_enable()
+        else:
+            ok, msg = autopilot_disable()
+            if ok:
+                ok, msg2, _ = apply_models(ARMS[BASELINE]["models"], f"compare {ph['id']} baseline")
+                msg = [msg2]
+        event("compare_phase", phase=ph["id"], arm=ph["arm"], ok=ok, message=msg)
+        if ok:
+            cmp["applied"] = ph["id"]
+            ph["applied_at"] = now()
+    ap = (autopilot_status().get("configured") or {})
+    return {"phase": ph["id"], "phase_arm": ph["arm"],
+            "autopilot_enabled": ap.get("enabled"), "autopilot_paused": ap.get("paused")}
+
+
+def short_model(m):
+    for full, short in (("gpt-oss", "gpt-oss"), ("qwen3.6", "qwen3.6"), ("qwen3.5-35b", "qwen3.5-35b"),
+                        ("Qwen3.5-9B", "qwen3.5-9b"), ("gemma", "gemma"), ("nemotron", "nemotron"),
+                        ("bonsai", "bonsai")):
+        if full.lower() in m.lower():
+            return short
+    return m
+
+
+def compare_report(state):
+    """Autopilot (AP) vs gpt-oss alone (A), per phase and matched by hour of
+    day, since the two arms run in alternating 24 h phases."""
+    cmp = state["compare"]
+    ts = now()
+    lines = ["## Autopilot comparison (alternating 24 h phases)", "",
+             "| Phase | Start | Arm | Hours | Paid jobs/h | Paid $/h | Base $/h | Jobs in / not done | kWh/h | Loaded in memory (share of time) | Changes |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    samples = [r for r in read_jsonl(SAMPLES) if r.get("phase")]
+    by_arm_hour = {}
+    for ph in cmp["phases"]:
+        if ph["start"] > ts:
+            lines.append(f"| {ph['id']} | {ph['start_local'][5:16].replace('T', ' ')} | {ph['arm']} | – | | | | | | planned | |")
+            continue
+        start = ph.get("applied_at") or ph["start"]
+        end = min(ph["end"], ts)
+        seg = {"arm": ph["arm"], "models": [], "requested_at": start, "applied_at": start,
+               "ok": True, "end": end}
+        sm = summarize_segment({"start": ph["start"], "end": end}, seg, state)
+        h = sm["measured_hours"]
+        if h < 0.1:
+            lines.append(f"| {ph['id']} | {ph['start_local'][5:16].replace('T', ' ')} | {ph['arm']} | {h:.1f} | – | – | – | – | – | just started | – |")
+            continue
+        own = [r for r in samples if r["phase"] == ph["id"]]
+        sets = {}
+        switches, prev = 0, None
+        for r in own:
+            # Loaded in memory, not advertised: enrolled, every downloaded
+            # model is advertised all the time.
+            key = ", ".join(short_model(m) for m in sorted(r.get("warm") or [])) or "none loaded"
+            sets[key] = sets.get(key, 0) + 1
+            if prev is not None and key != prev:
+                switches += 1
+            prev = key
+        mix = "; ".join(f"{k} {v / len(own) * 100:.0f}%" for k, v in sorted(sets.items(), key=lambda kv: -kv[1])[:3]) if own else "–"
+        jobs = sm.get("jobs") or {}
+        lines.append(f"| {ph['id']} | {ph['start_local'][5:16].replace('T', ' ')} | {ph['arm']} | {h:.1f} | "
+                     f"{sm['paid_jobs'] / h:.0f} | {sm['paid_usd'] / h:.4f} | {sm['base_usd'] / h:.4f} | "
+                     f"{jobs.get('received', 0)} / {jobs.get('incomplete', 0)} | {sm['energy_wh'] / 1000 / h:.3f} | {mix} | {switches} |")
+        # Hour-of-day buckets for the matched comparison.
+        for t, e in ledger_between(start, end):
+            if e.get("model") == "base_reward":
+                continue
+            hr = dt.datetime.fromtimestamp(t).hour
+            b = by_arm_hour.setdefault((ph["arm"], hr), [0, 0.0, 0.0])
+            b[0] += 1
+            b[1] += (e.get("amount_micro_usd") or 0) / 1e6
+        t = start
+        while t < end:
+            nxt = min(end, (int(t // 3600) + 1) * 3600)
+            hr = dt.datetime.fromtimestamp(t).hour
+            by_arm_hour.setdefault((ph["arm"], hr), [0, 0.0, 0.0])[2] += (nxt - t) / 3600
+            t = nxt
+    both = [hr for hr in range(24) if by_arm_hour.get(("AP", hr), [0, 0, 0])[2] > 0.25
+            and by_arm_hour.get(("A", hr), [0, 0, 0])[2] > 0.25]
+    lines.append("")
+    if both:
+        rate = lambda arm, i: sum(by_arm_hour[(arm, hr)][i] / by_arm_hour[(arm, hr)][2] for hr in both) / len(both)
+        lines += [f"Matched over the {len(both)} hours of day both arms have covered: "
+                  f"AP {rate('AP', 0):.0f} paid jobs/h, ${rate('AP', 1):.4f}/h; "
+                  f"A {rate('A', 0):.0f} paid jobs/h, ${rate('A', 1):.4f}/h. "
+                  "Each hour of day weighs the same, so a busy evening in one arm only cannot tip it.", ""]
+    else:
+        lines += ["Matched comparison: not enough overlapping hours of day yet.", ""]
+    return lines
+
+
+def cmd_compare(args):
+    """compare start | status"""
+    state = read_json(STATE, {})
+    if args and args[0] == "start":
+        if state.get("compare") and not state["compare"].get("finished") and "--force" not in args:
+            print("a comparison is already running")
+            return 1
+        first = "AP" if "--first-ap" in args else random.SystemRandom().choice(["AP", "A"])
+        start = int(now() // 3600) * 3600
+        arms = [first, "A" if first == "AP" else "AP"] * (COMPARE_PHASES // 2)
+        phases = [{"id": f"c{i + 1}", "arm": a, "start": start + i * COMPARE_PHASE_HOURS * 3600,
+                   "end": start + (i + 1) * COMPARE_PHASE_HOURS * 3600,
+                   "start_local": iso(start + i * COMPARE_PHASE_HOURS * 3600)}
+                  for i, a in enumerate(arms)]
+        state["compare"] = {"created_at": iso(now()), "phases": phases}
+        state["paused"] = True
+        state["pause_reason"] = state.get("pause_reason") or "autopilot comparison running"
+        write_json(STATE, state)
+        event("compare_planned", first=first, phases=len(phases), start=iso(start))
+        print(f"Planned {len(phases)} phases from {iso(start)}, first {first}")
+        return 0
+    print(json.dumps(state.get("compare"), indent=2))
+    return 0
+
+
 def _tick():
     protocol = read_json(PROTOCOL, None)
     state = read_json(STATE, {})
@@ -791,6 +966,7 @@ def _tick():
         return 0
 
     ts = now()
+    cmp_fields = compare_tick(state)
     snap = daemon_snapshot()
     block = current_block(protocol, ts)
 
@@ -809,8 +985,14 @@ def _tick():
             done.add(b["id"])
     state["summarized"] = sorted(done)
 
+    comparing = bool(state.get("compare")) and not state["compare"].get("finished")
     if block is None:
-        if ts >= protocol["blocks"][-1]["end"] and not state.get("finished"):
+        if comparing:
+            # The comparison outlives the block schedule: keep sampling, and
+            # leave the models to it.
+            append_jsonl(SAMPLES, dict(at=iso(ts), ts=ts, block=None, arm=None, paused=True,
+                                       **snap, **log_counts, **cmp_fields))
+        elif ts >= protocol["blocks"][-1]["end"] and not state.get("finished"):
             state["finished"] = True
             ok, msg, _ = apply_models(ARMS[BASELINE]["models"], "experiment finished")
             event("finished", back_to_baseline=ok, message=msg)
@@ -820,7 +1002,7 @@ def _tick():
     info = state["blocks"].setdefault(block["id"], {"arm": block["arm"], "segments": []})
     seg = info["segments"][-1] if info["segments"] else None
     append_jsonl(SAMPLES, dict(at=iso(ts), ts=ts, block=block["id"], arm=seg["arm"] if seg else block["arm"],
-                               paused=bool(state.get("paused")), **snap, **log_counts))
+                               paused=bool(state.get("paused")), **snap, **log_counts, **cmp_fields))
 
     if state.get("paused"):
         info["paused"] = True
@@ -1050,6 +1232,9 @@ def cmd_report(args):
             lines.append(f"| {h:02d} | " + " | ".join(cells) + f" | {total} | {here} | {batch} |")
         lines.append("")
 
+    if state.get("compare"):
+        lines += compare_report(state)
+
     shown = [s for s in segs if not hours_back or (s["end"] or ts) >= ts - hours_back * 3600]
     lines += ["## Segments" + (f" (last {hours_back:.0f} h)" if hours_back else ""), "",
               "| Block | Start | Arm | Min | Jobs | gpt-oss batch-like | Paid $ | Base $ | Longest gap | Log errors | Stopped because |", "|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -1163,7 +1348,7 @@ def cmd_status(_args):
     return 0
 
 
-COMMANDS = {"plan": cmd_plan, "tick": cmd_tick, "report": cmd_report,
+COMMANDS = {"plan": cmd_plan, "tick": cmd_tick, "report": cmd_report, "compare": cmd_compare,
             "pause": cmd_pause, "resume": cmd_resume, "status": cmd_status}
 
 if __name__ == "__main__":
