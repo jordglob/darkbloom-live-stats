@@ -793,7 +793,7 @@ const CARD_TOOLTIPS = {
   'Net (real balance)': 'Your real Darkbloom account balance (USD) minus accumulated electricity cost (converted to USD).',
 };
 
-function renderCards(status, energy, account, daemonState, disk) {
+function renderCards(status, energy, account, daemonState, disk, autopilot) {
   const t = trustStatus(status.trust);
   const daemonUp = status.daemon && status.daemon.startsWith('running');
   const active = daemonUp && daemonState && daemonState.inference_active === true;
@@ -819,6 +819,18 @@ function renderCards(status, energy, account, daemonState, disk) {
       sub: `${fmtNum(status.tokens)} tokens since restart${tokensAsText(status.tokens) ? `<br><span title="${TOKENS_AS_TEXT_TIP}">${tokensAsText(status.tokens)}</span>` : ''}` },
   ];
   const warmList = (status.warm_models || '').split(',').map(s => s.trim()).filter(Boolean);
+  const ap = autopilot;
+  if (ap && ap.enabled) {
+    // Darkbloom's Autopilot advertises every selected model and decides
+    // itself which are in memory - say so, since "hosted" alone now reads
+    // as seven models at once.
+    cards.push({
+      label: 'Darkbloom Autopilot',
+      value: ap.paused ? 'paused' : 'on',
+      sub: `chooses from ${ap.selected.length} models · advertising ${ap.advertised.length} · in memory: ${ap.warm.length ? ap.warm.join(', ') : 'none'}`
+        + (ap.pinned.length ? ` · pinned: ${ap.pinned.join(', ')}` : ''),
+    });
+  }
   cards.push({
     label: 'Warm models',
     value: warmList.length,
@@ -3238,7 +3250,7 @@ async function refresh() {
     lastAccount = account || null;
     if (data.max_power) renderMaxPower(data.max_power.level || 0);
 
-    renderCards(status, energy, account, daemon_state, disk);
+    renderCards(status, energy, account, daemon_state, disk, data.autopilot);
     renderBanners(status, energy, doctor, daemon_state, data.autostart, data.price_source_chosen);
     updateChatAvailability(status, daemon_state);
     renderAccount(account);

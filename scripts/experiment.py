@@ -811,6 +811,42 @@ def autopilot_disable():
     return r.returncode == 0, (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
 
 
+PROVIDER_PLIST = HOME / "Library" / "LaunchAgents" / "io.darkbloom.provider.plist"
+LOCAL_ENDPOINT_ARGS = ["--local-endpoint", "--port", "8000", "--bind", "127.0.0.1"]
+
+
+def ensure_local_endpoint():
+    """`darkbloom autopilot enable` rewrites the provider plist without
+    --local-endpoint (seen 2026-10-03), which silently breaks warm-up, the
+    chat panel and the dashboard's model loads (no local.json). Put the
+    flags back and restart the provider, draining first. Returns a note for
+    the event log, or None when nothing was needed."""
+    import plistlib
+    import subprocess
+    try:
+        with open(PROVIDER_PLIST, "rb") as f:
+            pl = plistlib.load(f)
+    except Exception as e:
+        return f"plist unreadable: {e}"
+    args = pl.get("ProgramArguments", [])
+    if "--local-endpoint" in args and (DB / "local.json").exists():
+        return None
+    if "--local-endpoint" not in args:
+        pl["ProgramArguments"] = args + LOCAL_ENDPOINT_ARGS
+        with open(PROVIDER_PLIST, "wb") as f:
+            plistlib.dump(pl, f)
+    r = subprocess.run([str(DARKBLOOM_BIN), "restart"], capture_output=True, text=True, timeout=600)
+    for _ in range(60):
+        if (DB / "local.json").exists() and daemon_snapshot().get("pid"):
+            return "local endpoint restored, provider restarted"
+        time.sleep(5)
+    # `darkbloom restart` has failed to bootstrap before ("5: Input/output
+    # error"); bootstrap the job directly.
+    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(PROVIDER_PLIST)], capture_output=True, text=True)
+    return "local endpoint restored; restart needed a manual bootstrap: " + (r.stderr or r.stdout).strip()[-120:]
+
+
 def current_phase(cmp, ts):
     for ph in cmp.get("phases", []):
         if ph["start"] <= ts < ph["end"]:
@@ -836,8 +872,14 @@ def compare_tick(state):
     if cmp.get("applied") != ph["id"]:
         if ph["arm"] == "AP":
             ok, msg = autopilot_enable()
+            note = ensure_local_endpoint() if ok else None
+            if note:
+                msg = msg + [note]
         else:
             ok, msg = autopilot_disable()
+            note = ensure_local_endpoint() if ok else None
+            if note:
+                msg = msg + [note]
             if ok:
                 ok, msg2, _ = apply_models(ARMS[BASELINE]["models"], f"compare {ph['id']} baseline")
                 msg = [msg2]

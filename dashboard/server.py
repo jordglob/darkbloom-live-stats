@@ -862,6 +862,35 @@ def _ping_model(conf, model, timeout):
         resp.read()
 
 
+_autopilot_cache = {"at": 0.0, "data": None}
+
+
+def get_autopilot_state():
+    """Darkbloom's experimental Autopilot (`darkbloom autopilot`, 0.9.17+):
+    enrolled or not, paused, which models it may choose from, and which are
+    in memory now. Cached for a minute; None if the CLI has no such command."""
+    now = time.time()
+    if _autopilot_cache["data"] is not None and now - _autopilot_cache["at"] < 60:
+        return _autopilot_cache["data"]
+    try:
+        out = subprocess.run([str(DARKBLOOM_BIN), "autopilot", "status", "--json"],
+                             capture_output=True, text=True, timeout=20).stdout
+        conf = (json.loads(out) or {}).get("configured") or {}
+    except Exception:
+        return _autopilot_cache["data"]
+    hosted, warm = _daemon_model_state()
+    data = {
+        "enabled": bool(conf.get("enabled")),
+        "paused": bool(conf.get("paused")),
+        "selected": conf.get("selected_models") or [],
+        "pinned": conf.get("pinned_models") or [],
+        "advertised": hosted,
+        "warm": warm,
+    }
+    _autopilot_cache.update(at=now, data=data)
+    return data
+
+
 def send_warmup_ping():
     """Sends a minimal chat completion per configured model to the provider's
     local endpoint, forcing each into memory - the same daemon that serves the
@@ -881,8 +910,18 @@ def send_warmup_ping():
     # as a preference, but after a switch it named a model that was no longer
     # hosted (404 every interval) - or, worse, one hosted next to a bigger
     # model, where each warm-up forced it back in and evicted the other.
-    hosted, _ = _daemon_model_state()
-    models = [m for m in (cfg.get("models") or []) if m in hosted] or hosted
+    hosted, warm = _daemon_model_state()
+    ap = get_autopilot_state() or {}
+    if ap.get("enabled") and not ap.get("paused"):
+        # Autopilot decides what is in memory. Pinging every advertised model
+        # (all downloaded ones, once enrolled) would force each back in and
+        # overrule it, so only keep what it already loaded from going idle.
+        models = list(warm)
+        if not models:
+            log_warmup("OK: Autopilot controls memory and nothing is loaded - skipped")
+            return True
+    else:
+        models = [m for m in (cfg.get("models") or []) if m in hosted] or hosted
     if not models:
         log_warmup("ERROR: no configured models found to warm up")
         return False
@@ -4172,6 +4211,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "disk": annotate_disk_usage(get_disk_usage()),
                 "daemon_state": get_daemon_state(),
                 "autostart": get_autostart_state(),
+                "autopilot": get_autopilot_state(),
                 "doctor": get_doctor_report(),
                 "inference_durations": get_inference_duration_stats(),
                 "price_48h": get_price_48h(),
