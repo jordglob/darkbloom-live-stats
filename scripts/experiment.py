@@ -452,6 +452,9 @@ LOG_KINDS = (
     # (four at 2026-10-02 04:25, reconnected within seconds).
     ("connection", ("coordinator connection", "disconnected from coordinator", "reconnect")),
     ("update", ("auto-update",)),
+    # A model the coordinator asked to preload did not fit; no job involved
+    # (89 on 2026-10-03 with seven models advertised).
+    ("preload", ("preload for",)),
     ("rejected", ("429", "reject", "capacity", "busy", "overload")),
     ("timeout", ("timeout", "timed out", "deadline")),
     ("cancelled", ("cancel",)),

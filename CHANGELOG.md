@@ -1,5 +1,9 @@
 # Changelog
 
+## v89
+
+**Failed preloads are no longer counted as job failures.** With every downloaded model advertised (Autopilot enrolled), the coordinator kept asking this Mac to preload models that did not fit: 89 "Preload for … failed" in 13 hours on 2026-10-03. They matched "failed" and inflated the job-related error count. They are now their own kind, `preload`.
+
 ## v88
 
 **Live & Stats knows about Darkbloom's Autopilot, and no longer fights it.**
