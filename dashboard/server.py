@@ -3651,6 +3651,99 @@ def _cost_by_bucket(all_prices):
     return out
 
 
+# Ranges for the Real Earnings chart: (span_sec or None for all, bucket_sec).
+# "log" spaces buckets by age instead, from a minute ago back to the first
+# ledger entry, so the latest hour gets as much room as the first week.
+REAL_EARNINGS_RANGES = {
+    "1h": (3600, 300), "6h": (6 * 3600, 300), "24h": (86400, 900), "48h": (2 * 86400, 900),
+    "7d": (7 * 86400, 3600), "all": (None, None), "log": (None, None),
+}
+REAL_EARNINGS_LOG_BUCKETS = 120
+_real_earnings_cache = {}
+
+
+def _ledger_rows_since(since_ts):
+    """(ts, usd) for every ledger entry (base reward included) since
+    since_ts, from the permanent archive (v69), falling back to the 48h
+    history file before the archive existed."""
+    out, seen = [], set()
+    paths = sorted(EARNINGS_ARCHIVE_DIR.glob("earnings-*.jsonl")) if EARNINGS_ARCHIVE_DIR.exists() else []
+    for path in paths + [EARNINGS_HISTORY_PATH]:
+        if not path.exists():
+            continue
+        with open(path) as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                    if e.get("id") in seen:
+                        continue
+                    t = _parse_iso_ts(e["created_at"])
+                except Exception:
+                    continue
+                if t >= since_ts:
+                    seen.add(e.get("id"))
+                    out.append((t, (e.get("amount_micro_usd") or 0) / 1e6))
+    return out
+
+
+def get_real_earnings(range_key):
+    """Real ledger earnings vs. measured electricity cost in buckets over a
+    chosen range, for the Real Earnings chart's range buttons. Only spans
+    where ledger data exists: the account API gives the latest 1000 entries
+    only, so history starts when this dashboard began saving them. Cost from
+    before that is left out, or the chart would compare a month of cost with
+    a few days of earnings."""
+    if range_key not in REAL_EARNINGS_RANGES:
+        range_key = "48h"
+    now = time.time()
+    cached = _real_earnings_cache.get(range_key)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    span, bucket = REAL_EARNINGS_RANGES[range_key]
+    ledger_all = _ledger_rows_since(0)
+    first_ledger = min((t for t, _ in ledger_all), default=now)
+    start = max(first_ledger, now - span) if span else first_ledger
+    if range_key == "log":
+        lo, hi = math.log10(60), math.log10(max(120, now - start))
+        ages = [10 ** (hi - (hi - lo) * i / REAL_EARNINGS_LOG_BUCKETS) for i in range(REAL_EARNINGS_LOG_BUCKETS + 1)]
+        edges = [now - a for a in ages] + [now]
+    else:
+        if bucket is None:
+            bucket = max(900, int((now - start) / 200 // 900 + 1) * 900)
+        first = int(start // bucket) * bucket
+        edges = list(range(first, int(now) + bucket, bucket))
+        edges = [e for e in edges if e <= now] + [now]
+    edges = sorted(set(edges))
+    earn = [0.0] * (len(edges) - 1)
+    cost = [0.0] * (len(edges) - 1)
+    import bisect
+    for t, usd in ledger_all:
+        i = bisect.bisect_right(edges, t) - 1
+        if 0 <= i < len(earn):
+            earn[i] += usd
+    try:
+        with open(CSV_PATH, newline="") as f:
+            for r in csv.DictReader(f):
+                try:
+                    t = _parse_iso_ts(r["timestamp"])
+                except Exception:
+                    continue
+                i = bisect.bisect_right(edges, t) - 1
+                if 0 <= i < len(cost):
+                    rate = float(r.get("usd_sek", 0) or 0) or 9.5
+                    cost[i] += float(r.get("interval_cost_sek", 0) or 0) / rate
+    except Exception:
+        pass
+    buckets = [{"time_start": datetime.fromtimestamp(a).astimezone().isoformat(),
+                "time_end": datetime.fromtimestamp(b).astimezone().isoformat(),
+                "earnings_usd": round(e, 6), "cost_usd": round(c, 6)}
+               for a, b, e, c in zip(edges, edges[1:], earn, cost)]
+    data = {"range": range_key, "ledger_starts": datetime.fromtimestamp(first_ledger).astimezone().isoformat(),
+            "log_axis": range_key == "log", "buckets": buckets}
+    _real_earnings_cache[range_key] = (now, data)
+    return data
+
+
 def _placeholder_day_prices(date_obj):
     """96 empty 15-min buckets (sek_per_kwh: None) for a day whose prices
     haven't been published yet. Keeps the chart's time axis a stable 48h
@@ -4263,6 +4356,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # rate without dragging the whole /api/data payload with it.
             self._send_json(get_temp_age_series())
 
+        elif self.path.startswith("/api/real_earnings"):
+            m = re.search(r"[?&]range=([0-9a-z]+)", self.path)
+            self._send_json(get_real_earnings(m.group(1) if m else "48h"))
         elif self.path.startswith("/api/model_demand"):
             m = re.search(r"[?&]window=([0-9a-z]+)", self.path)
             self._send_json(annotate_model_demand(get_model_demand(m.group(1) if m else "24h")))

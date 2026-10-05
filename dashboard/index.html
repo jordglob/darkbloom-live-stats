@@ -216,6 +216,9 @@
   table.rotation-table tr:last-child td { border-bottom: none; }
   .demand-windows { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
   .demand-windows button { font-size: 11px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }
+  .real-ranges { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; flex-wrap: wrap; }
+  .real-ranges button { font-size: 11px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }
+  .real-ranges button.active { color: var(--text-primary); border-color: var(--text-muted); font-weight: 600; }
   .demand-windows button.active { color: var(--text-primary); border-color: var(--text-muted); font-weight: 600; }
   tr.demand-mine td { background: color-mix(in srgb, var(--series-revenue) 10%, transparent); }
   .demand-badge { font-size: 10px; font-weight: 600; color: var(--series-revenue); margin-left: 6px; white-space: nowrap; }
@@ -338,7 +341,17 @@
   </div>
 
   <div class="panel">
-    <h2 title="What Darkbloom actually paid this account (every ledger entry, including the base reward for being online) versus what this Mac's electricity actually cost, both added up over the last two days. Real numbers on both sides - the one chart here that should line up with the Net card at the top.">Real Earnings vs. Electricity Cost — last 48h (USD) <span id="real48-chart-stats" class="gauge-time"></span></h2>
+    <h2 title="What Darkbloom actually paid this account (every ledger entry, including the base reward for being online) versus what this Mac's electricity actually cost, both added up over the chosen range. Real numbers on both sides - the one chart here that should line up with the Net card at the top.">Real Earnings vs. Electricity Cost — <span id="real48-range-label">last 48h</span> (USD)
+      <span class="real-ranges">
+        <button data-range="1h" onclick="setRealRange('1h')">1h</button>
+        <button data-range="6h" onclick="setRealRange('6h')">6h</button>
+        <button data-range="24h" onclick="setRealRange('24h')">24h</button>
+        <button data-range="48h" onclick="setRealRange('48h')">48h</button>
+        <button data-range="7d" onclick="setRealRange('7d')">7d</button>
+        <button data-range="all" onclick="setRealRange('all')">All</button>
+        <button data-range="log" onclick="setRealRange('log')" title="All of it on a logarithmic time axis: the last hour gets as much room as the first week.">Log</button>
+      </span>
+      <span id="real48-chart-stats" class="gauge-time"></span></h2>
     <div class="legend">
       <span><i style="background:var(--series-revenue)"></i>Real earnings (incl. base reward)</span>
       <span><i style="background:var(--series-cost)"></i>Electricity cost (measured)</span>
@@ -2298,7 +2311,33 @@ function renderElpris(p) {
   return { nowVal, nowTotal, nowTotalLocal, currency: p && p.currency, zone: p && p.zone, source: p && p.source };
 }
 
-function renderReal48(p) {
+const REAL_RANGE_LABELS = { '1h': 'last hour', '6h': 'last 6 h', '24h': 'last 24 h', '48h': 'last 48h',
+  '7d': 'last 7 days', all: 'all time', log: 'all time, log time axis' };
+let realRange = '48h';
+try { realRange = localStorage.getItem('realRange') || '48h'; } catch (e) {}
+let lastRealPrice48 = null;
+
+function setRealRange(r) {
+  realRange = r;
+  try { localStorage.setItem('realRange', r); } catch (e) {}
+  refreshReal();
+}
+
+async function refreshReal() {
+  document.querySelectorAll('.real-ranges button').forEach(b => b.classList.toggle('active', b.dataset.range === realRange));
+  const label = document.getElementById('real48-range-label');
+  if (label) label.textContent = REAL_RANGE_LABELS[realRange] || realRange;
+  if (realRange === '48h') {
+    if (lastRealPrice48) renderReal48(lastRealPrice48);
+    return;
+  }
+  try {
+    const d = await (await fetch('/api/real_earnings?range=' + realRange)).json();
+    if (realRange === d.range) renderReal48({ prices: d.buckets }, d);
+  } catch (e) { /* silent */ }
+}
+
+function renderReal48(p, meta) {
   // Cumulative real earnings vs. cumulative measured cost over the price
   // panel's 15-min grid - the same per-bucket data as its Net overlay, just
   // summed so it reads like a bank balance. Future buckets are gaps.
@@ -2327,7 +2366,9 @@ function renderReal48(p) {
   // however many hours have actually elapsed, scaled to a day. That answers
   // the question the lifetime balance doesn't - is leaving this Mac on worth
   // it - and it's measured, not projected from a quoted rate.
-  if (prices.length > 1) {
+  // Net per day elsewhere on the page stays tied to the 48h window, whatever
+  // range this chart shows.
+  if (!meta && prices.length > 1) {
     const spanH = (new Date(prices[prices.length - 1].time_end).getTime()
                    - new Date(prices[0].time_start).getTime()) / 3600000;
     if (spanH > 1) lastNetPerDay = ((earn - cost) / spanH) * 24;
@@ -2337,7 +2378,12 @@ function renderReal48(p) {
   if (statsEl) statsEl.textContent = prices.length ? `earned ${fmtUsd(earn)} · cost ${fmtUsd(cost)} · net ${fmtUsd(earn - cost)}` : '';
   if (noteEl) {
     noteEl.title = 'Darkbloom\'s API only returns the most recent batch of ledger entries, so this dashboard saves them locally as they arrive. Coverage grows to about two days after a fresh install.';
-    noteEl.textContent = firstIdx >= 0 ? `Covers from ${fmtTime(prices[firstIdx].time_start)} (builds up to ~2 days)` : 'No ledger entries yet - fills in as the account sync runs.';
+    if (meta) {
+      noteEl.textContent = (meta.log_axis ? 'Logarithmic time axis: each step left is further back, the right edge is now. ' : '')
+        + `Ledger history starts ${fmtTime(meta.ledger_starts)}; cost from before that is left out so both lines cover the same time.`;
+    } else {
+      noteEl.textContent = firstIdx >= 0 ? `Covers from ${fmtTime(prices[firstIdx].time_start)} (builds up to ~2 days)` : 'No ledger entries yet - fills in as the account sync runs.';
+    }
   }
 }
 
@@ -3257,7 +3303,8 @@ async function refresh() {
     renderDisk(disk);
     renderNerdyStats(daemon_state, account, doctor, inference_durations, status.requests_served || 0);
     const elprisNow = renderElpris(price_48h);
-    renderReal48(price_48h);
+    lastRealPrice48 = price_48h;
+    refreshReal();
     updateFavicon(status);
 
     const rows = energy.rows || {};

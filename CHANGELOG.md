@@ -1,5 +1,9 @@
 # Changelog
 
+## v90
+
+**Real Earnings vs. Electricity Cost has range buttons: 1h, 6h, 24h, 48h, 7d, All and Log.** The chart was fixed to the price panel's 48-hour grid. A new `/api/real_earnings?range=…` sums ledger payouts (base reward included, from the permanent archive) and measured electricity cost into buckets: 5 minutes for 1h and 6h, 15 minutes for 24h and 48h, an hour for 7d, and about 200 buckets for All. **Log** spreads all of it on a logarithmic time axis, 120 buckets from a minute ago back to the first ledger entry, so the latest hour gets as much room as the first week. Ranges start no earlier than the first saved ledger entry. Electricity cost from before that is left out, so both lines always cover the same time. 48h still draws from the price panel's 15-minute grid, and Net per day elsewhere on the page stays tied to 48h whichever range is shown. The choice is remembered in the browser.
+
 ## v89
 
 **Failed preloads are no longer counted as job failures.** With every downloaded model advertised (Autopilot enrolled), the coordinator kept asking this Mac to preload models that did not fit: 89 "Preload for … failed" in 13 hours on 2026-10-03. They matched "failed" and inflated the job-related error count. They are now their own kind, `preload`.
