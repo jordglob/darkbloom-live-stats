@@ -1,5 +1,13 @@
 # Changelog
 
+## v92
+
+**The Autopilot comparison survives an unverifiable model and a busy provider.** On 2026-10-05 Darkbloom published a newer nemotron revision. With `all` selected, `darkbloom autopilot enable` then refused to enroll at all ("Not reporting nvidia-nemotron-3.5-lightning: downloaded build could not be verified … Selected revision is not current"). Phase c3 (Autopilot) never started, and `experiment.py` retried every 5 minutes for 14 hours (158 times) while gpt-oss ran alone.
+
+- Enable now reads which models could not be verified, and retries once with them left out of the menu selection. c3 started at 21:24 with six models. The report counts c3 from then, not from 07:00.
+- A phase switch that fails three times is marked failed and shown as "could not switch, not counted", instead of being retried forever.
+- Restoring `--local-endpoint` after enable needs a provider restart, which `darkbloom restart` refuses while a job runs. It is no longer forced or bootstrapped over a running provider. The flags stay in the plist and the restart is retried on each tick until it goes through.
+
 ## v91
 
 **The token chart has the same range buttons, and a fresh install never downloads models on its own.**

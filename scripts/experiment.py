@@ -801,10 +801,29 @@ def autopilot_status():
 
 
 def autopilot_enable():
+    """Enroll with every downloaded model. If some cannot be verified (a
+    newer revision exists upstream - nemotron on 2026-10-05, when "all"
+    made enable fail for a whole day), retry once with those left out."""
     import subprocess
-    r = subprocess.run([str(DARKBLOOM_BIN), "autopilot", "enable"], input="all\n",
-                       capture_output=True, text=True, timeout=600)
-    return r.returncode == 0, (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
+
+    def run(selection):
+        return subprocess.run([str(DARKBLOOM_BIN), "autopilot", "enable"], input=selection + "\n",
+                              capture_output=True, text=True, timeout=900)
+    r = run("all")
+    out = r.stdout + r.stderr
+    if r.returncode == 0:
+        return True, out.strip().splitlines()[-1:] or [""]
+    bad = re.findall(r"Not reporting (\S+?): downloaded build could not be verified", out)
+    menu = re.findall(r"\[(\d+)\] (.+?)  ", out)
+    if bad and menu:
+        words = {w for b in bad for w in re.split(r"[-.]", b.lower()) if len(w) >= 5}
+        keep = [n for n, name in menu if not any(w in name.lower() for w in words)]
+        if keep and len(keep) < len(menu):
+            r = run(",".join(keep))
+            out2 = r.stdout + r.stderr
+            note = f"left out (not verifiable): {', '.join(bad)}"
+            return r.returncode == 0, (out2.strip().splitlines()[-1:] or [""]) + [note]
+    return False, out.strip().splitlines()[:2] or [""]
 
 
 def autopilot_disable():
@@ -839,6 +858,10 @@ def ensure_local_endpoint():
         with open(PROVIDER_PLIST, "wb") as f:
             plistlib.dump(pl, f)
     r = subprocess.run([str(DARKBLOOM_BIN), "restart"], capture_output=True, text=True, timeout=600)
+    if r.returncode != 0 and daemon_snapshot().get("pid"):
+        # Refuses while a job is running ("use --force to interrupt it"):
+        # never interrupt paid work, try again on a later tick.
+        return "restart deferred: provider busy, flags are in the plist"
     for _ in range(60):
         if (DB / "local.json").exists() and daemon_snapshot().get("pid"):
             return "local endpoint restored, provider restarted"
@@ -886,10 +909,21 @@ def compare_tick(state):
             if ok:
                 ok, msg2, _ = apply_models(ARMS[BASELINE]["models"], f"compare {ph['id']} baseline")
                 msg = [msg2]
-        event("compare_phase", phase=ph["id"], arm=ph["arm"], ok=ok, message=msg)
+        ph["attempts"] = ph.get("attempts", 0) + 1
+        event("compare_phase", phase=ph["id"], arm=ph["arm"], ok=ok, message=msg, attempt=ph["attempts"])
         if ok:
             cmp["applied"] = ph["id"]
             ph["applied_at"] = now()
+        elif ph["attempts"] >= 3:
+            # Give up on this phase instead of retrying every 5 minutes for
+            # a day (c3, 2026-10-05: 158 failed enables). The report shows it.
+            cmp["applied"] = ph["id"]
+            ph["failed"] = True
+            event("compare_phase_failed", phase=ph["id"], arm=ph["arm"])
+    if not (DB / "local.json").exists():
+        note = ensure_local_endpoint()
+        if note:
+            event("local_endpoint", phase=ph["id"], note=note)
     ap = (autopilot_status().get("configured") or {})
     return {"phase": ph["id"], "phase_arm": ph["arm"],
             "autopilot_enabled": ap.get("enabled"), "autopilot_paused": ap.get("paused")}
@@ -917,6 +951,9 @@ def compare_report(state):
     for ph in cmp["phases"]:
         if ph["start"] > ts:
             lines.append(f"| {ph['id']} | {ph['start_local'][5:16].replace('T', ' ')} | {ph['arm']} | – | | | | | | planned | |")
+            continue
+        if ph.get("failed"):
+            lines.append(f"| {ph['id']} | {ph['start_local'][5:16].replace('T', ' ')} | {ph['arm']} | – | – | – | – | – | – | could not switch, not counted | – |")
             continue
         start = ph.get("applied_at") or ph["start"]
         end = min(ph["end"], ts)
