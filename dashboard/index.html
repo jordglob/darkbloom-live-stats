@@ -456,7 +456,17 @@
 
 
   <div class="panel">
-    <h2 title="Total tokens this Mac has generated, accumulated over the whole logged history. The daemon's own counter resets on every restart, so this adds up per-interval deltas rather than plotting the raw counter - a restart shows as a flat step, never a drop to zero.">Tokens generated — full history <span id="tokens-chart-stats" class="gauge-time"></span></h2>
+    <h2 title="Total tokens this Mac has generated, accumulated over the whole logged history. The daemon's own counter resets on every restart, so this adds up per-interval deltas rather than plotting the raw counter - a restart shows as a flat step, never a drop to zero.">Tokens generated — <span id="tokens-range-label">all time</span>
+      <span class="real-ranges" id="token-ranges">
+        <button data-range="1h" onclick="setTokenRange('1h')">1h</button>
+        <button data-range="6h" onclick="setTokenRange('6h')">6h</button>
+        <button data-range="24h" onclick="setTokenRange('24h')">24h</button>
+        <button data-range="48h" onclick="setTokenRange('48h')">48h</button>
+        <button data-range="7d" onclick="setTokenRange('7d')">7d</button>
+        <button data-range="all" onclick="setTokenRange('all')">All</button>
+        <button data-range="log" onclick="setTokenRange('log')" title="All of it on a logarithmic time axis: the last hour gets as much room as the first week.">Log</button>
+      </span>
+      <span id="tokens-chart-stats" class="gauge-time"></span></h2>
     <div class="legend">
       <span><i style="background:var(--series-revenue)"></i>Cumulative tokens</span>
     </div>
@@ -2311,6 +2321,33 @@ function renderElpris(p) {
   return { nowVal, nowTotal, nowTotalLocal, currency: p && p.currency, zone: p && p.zone, source: p && p.source };
 }
 
+let tokenRange = 'all';
+try { tokenRange = localStorage.getItem('tokenRange') || 'all'; } catch (e) {}
+
+function setTokenRange(r) {
+  tokenRange = r;
+  try { localStorage.setItem('tokenRange', r); } catch (e) {}
+  refreshTokens();
+}
+
+async function refreshTokens() {
+  document.querySelectorAll('#token-ranges button').forEach(b => b.classList.toggle('active', b.dataset.range === tokenRange));
+  const label = document.getElementById('tokens-range-label');
+  if (label) label.textContent = REAL_RANGE_LABELS[tokenRange] || tokenRange;
+  let d;
+  try { d = await (await fetch('/api/tokens?range=' + tokenRange)).json(); } catch (e) { return; }
+  if (d.range !== tokenRange) return;
+  const b = d.buckets || [];
+  renderLineChart('chart-tokens', 'tooltip-tokens', b.map(x => x.time_start),
+    [{ name: 'Tokens since range start', values: b.map(x => x.cum_tokens) }], ['line-revenue'],
+    v => `${fmtCompact(v)} tokens`);
+  const tokNow = b.length ? b[b.length - 1].cum_tokens : 0;
+  document.getElementById('tokens-chart-stats').textContent = tokNow
+    ? `${fmtCompact(tokNow)} tokens · ≈ ${fmtCompact(tokNow * 0.75)} words since ${fmtTime(b[0].time_start)}`
+      + (d.log_axis ? ' · log time axis' : '')
+    : 'no tokens in this range';
+}
+
 const REAL_RANGE_LABELS = { '1h': 'last hour', '6h': 'last 6 h', '24h': 'last 24 h', '48h': 'last 48h',
   '7d': 'last 7 days', all: 'all time', log: 'all time, log time axis' };
 let realRange = '48h';
@@ -2324,7 +2361,7 @@ function setRealRange(r) {
 }
 
 async function refreshReal() {
-  document.querySelectorAll('.real-ranges button').forEach(b => b.classList.toggle('active', b.dataset.range === realRange));
+  document.querySelectorAll('.real-ranges:not(#token-ranges) button').forEach(b => b.classList.toggle('active', b.dataset.range === realRange));
   const label = document.getElementById('real48-range-label');
   if (label) label.textContent = REAL_RANGE_LABELS[realRange] || realRange;
   if (realRange === '48h') {
@@ -3336,14 +3373,7 @@ async function refresh() {
     // it. And the Net chart under it was literally these two lines
     // subtracted: server-side, net_usd is [rev - cost for rev, cost in ...].
     // Token volume is the part that was actually worth plotting over 26 days.
-    const tokVals = rows.cum_tokens || [];
-    renderLineChart('chart-tokens', 'tooltip-tokens', rows.timestamps,
-      [{ name: 'Cumulative tokens', values: tokVals }], ['line-revenue'],
-      v => `${fmtCompact(v)} tokens`);
-    const tokNow = tokVals.at(-1);
-    document.getElementById('tokens-chart-stats').textContent = tokNow
-      ? `${fmtCompact(tokNow)} tokens · ≈ ${fmtCompact(tokNow * 0.75)} words since ${fmtTime(rows.timestamps[0])}`
-      : '';
+    refreshTokens();
 
     // When each running version went live, not when the page last polled.
     const sinceTxt = ts => {

@@ -1,5 +1,12 @@
 # Changelog
 
+## v91
+
+**The token chart has the same range buttons, and a fresh install never downloads models on its own.**
+
+- **Tokens generated** gets 1h, 6h, 24h, 48h, 7d, All and Log, like Real Earnings. A new `/api/tokens?range=…` sums the energy log's token counter deltas into buckets, with a drop treated as a daemon restart, and draws the running total from the start of the chosen range. All starts at the first log row, and Log spreads it on a logarithmic time axis.
+- **No candidate downloads without an experiment.** `install.sh` installs the experiment's LaunchAgent for everyone, and its tick looked for new catalog models and downloaded them even when no experiment had been planned. Without a `protocol.json` it now only collects data (network demand, provider log counts). Candidate search and downloads happen only in a planned experiment.
+
 ## v90
 
 **Real Earnings vs. Electricity Cost has range buttons: 1h, 6h, 24h, 48h, 7d, All and Log.** The chart was fixed to the price panel's 48-hour grid. A new `/api/real_earnings?range=…` sums ledger payouts (base reward included, from the permanent archive) and measured electricity cost into buckets: 5 minutes for 1h and 6h, 15 minutes for 24h and 48h, an hour for 7d, and about 200 buckets for All. **Log** spreads all of it on a logarithmic time axis, 120 buckets from a minute ago back to the first ledger entry, so the latest hour gets as much room as the first week. Ranges start no earlier than the first saved ledger entry. Electricity cost from before that is left out, so both lines always cover the same time. 48h still draws from the price panel's 15-minute grid, and Net per day elsewhere on the page stays tied to 48h whichever range is shown. The choice is remembered in the browser.

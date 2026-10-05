@@ -1002,13 +1002,16 @@ def _tick():
     state.setdefault("blocks", {})
     archive_network_demand(state)
     log_counts = provider_log_counts(state)
+    if not protocol:
+        # Nothing planned (e.g. a fresh install): only collect data. Finding
+        # and downloading candidate models is part of a running experiment,
+        # never something an install does on its own.
+        write_json(STATE, state)
+        return 0
     try:
         maintain_candidates(state)
     except Exception as e:
         event("candidates_error", error=str(e)[:200])
-    if not protocol:
-        write_json(STATE, state)
-        return 0
 
     ts = now()
     cmp_fields = compare_tick(state)

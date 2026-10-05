@@ -3686,6 +3686,69 @@ def _ledger_rows_since(since_ts):
     return out
 
 
+def _range_edges(range_key, data_start, now):
+    """Bucket edges for a range button: fixed-width buckets (REAL_EARNINGS_
+    RANGES), ~200 for "all", or log-spaced by age for "log". Never earlier
+    than data_start."""
+    span, bucket = REAL_EARNINGS_RANGES[range_key]
+    start = max(data_start, now - span) if span else data_start
+    if range_key == "log":
+        lo, hi = math.log10(60), math.log10(max(120, now - start))
+        ages = [10 ** (hi - (hi - lo) * i / REAL_EARNINGS_LOG_BUCKETS) for i in range(REAL_EARNINGS_LOG_BUCKETS + 1)]
+        edges = [now - a for a in ages] + [now]
+    else:
+        if bucket is None:
+            bucket = max(900, int((now - start) / 200 // 900 + 1) * 900)
+        first = int(start // bucket) * bucket
+        edges = [e for e in range(first, int(now) + bucket, bucket) if e <= now] + [now]
+    return sorted(set(edges))
+
+
+def get_tokens_range(range_key):
+    """Tokens generated per bucket over a chosen range, and the running total
+    from the range's start - for the token chart's range buttons. From the
+    energy log's daemon counter (since install), with a drop treated as a
+    restart (the new value is all new work)."""
+    if range_key not in REAL_EARNINGS_RANGES:
+        range_key = "all"
+    now = time.time()
+    cached = _real_earnings_cache.get("tok:" + range_key)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    deltas, prev = [], None
+    try:
+        with open(CSV_PATH, newline="") as f:
+            for r in csv.DictReader(f):
+                try:
+                    t = _parse_iso_ts(r["timestamp"])
+                    tok = int(float(r.get("tokens") or 0))
+                except Exception:
+                    continue
+                if prev is not None:
+                    deltas.append((t, tok - prev if tok >= prev else tok))
+                prev = tok
+    except Exception:
+        pass
+    first = deltas[0][0] if deltas else now
+    edges = _range_edges(range_key, first, now)
+    import bisect
+    per = [0] * (len(edges) - 1)
+    for t, d in deltas:
+        i = bisect.bisect_right(edges, t) - 1
+        if 0 <= i < len(per):
+            per[i] += d
+    total, buckets = 0, []
+    for a, b, n in zip(edges, edges[1:], per):
+        total += n
+        buckets.append({"time_start": datetime.fromtimestamp(a).astimezone().isoformat(),
+                        "time_end": datetime.fromtimestamp(b).astimezone().isoformat(),
+                        "tokens": n, "cum_tokens": total})
+    data = {"range": range_key, "log_axis": range_key == "log",
+            "data_starts": datetime.fromtimestamp(first).astimezone().isoformat(), "buckets": buckets}
+    _real_earnings_cache["tok:" + range_key] = (now, data)
+    return data
+
+
 def get_real_earnings(range_key):
     """Real ledger earnings vs. measured electricity cost in buckets over a
     chosen range, for the Real Earnings chart's range buttons. Only spans
@@ -3699,21 +3762,9 @@ def get_real_earnings(range_key):
     cached = _real_earnings_cache.get(range_key)
     if cached and now - cached[0] < 60:
         return cached[1]
-    span, bucket = REAL_EARNINGS_RANGES[range_key]
     ledger_all = _ledger_rows_since(0)
     first_ledger = min((t for t, _ in ledger_all), default=now)
-    start = max(first_ledger, now - span) if span else first_ledger
-    if range_key == "log":
-        lo, hi = math.log10(60), math.log10(max(120, now - start))
-        ages = [10 ** (hi - (hi - lo) * i / REAL_EARNINGS_LOG_BUCKETS) for i in range(REAL_EARNINGS_LOG_BUCKETS + 1)]
-        edges = [now - a for a in ages] + [now]
-    else:
-        if bucket is None:
-            bucket = max(900, int((now - start) / 200 // 900 + 1) * 900)
-        first = int(start // bucket) * bucket
-        edges = list(range(first, int(now) + bucket, bucket))
-        edges = [e for e in edges if e <= now] + [now]
-    edges = sorted(set(edges))
+    edges = _range_edges(range_key, first_ledger, now)
     earn = [0.0] * (len(edges) - 1)
     cost = [0.0] * (len(edges) - 1)
     import bisect
@@ -4356,6 +4407,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # rate without dragging the whole /api/data payload with it.
             self._send_json(get_temp_age_series())
 
+        elif self.path.startswith("/api/tokens"):
+            m = re.search(r"[?&]range=([0-9a-z]+)", self.path)
+            self._send_json(get_tokens_range(m.group(1) if m else "all"))
         elif self.path.startswith("/api/real_earnings"):
             m = re.search(r"[?&]range=([0-9a-z]+)", self.path)
             self._send_json(get_real_earnings(m.group(1) if m else "48h"))
