@@ -1755,6 +1755,7 @@ function renderModelDemand(d) {
         <th class="num" title="Outcome not recorded by Darkbloom. Completed + rejected + timeouts + failed + cancelled + unknown = requests.">Unknown</th>
         <th class="num" title="HTTP 429 responses. Overlaps the other outcomes, so it is not added to them.">429s</th>
         <th title="Requests per bucket over the window. Gaps are hours that were not published.">Trend</th>
+        <th class="num" title="What this model has actually done on this Mac since the model experiment started sampling: paid jobs per hour while it was advertised here, and pay per hour. Hover for hours advertised, total jobs and pay per job. Published network demand is a poor guide on its own - the busiest model on the network may get nothing here.">On this Mac</th>
         <th title="Suitability for this Mac: whether it fits (RAM, the inference memory budget next to the models already hosted, free disk) and whether network demand makes it worth serving. Hover the badge for all reasons. A rough guide from published demand, not an earnings forecast.">Fit</th>
         <th title="One button per model, labelled with what it does. Serve downloads the model if needed, switches the provider to it - alongside the current models when they fit in memory together, otherwise instead of them - and loads it. Running jobs finish first; no restart. The choice is also written to the provider plist so Price Guard restarts keep it.">This Mac</th>
       </tr></thead>
@@ -1774,6 +1775,7 @@ function renderModelDemand(d) {
             <td class="num" title="${pct(m.unknown || 0, m.requests) != null ? pct(m.unknown || 0, m.requests).toFixed(1) + '% of requests' : ''}">${m.unknown ? fmtNum(m.unknown) : '–'}</td>
             <td class="num">${m.http_429 ? fmtNum(m.http_429) : '–'}</td>
             <td>${demandSparkline(m.time_series)}</td>
+            <td class="num">${hereCell(m.here)}</td>
             <td>${fitCell(m)}</td>
             <td>${modelActionsCell(m)}</td>
           </tr>`;
@@ -1782,6 +1784,7 @@ function renderModelDemand(d) {
     </table>
     </div>
     ${memoryNote(d)}
+    ${controlNote(d.control)}
   `;
 }
 
@@ -1819,6 +1822,24 @@ const FIT_STYLES = {
   unknown: ['var(--text-muted)', 'Unknown'],
 };
 
+function hereCell(h) {
+  if (!h || !h.hours) return '<span style="color:var(--text-muted)">not tried</span>';
+  const tip = `Advertised here ${h.hours} h · ${fmtNum(h.jobs)} paid jobs · $${h.usd.toFixed(4)} paid` +
+    (h.usd_per_job != null ? ` · $${h.usd_per_job.toFixed(6)} per job` : '');
+  if (h.jobs_per_hour == null) return `<span title="${tip}">${fmtNum(h.jobs)} jobs</span>`;
+  const color = h.jobs_per_hour < 1 ? 'var(--status-serious)' : h.jobs_per_hour >= 100 ? 'var(--status-good)' : 'var(--text-primary)';
+  return `<span title="${tip}" style="color:${color}">${h.jobs_per_hour < 10 ? h.jobs_per_hour.toFixed(1) : h.jobs_per_hour.toFixed(0)}/h</span>` +
+    `<div class="fit-reason">$${(h.usd_per_hour || 0).toFixed(4)}/h · ${h.hours.toFixed(0)} h</div>`;
+}
+
+function controlNote(c) {
+  if (!c) return '';
+  if (c.autopilot) return `<div class="rotation-summary" style="color:var(--status-serious)">Darkbloom Autopilot is enrolled and owns the model selection - Serve and Stop are disabled here (Darkbloom refuses a manual switch until Autopilot is disabled).</div>`;
+  if (c.comparison_running) return `<div class="rotation-summary" style="color:var(--status-serious)">The Autopilot comparison is switching models on a schedule - a manual Serve now would be undone at the next phase and skew its numbers.</div>`;
+  if (c.experiment_running) return `<div class="rotation-summary" style="color:var(--status-serious)">The model experiment is running - a manual Serve pauses it (it steps aside when someone changes models by hand).</div>`;
+  return '';
+}
+
 function fitCell(m) {
   const r = m.recommendation;
   if (!r) return '–';
@@ -1840,9 +1861,11 @@ function modelActionsCell(m) {
   const job = l.job;
   const running = job && job.state === 'running';
   const hostedCount = (lastModelDemand?.hosted_models || []).length;
-  const blocked = m.recommendation && m.recommendation.level === 'unsuitable';
+  const apLocked = !!(lastModelDemand && lastModelDemand.control && lastModelDemand.control.autopilot);
+  const blocked = (m.recommendation && m.recommendation.level === 'unsuitable')
+    || !!(lastModelDemand && lastModelDemand.control && lastModelDemand.control.autopilot);
   const btn = (action, label, title, disabled) =>
-    `<button class="copy-cmd-btn" ${disabled || running ? 'disabled' : ''} title="${escapeHtml(title)}"
+    `<button class="copy-cmd-btn" ${disabled || running || apLocked ? 'disabled' : ''} title="${escapeHtml(apLocked ? 'Darkbloom Autopilot owns the model selection - disable it first.' : title)}"
       onclick="modelAction('${action}', this.dataset.model)" data-model="${escapeHtml(m.model)}">${escapeHtml(label)}</button>`;
   let state, button = '';
   if (l.hosted && l.loaded) state = '<span style="color:var(--status-good)">Serving</span>';

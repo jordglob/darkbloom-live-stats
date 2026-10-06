@@ -1,5 +1,14 @@
 # Changelog
 
+## v94
+
+**Network Model Demand weighs what each model has actually done on this Mac.** Published demand turned out to be a poor guide on its own: qwen3.6 has the most of it on the network and never got a single job here, while gpt-oss, with a small published share, earns nearly everything.
+
+- **New column "On this Mac":** paid jobs per hour while the model was advertised here, pay per hour, and hours advertised. Hover for total jobs and pay per job. Hours come from the experiment's 5-minute samples (they record the hosted set), jobs and pay from the ledger archive over the same period. Models never tried here say so.
+- **Fit uses that evidence.** After 3+ hours advertised here, fewer than 1 paid job an hour turns the recommendation to "low", whatever the network demand. 100+ an hour makes it "recommended". The hours, jobs/h and $/h become the first reason shown.
+- **Chip requirements.** Models whose catalog entry needs specific provider capabilities (Qwen3.8-27B: `apple_m5`, `mlx_nax`) are now "unsuitable" with the reason, instead of "possible".
+- **Who controls the models.** A note under the table says when Darkbloom Autopilot, the Autopilot comparison or the block experiment is choosing the models. With Autopilot enrolled, Serve, Stop and Retry are disabled, because Darkbloom refuses a manual switch then anyway. With the comparison or experiment running, the note says a manual Serve would be undone or pause it.
+
 ## v93
 
 **Price Guard shows one currency throughout, and its break-even is no longer ~15x too low.**

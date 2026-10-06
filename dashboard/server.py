@@ -2859,6 +2859,7 @@ def get_model_demand(window):
         if entry:
             m["size_gb"] = round(entry["size_gb"], 1) if entry.get("size_gb") is not None else None
             m["min_ram_gb"] = entry.get("min_ram_gb")
+            m["required_capabilities"] = entry.get("required_provider_capabilities") or []
     data["configured_models"] = configured
     with _model_demand_lock:
         _model_demand_cache[window] = {"at": now, "data": data}
@@ -3331,6 +3332,10 @@ def _recommend_model(m, share, ctx):
     ram = ctx["ram_gb"]
     if min_ram and ram and min_ram > ram:
         return "unsuitable", [f"Needs {min_ram} GB RAM, this Mac has {ram:.0f} GB."]
+    if m.get("required_capabilities"):
+        # e.g. Qwen3.8-27B needs apple_m5 and mlx_nax; the coordinator will
+        # not route it to other chips however much RAM they have.
+        return "unsuitable", ["Needs " + ", ".join(m["required_capabilities"]) + " - not available on this Mac."]
     if m.get("size_gb") is None and not m["local"]["downloaded"]:
         return "unknown", ["Not in the coordinator catalog, so it cannot be downloaded here."]
 
@@ -3377,6 +3382,83 @@ def _recommend_model(m, share, ctx):
     return level, reasons
 
 
+EXPERIMENT_SAMPLES_PATH = HOME / ".darkbloom" / "experiment" / "samples.jsonl"
+_local_record_cache = {"at": 0.0, "data": None}
+
+
+def get_local_model_record():
+    """What each model has actually done on this Mac: hours it was advertised
+    here (from the experiment's 5-minute samples, which record the hosted
+    set), paid jobs and dollars from the ledger archive over the same period.
+    Published network demand turned out to be a poor guide - qwen3.6 has the
+    most of it and never got a single job here - so this is the evidence
+    the Fit column now weighs too. Cached for 5 minutes."""
+    now = time.time()
+    if _local_record_cache["data"] is not None and now - _local_record_cache["at"] < 300:
+        return _local_record_cache["data"]
+    hosted_sec, first = {}, None
+    try:
+        with open(EXPERIMENT_SAMPLES_PATH) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    t = r.get("ts") or _parse_iso_ts(r["at"])
+                except Exception:
+                    continue
+                first = t if first is None else min(first, t)
+                for m in r.get("hosted") or []:
+                    hosted_sec[m] = hosted_sec.get(m, 0) + 300
+    except Exception:
+        pass
+    record = {}
+    if first is not None:
+        jobs, usd = {}, {}
+        paths = sorted(EARNINGS_ARCHIVE_DIR.glob("earnings-*.jsonl")) if EARNINGS_ARCHIVE_DIR.exists() else []
+        seen = set()
+        for path in paths:
+            with open(path) as f:
+                for line in f:
+                    try:
+                        e = json.loads(line)
+                        if e.get("model") == "base_reward" or e.get("id") in seen:
+                            continue
+                        if _parse_iso_ts(e["created_at"]) < first:
+                            continue
+                    except Exception:
+                        continue
+                    seen.add(e.get("id"))
+                    jobs[e["model"]] = jobs.get(e["model"], 0) + 1
+                    usd[e["model"]] = usd.get(e["model"], 0.0) + (e.get("amount_micro_usd") or 0) / 1e6
+        for m in set(hosted_sec) | set(jobs):
+            h = hosted_sec.get(m, 0) / 3600
+            n = jobs.get(m, 0)
+            u = usd.get(m, 0.0)
+            record[m] = {"hours": round(h, 1), "jobs": n, "usd": round(u, 4),
+                         "jobs_per_hour": round(n / h, 1) if h >= 0.5 else None,
+                         "usd_per_hour": round(u / h, 4) if h >= 0.5 else None,
+                         "usd_per_job": round(u / n, 6) if n else None}
+    data = {"since": first, "models": record}
+    _local_record_cache.update(at=now, data=data)
+    return data
+
+
+def _model_control_state():
+    """Who decides the hosted models right now, so manual Serve buttons can
+    say why they would conflict."""
+    ap = get_autopilot_state() or {}
+    exp = {}
+    try:
+        exp = json.loads((HOME / ".darkbloom" / "experiment" / "state.json").read_text())
+    except Exception:
+        pass
+    cmp = exp.get("compare") or {}
+    return {
+        "autopilot": bool(ap.get("enabled")) and not ap.get("paused"),
+        "comparison_running": bool(cmp) and not cmp.get("finished"),
+        "experiment_running": (HOME / ".darkbloom" / "experiment" / "protocol.json").exists() and not exp.get("paused"),
+    }
+
+
 def annotate_model_demand(data):
     """Adds live local state (downloaded / hosted / loaded / running job) and a
     suitability recommendation to the cached demand data. Done per request,
@@ -3413,6 +3495,7 @@ def annotate_model_demand(data):
         "hosted_mem": {h: (mem_of(h, h) or 0) for h in hosted},
     }
     total = sum(m.get("requests") or 0 for m in models)
+    record = get_local_model_record().get("models") or {}
     with _model_jobs_lock:
         jobs = {k: dict(v) for k, v in _model_jobs.items()}
     for m in models:
@@ -3435,6 +3518,20 @@ def annotate_model_demand(data):
         m["local"]["serve_label"] = _serve_plan(pid, local, hosted, catalog, learned, budget)[1]
         share = (m.get("requests") or 0) / total * 100 if total else 0
         level, reasons = _recommend_model(m, share, ctx)
+        here = next((v for k, v in record.items() if _matches_public_model(k, pid) or _matches_public_model(pid, k)), None)
+        m["here"] = here
+        if here and level not in ("unsuitable", "unknown") and here["hours"] >= 3 and here["jobs_per_hour"] is not None:
+            if here["jobs_per_hour"] < 1:
+                level = "low"
+                reasons.insert(0, f"Advertised here {here['hours']:.0f} h: {here['jobs']} paid jobs - "
+                                  "the network rarely sends it to this Mac, whatever its overall demand.")
+            elif here["jobs_per_hour"] >= 100:
+                level = "recommended"
+                reasons.insert(0, f"Advertised here {here['hours']:.0f} h: {here['jobs_per_hour']:.0f} paid jobs/h, "
+                                  f"${here['usd_per_hour']:.4f}/h.")
+            else:
+                reasons.insert(0, f"Advertised here {here['hours']:.0f} h: {here['jobs_per_hour']:.0f} paid jobs/h, "
+                                  f"${here['usd_per_hour']:.4f}/h.")
         m["recommendation"] = {"level": level, "reasons": reasons}
     out = dict(data)
     out["models"] = models
@@ -3442,6 +3539,8 @@ def annotate_model_demand(data):
     out["inference_budget_gb"] = budget
     out["purge_available"] = purge_available()
     out["free_disk_gb"] = round(free_disk, 1) if free_disk is not None else None
+    out["here_since"] = get_local_model_record().get("since")
+    out["control"] = _model_control_state()
     return out
 
 
