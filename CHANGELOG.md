@@ -1,5 +1,9 @@
 # Changelog
 
+## v97
+
+**Power is sampled fast only while someone is watching.** powermetrics ran at 200 ms around the clock. That used ~11% of a CPU core and wrote ~70 MB an hour to its raw log, though the fast samples only matter to the live gauges on an open page. The LaunchAgent now starts `pm-run.sh`, which reads the interval from `~/.darkbloom/pm-interval-ms`. The dashboard sets it to 200 ms while the page polls `/api/power` and to 1000 ms a minute after polling stops, restarting the job (`launchctl kickstart -k`) on each change. The energy log's 5-minute averages are unaffected, since they average whatever samples arrived. Opening the page brings the gauges back to full speed within about 5 seconds.
+
 ## v96
 
 **The History range buttons work on every tab, and a deploy no longer wipes the temperature history.**

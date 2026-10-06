@@ -1363,6 +1363,35 @@ def _evaluate_price_guard(cfg):
     }
 
 
+PM_INTERVAL_FILE = HOME / ".darkbloom" / "pm-interval-ms"
+PM_FAST_MS = 200      # page open: live gauges move with it
+PM_SLOW_MS = 1000     # nobody watching: enough for the 5-minute energy log
+PM_VIEWER_GRACE_SEC = 60
+_last_power_poll = {"t": 0.0}
+
+
+def pm_interval_loop():
+    """Sample power fast only while someone is looking. The page polls
+    /api/power five times a second while open; when that stops for a minute,
+    drop powermetrics to 1 s (it used ~11% of a core and wrote ~70 MB/h at
+    200 ms around the clock). Changing the interval means restarting the
+    LaunchAgent, which pm-run.sh picks the new value up from."""
+    while True:
+        try:
+            want = PM_FAST_MS if time.time() - _last_power_poll["t"] < PM_VIEWER_GRACE_SEC else PM_SLOW_MS
+            try:
+                have = int(PM_INTERVAL_FILE.read_text().strip())
+            except Exception:
+                have = None
+            if have != want:
+                PM_INTERVAL_FILE.write_text(str(want))
+                subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/io.darkbloom.powermetrics"],
+                               capture_output=True, timeout=20)
+        except Exception:
+            pass
+        time.sleep(5)
+
+
 def price_guard_loop():
     while True:
         try:
@@ -4748,6 +4777,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Cheap, fast-poll-friendly: just a file tail, no subprocess spawns.
             # Kept separate from /api/live_power so polling this at 5Hz doesn't
             # also spawn top/sysctl/ollama ps five times a second.
+            _last_power_poll["t"] = time.time()
             self._send_json({"power": get_live_power()})
         elif self.path == "/api/live_power":
             self._send_json({
@@ -4973,6 +5003,7 @@ if __name__ == "__main__":
     threading.Thread(target=fan_recovery_loop, daemon=True).start()
     threading.Thread(target=inference_duration_tracker_loop, daemon=True).start()
     threading.Thread(target=price_guard_loop, daemon=True).start()
+    threading.Thread(target=pm_interval_loop, daemon=True).start()
     with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:
         print(f"Darkbloom Live & Stats running at http://127.0.0.1:{PORT}")
         httpd.serve_forever()

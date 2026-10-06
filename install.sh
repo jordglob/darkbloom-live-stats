@@ -49,7 +49,7 @@ cp "$REPO_DIR/dashboard/app.css" "$TARGET/dashboard/app.css"
 VERSION="$(grep -m1 -oE '^## v[0-9]+' "$REPO_DIR/CHANGELOG.md" | sed 's/^## //')"
 echo "${VERSION:-unknown}" > "$TARGET/dashboard/VERSION"
 
-for f in pm-start.sh energy-monitor.sh max-power.py experiment.py provider_log_stream.py; do
+for f in pm-start.sh pm-run.sh energy-monitor.sh max-power.py experiment.py provider_log_stream.py; do
   cp "$REPO_DIR/scripts/$f" "$TARGET/$f"
   chmod +x "$TARGET/$f"
 done

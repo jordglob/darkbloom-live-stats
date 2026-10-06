@@ -6,15 +6,8 @@
   <string>io.darkbloom.powermetrics</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/sudo</string>
-    <string>-n</string>
-    <string>/usr/bin/powermetrics</string>
-    <string>--samplers</string>
-    <string>cpu_power,gpu_power</string>
-    <string>-i</string>
-    <string>200</string>
-    <string>-o</string>
-    <string>/tmp/darkbloom-pm-raw.log</string>
+    <string>/bin/bash</string>
+    <string>__HOME__/.darkbloom/pm-run.sh</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
