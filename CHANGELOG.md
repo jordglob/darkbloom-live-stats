@@ -1,5 +1,9 @@
 # Changelog
 
+## v99
+
+**A candidate model removed on purpose stays removed.** Experiment candidates whose status starts with `removed` are skipped by the hourly catalog check, instead of being downloaded again. nemotron's outdated revision, which Darkbloom no longer verifies, was deleted on 2026-10-06 to free 17 GB before the macOS 27.0.1 update.
+
 ## v98
 
 **Every electricity price is kept, and an open page picks up a new version by itself.**

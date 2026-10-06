@@ -375,7 +375,8 @@ def maintain_candidates(state):
         if why_not:
             c["status"] = "excluded: " + why_not
             continue
-        if c.get("status") in ("load_failed", "unpaid"):
+        if c.get("status") in ("load_failed", "unpaid") or str(c.get("status", "")).startswith("removed"):
+            # A candidate removed on purpose (e.g. to free disk) stays removed.
             continue
         if any(same_model(l, mid) for l in local):
             if c.get("status") != "ready":
