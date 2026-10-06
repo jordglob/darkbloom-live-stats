@@ -4015,6 +4015,51 @@ def _range_edges(range_key, data_start, now):
     return sorted(set(edges))
 
 
+def get_csv_range_series(range_key, column):
+    """Average and peak of one energy-log column per bucket over a range
+    button's span - for the Power and Electricity price tabs. The log has a
+    row every 5 minutes since install, so every range has real data."""
+    if range_key not in REAL_EARNINGS_RANGES:
+        range_key = "48h"
+    now = time.time()
+    key = f"csv:{column}:{range_key}"
+    cached = _real_earnings_cache.get(key)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    pts = []
+    try:
+        with open(CSV_PATH, newline="") as f:
+            for r in csv.DictReader(f):
+                try:
+                    v = r.get(column)
+                    if v in (None, ""):
+                        continue
+                    pts.append((_parse_iso_ts(r["timestamp"]), float(v)))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    first = pts[0][0] if pts else now
+    edges = _range_edges(range_key, first, now)
+    import bisect
+    acc = [[0.0, 0, None] for _ in range(len(edges) - 1)]
+    for t, v in pts:
+        i = bisect.bisect_right(edges, t) - 1
+        if 0 <= i < len(acc):
+            a = acc[i]
+            a[0] += v
+            a[1] += 1
+            a[2] = v if a[2] is None else max(a[2], v)
+    buckets = [{"time_start": datetime.fromtimestamp(a).astimezone().isoformat(),
+                "time_end": datetime.fromtimestamp(b).astimezone().isoformat(),
+                "avg": round(x[0] / x[1], 4) if x[1] else None, "peak": x[2]}
+               for a, b, x in zip(edges, edges[1:], acc)]
+    data = {"range": range_key, "column": column, "log_axis": range_key == "log",
+            "data_starts": datetime.fromtimestamp(first).astimezone().isoformat(), "buckets": buckets}
+    _real_earnings_cache[key] = (now, data)
+    return data
+
+
 def get_tokens_range(range_key):
     """Tokens generated per bucket over a chosen range, and the running total
     from the range's start - for the token chart's range buttons. From the
@@ -4722,6 +4767,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # rate without dragging the whole /api/data payload with it.
             self._send_json(get_temp_age_series())
 
+        elif self.path.startswith("/api/history_series"):
+            m = re.search(r"[?&]range=([0-9a-z]+)", self.path)
+            c = re.search(r"[?&]col=([a-z_]+)", self.path)
+            col = c.group(1) if c and c.group(1) in ("total_power_w", "elpris_sek_kwh") else "total_power_w"
+            self._send_json(get_csv_range_series(m.group(1) if m else "48h", col))
         elif self.path.startswith("/api/tokens"):
             m = re.search(r"[?&]range=([0-9a-z]+)", self.path)
             self._send_json(get_tokens_range(m.group(1) if m else "all"))

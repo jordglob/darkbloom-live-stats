@@ -78,7 +78,9 @@ fi
 # this script averages per interval. Runs as our child (no sudo), dies with us.
 start_macmon() {
   [ -n "$MACMON" ] || return 0
-  : > "$MACMON_LOG"
+  # Append, never truncate: this script restarts on every install.sh, and
+  # emptying the log each time wiped the temperature chart's fine history
+  # ("0 live samples" after each deploy). Size is capped below by rotation.
   "$MACMON" pipe -s 0 -i 5000 >> "$MACMON_LOG" 2>/dev/null &
   MACMON_PID=$!
 }
@@ -94,7 +96,8 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 0' INT TERM
 start_macmon
-MACMON_OFFSET=0
+# Only samples written from now on belong to this run's first interval.
+MACMON_OFFSET=$(stat -f %z "$MACMON_LOG" 2>/dev/null || echo 0)
 
 LAST_OFFSET=0
 CUM_WH=0
@@ -243,7 +246,7 @@ while true; do
       fi
       # keep the log from growing forever: it's only ever read incrementally
       if [ "$MSIZE" -gt 20000000 ]; then
-        cleanup; start_macmon; MACMON_OFFSET=0
+        cleanup; mv -f "$MACMON_LOG" "$MACMON_LOG.1"; start_macmon; MACMON_OFFSET=0
       fi
     fi
   fi

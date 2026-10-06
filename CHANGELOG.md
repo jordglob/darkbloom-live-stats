@@ -1,5 +1,16 @@
 # Changelog
 
+## v96
+
+**The History range buttons work on every tab, and a deploy no longer wipes the temperature history.**
+
+- **Power** now draws from the range: a new `/api/history_series?col=…&range=…` buckets the energy log's 5-minute rows with the same edges as Earnings and Tokens, average plus peak. It used to show the whole history whatever was chosen.
+- **Electricity price** keeps the day-ahead chart (yesterday, today, tomorrow's auction) at 48h. Every other range shows the price this Mac actually paid per kWh, all-in, from the energy log, with average, min and max. Before, the buttons did nothing on this tab.
+- **Temperature & fan** crops its age axis to 1h…7d. All and Log keep everything, since that chart has a log axis already.
+- **Electricity price in local currency.** The day-ahead chart, its now/min/max line and the ⚡ line under the gauges showed dollars while the rest of the page shows the local currency first. They now show local currency, with USD in brackets where it helps.
+- **Temperature tab header** names the chosen range instead of always saying "→ 38.5 days".
+- **Temperature history survived no deploy.** `energy-monitor.sh` emptied `macmon.jsonl` every time it started, which is every `install.sh`, so the fine-grained temperature history restarted at "0 live samples" each time. It now appends and starts reading at the current end. At 20 MB it rotates to `macmon.jsonl.1` instead of being emptied.
+
 ## v95
 
 **Simpler, clearer page.** The page had grown to 13 panels, 9 gauges, 7 status cards and close to 100 explanatory tooltips. What mattered most, whether this Mac is earning and whether anything is wrong, took searching.

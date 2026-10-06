@@ -624,8 +624,10 @@ function renderTempAge(ta) {
   lastTempAge = ta;
   const spanDays = ta.frame_max_ms / 86400000;
   const installTxt = ta.install_ts ? fmtTime(ta.install_ts) : '?';
-  document.getElementById('temp-age-stats').textContent =
-    `${ta.fine_sample_count.toLocaleString()} live samples \u00B7 axis ${ta.sample_interval_sec.toFixed(1)}s \u2192 ${spanDays.toFixed(1)} days (since ${installTxt})`;
+  const cropMs = RANGE_SPAN_MS[realRange];
+  document.getElementById('temp-age-stats').textContent = cropMs && cropMs < ta.frame_max_ms
+    ? `${REAL_RANGE_LABELS[realRange] || realRange} \u00B7 log age axis \u00B7 ${ta.fine_sample_count.toLocaleString()} live samples`
+    : `${ta.fine_sample_count.toLocaleString()} live samples \u00B7 axis ${ta.sample_interval_sec.toFixed(1)}s \u2192 ${spanDays.toFixed(1)} days (since ${installTxt})`;
   document.getElementById('temp-age-legend').innerHTML =
     `<span title="One continuous curve. Out to 24h it's macmon's own ~${ta.sample_interval_sec.toFixed(0)}s SMC readings; beyond that, 5-minute CSV rows. Log-binned onto the same axis so the handover isn't a break in the line."><i style="background:var(--gauge-gpu)"></i>GPU Temp (avg, band to peak)</span>` +
     `<span title="Fan speed as % of max RPM, right axis. Only the 5-minute CSV has fan RPM - macmon doesn't report it - so this curve is coarser than temperature, topped up with the live reading."><i style="background:var(--gauge-cpu)"></i>Fan speed % (right axis)</span>`;
@@ -644,6 +646,15 @@ function renderTempAge(ta) {
     // for a 0.4s reading would be wrong.
     merged.live_oldest_age_ms = nowMs - liveTier[0].t * 1000;
     merged.live_cadence_ms = LIVE_TIER_CADENCE_MS;
+  }
+  // Shared range buttons: crop the age axis to the chosen span ('all' and
+  // 'log' keep everything - this chart is log-age already).
+  const spanMs = RANGE_SPAN_MS[realRange];
+  if (spanMs && spanMs < merged.frame_max_ms) {
+    merged.frame_max_ms = spanMs;
+    for (const k of ['temp', 'cpu_temp', 'fan', 'gpu_load', 'jobs_per_min']) {
+      if (Array.isArray(merged[k])) merged[k] = merged[k].filter(p => p.age_ms <= spanMs);
+    }
   }
   renderLogAgeChart('chart-temp-age', 'tooltip-temp-age', merged, {
     show: seriesOn,
@@ -1750,20 +1761,25 @@ function renderElpris(p) {
   const netValues = prices.map(x => x.net_usd ?? ((x.earnings_usd || 0) - (x.cost_usd || 0)));
   const hasSurcharge = surcharge.grid_fee_per_kwh > 0 || surcharge.energy_tax_per_kwh > 0 || surcharge.vat_pct > 0;
 
-  const leftSeries = [{ name: 'Spot price', values }];
+  // Drawn in the local currency like the rest of the page; the USD figures
+  // above stay for the callers that still want them.
+  const cur = (p && p.currency) || lastCurrency;
+  const toLocal = v => v == null ? null : v * rate;
+  const fmtLocalKwh = v => v == null ? '–' : `${v.toFixed(2)} ${cur}/kWh`;
+  const leftSeries = [{ name: 'Spot price', values: values.map(toLocal) }];
   const leftColors = ['line-elpris'];
-  if (hasSurcharge) { leftSeries.push({ name: 'Incl. fees & tax', values: totalValues }); leftColors.push('line-elpris-total'); }
+  if (hasSurcharge) { leftSeries.push({ name: 'Incl. fees & tax', values: totalValues.map(toLocal) }); leftColors.push('line-elpris-total'); }
 
   // The per-slot Net overlay answers a real question - which hours were worth
   // running - but it crosses zero constantly and is the noisiest thing on the
   // page. Off by default, behind a checkbox, like the log-age chart's series.
   const elprisOpts = { allowNegative: true, nowLine: true };
   if (showElprisNet) {
-    elprisOpts.rightSeries = [{ name: 'Net (earnings − cost, 15-min)', values: netValues, colorClass: 'line-earnings' }];
-    elprisOpts.rightValueFmt = fmtUsd;
+    elprisOpts.rightSeries = [{ name: 'Net (earnings − cost, 15-min)', values: netValues.map(toLocal), colorClass: 'line-earnings' }];
+    elprisOpts.rightValueFmt = v => v == null ? '–' : `${v.toFixed(3)} ${cur}`;
     elprisOpts.allowNegativeRight = true;
   }
-  renderLineChart('chart-elpris', 'tooltip-elpris', timestamps, leftSeries, leftColors, fmtUsdPerKwh, elprisOpts);
+  renderLineChart('chart-elpris', 'tooltip-elpris', timestamps, leftSeries, leftColors, fmtLocalKwh, elprisOpts);
 
   const legendEl = document.getElementById('elpris-legend');
   if (legendEl) {
@@ -1791,7 +1807,7 @@ function renderElpris(p) {
     if (statsEl) {
       const tomorrowNote = !p.has_forecast ? 'real-time source, no day-ahead prices'
         : p.tomorrow_available ? 'tomorrow published' : 'tomorrow not published yet (usually appears mid-afternoon)';
-      statsEl.textContent = `now: ${fmtUsdPerKwh(nowVal)} · min: ${fmtUsdPerKwh(Math.min(...realValues))} · max: ${fmtUsdPerKwh(Math.max(...realValues))} · ${tomorrowNote}`;
+      statsEl.textContent = `spot now: ${fmtLocalKwh(toLocal(nowVal))} (${fmtUsdPerKwh(nowVal)}) · min: ${fmtLocalKwh(toLocal(Math.min(...realValues)))} · max: ${fmtLocalKwh(toLocal(Math.max(...realValues)))} · ${tomorrowNote}`;
     }
   } else if (statsEl) {
     statsEl.textContent = '';
@@ -1848,7 +1864,52 @@ function setHistoryRange(r) {
   document.querySelectorAll('.history-range button').forEach(b => b.classList.toggle('active', b.dataset.range === r));
   setRealRange(r);
   setTokenRange(r);
+  // Power, price and temperature follow the same buttons.
+  refreshPowerRange();
+  refreshPriceRange();
+  if (lastTempAge) renderTempAge(lastTempAge);
 }
+
+const RANGE_SPAN_MS = { '1h': 3600e3, '6h': 6 * 3600e3, '24h': 86400e3, '48h': 2 * 86400e3, '7d': 7 * 86400e3 };
+
+async function refreshPowerRange() {
+  let d;
+  try { d = await (await fetch('/api/history_series?col=total_power_w&range=' + realRange)).json(); } catch (e) { return; }
+  if (d.range !== realRange) return;
+  const b = d.buckets || [];
+  const avg = b.map(x => x.avg), peak = b.map(x => x.peak);
+  renderLineChart('chart-power', 'tooltip-power', b.map(x => x.time_start),
+    [{ name: 'Power (whole Mac)', values: avg }, { name: 'Peak', values: peak }], ['line-power', 'line-power-peak'], fmtW,
+    { envelope: { lower: 0, upper: 1, className: 'band-power' } });
+  const real = avg.filter(v => v != null);
+  const el = document.getElementById('power-chart-stats');
+  if (el) el.textContent = real.length
+    ? `${REAL_RANGE_LABELS[realRange] || realRange} · avg ${fmtW(real.reduce((a, v) => a + v, 0) / real.length)} · max ${fmtW(Math.max(...peak.filter(v => v != null)))}` + (d.log_axis ? ' · log time axis' : '')
+    : 'no readings in this range';
+}
+
+async function refreshPriceRange() {
+  // 48h keeps the day-ahead chart (yesterday, today and tomorrow's auction);
+  // every other range shows the price this Mac actually paid, from the
+  // energy log (all-in: spot + grid fee + tax + VAT).
+  if (realRange === '48h') { if (lastPrice48) renderElpris(lastPrice48); return; }
+  let d;
+  try { d = await (await fetch('/api/history_series?col=elpris_sek_kwh&range=' + realRange)).json(); } catch (e) { return; }
+  if (d.range !== realRange) return;
+  const b = d.buckets || [];
+  const cur = (lastPrice48 && lastPrice48.currency) || lastCurrency;
+  renderLineChart('chart-elpris', 'tooltip-elpris', b.map(x => x.time_start),
+    [{ name: 'Price paid (all-in)', values: b.map(x => x.avg) }], ['line-elpris-total'],
+    v => `${v.toFixed(2)} ${cur}/kWh`, { allowNegative: true });
+  const vals = b.map(x => x.avg).filter(v => v != null);
+  const st = document.getElementById('elpris-chart-stats');
+  if (st) st.textContent = vals.length
+    ? `${REAL_RANGE_LABELS[realRange] || realRange} · avg ${(vals.reduce((a, v) => a + v, 0) / vals.length).toFixed(2)} ${cur}/kWh · min ${Math.min(...vals).toFixed(2)} · max ${Math.max(...vals).toFixed(2)}` + (d.log_axis ? ' · log time axis' : '')
+    : 'no prices logged in this range';
+  const lg = document.getElementById('elpris-legend');
+  if (lg) lg.innerHTML = `<span><i style="background:var(--series-elpris-total)"></i>Price this Mac paid per kWh, all-in (fees, tax, VAT) - from the energy log. Choose 48h for the day-ahead auction incl. tomorrow.</span>`;
+}
+
 
 const REAL_RANGE_LABELS = { '1h': 'last hour', '6h': 'last 6 h', '24h': 'last 24 h', '48h': 'last 48h',
   '7d': 'last 7 days', all: 'all time', log: 'all time, log time axis' };
@@ -2845,6 +2906,7 @@ async function refresh() {
     renderDisk(disk);
     renderNerdyStats(daemon_state, account, doctor, inference_durations, status.requests_served || 0);
     const elprisNow = renderElpris(price_48h);
+    refreshPriceRange();
     lastRealPrice48 = price_48h;
     refreshReal();
     updateFavicon(status);
@@ -2867,6 +2929,7 @@ async function refresh() {
     const nowW = (rows.total_power_w || []).at(-1);
     const maxW = Math.max(...(hasPeak ? rows.peak_total_power_w : (rows.total_power_w || [0])));
     document.getElementById('power-chart-stats').textContent = nowW != null ? `now: ${fmtW(nowW)} · max: ${fmtW(maxW)}` : '';
+    refreshPowerRange();
 
 
     // Log-age chart: the server does the pyramid (macmon ~5s out to 24h,
@@ -2907,7 +2970,9 @@ async function refresh() {
     } else if (elprisNow && elprisNow.nowTotal != null) {
       const local = elprisNow.currency && elprisNow.currency !== 'USD'
         ? ` (${elprisNow.nowTotalLocal.toFixed(2)} ${elprisNow.currency})` : '';
-      kwhEl.textContent = `⚡ electricity $${elprisNow.nowTotal.toFixed(3)}/kWh${local} right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''} · spot $${elprisNow.nowVal.toFixed(3)}`;
+      kwhEl.textContent = elprisNow.currency && elprisNow.currency !== 'USD'
+        ? `⚡ electricity ${elprisNow.nowTotalLocal.toFixed(2)} ${elprisNow.currency}/kWh ($${elprisNow.nowTotal.toFixed(3)}) right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''}`
+        : `⚡ electricity $${elprisNow.nowTotal.toFixed(3)}/kWh right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''} · spot $${elprisNow.nowVal.toFixed(3)}`;
       kwhEl.title = 'Total = (spot + grid fee + energy tax) + VAT on all of it, using the fee and VAT fields under the electricity price chart. Spot alone is only part of what the bill charges per kWh.';
     } else {
       kwhEl.textContent = elprisNow && elprisNow.nowVal != null
