@@ -1225,7 +1225,7 @@ function renderPriceGuard(pg) {
     : (daemonRunning ? 'manual-start' : 'manual-stop');
 
   const priceLine = live
-    ? `<span title="Break-even comes from the measured $${live.active_rate_per_hour_usd.toFixed(4)}/hr active pay rate and ${(live.total_power_w || 0).toFixed(0)}W current draw.">Now <strong>${live.price_per_kwh.toFixed(3)} ${cur}/kWh</strong>, break-even <strong>${live.break_even_per_kwh.toFixed(3)}</strong> — ${live.reason}</span>`
+    ? `<span title="Break-even: what one running hour earns (ledger payouts plus the base reward, both lost when the provider is stopped) divided by what it draws on average, over the same recent window (up to 48 h). Local currency first, USD in brackets, at ${live.local_per_usd ? live.local_per_usd.toFixed(2) : '?'} ${cur}/USD.">Now <strong>${live.price_per_kwh.toFixed(3)} ${cur}/kWh</strong>${live.price_usd_per_kwh != null ? ` ($${live.price_usd_per_kwh.toFixed(4)})` : ''}, break-even <strong>${live.break_even_per_kwh.toFixed(3)} ${cur}/kWh</strong>${live.break_even_usd_per_kwh != null ? ` ($${live.break_even_usd_per_kwh.toFixed(4)})` : ''}${live.income_per_hour_local != null ? ` · earns ${live.income_per_hour_local.toFixed(3)} ${cur}/h ($${live.income_per_hour_usd.toFixed(4)}) at ${live.avg_power_w.toFixed(0)} W` : ''} — ${live.reason}</span>`
     : 'Not enough data yet - needs at least one real served request and a live electricity price reading.';
 
   const sourceTag = pg.last_action_source ? ` <span style="color:var(--text-muted)">(${pg.last_action_source})</span>` : '';

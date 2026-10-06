@@ -985,6 +985,11 @@ def read_price_guard_config():
         return default
     if not default.get("last_action_source"):
         default["last_action_source"] = _infer_price_guard_action_source(default.get("last_reason"))
+    # Pre-v20 keys with a misleading currency in their names (0.147 "SEK"
+    # was a USD figure); the current ones are last_price_per_kwh and
+    # last_break_even_per_kwh, in the configured currency.
+    default.pop("last_price_sek_per_kwh", None)
+    default.pop("last_break_even_sek_per_kwh", None)
     return default
 
 
@@ -1220,6 +1225,33 @@ def _apply_price_guard_action(action, reason):
     return False
 
 
+PRICE_GUARD_INCOME_WINDOW_SEC = 48 * 3600
+
+
+def _recent_income_and_power(rows):
+    """(USD earned per hour, average kW) over the window the saved ledger
+    covers, capped at PRICE_GUARD_INCOME_WINDOW_SEC - payouts and base
+    reward from the permanent archive, power from the energy log, both over
+    exactly the same span."""
+    now = time.time()
+    ledger = _ledger_rows_since(now - PRICE_GUARD_INCOME_WINDOW_SEC)
+    if not ledger:
+        return None
+    start = min(t for t, _ in ledger)
+    hours = (now - start) / 3600
+    if hours < 1:
+        return None
+    usd = sum(v for _, v in ledger)
+    wh = 0.0
+    for r in rows:
+        try:
+            if _parse_iso_ts(r["timestamp"]) > start:
+                wh += float(r.get("interval_wh") or 0)
+        except Exception:
+            continue
+    return usd / hours, (wh / hours) / 1000
+
+
 def _evaluate_price_guard(cfg):
     """Pure decision function, no side effects - computes today's real
     break-even price and returns an action recommendation (or None) plus the
@@ -1248,17 +1280,24 @@ def _evaluate_price_guard(cfg):
     if price <= 0 or usd_sek <= 0 or total_w <= 0:
         return None
 
-    account = get_account_data()
-    rate_cmp = (account or {}).get("hourly_rate_comparison") or {}
-    active_rate = rate_cmp.get("active_rate_per_hour_usd")
-    if not active_rate or active_rate <= 0:
+    # Break-even: what one running hour pays (ledger payouts AND the base
+    # reward - stopping the provider forfeits both) over what one running
+    # hour costs (average measured power), over the same recent window. Until
+    # v93 this used an "active rate" whose earnings covered 48 h but whose
+    # active time covered everything since 2026-08-31, which put it ~15x too
+    # low ($0.0041/h) and the break-even at ~0.5 SEK/kWh - in Auto, Price
+    # Guard would have stopped the provider almost all the time.
+    income = _recent_income_and_power(rows)
+    if not income:
         return None
-
-    total_kw = total_w / 1000
+    income_per_hour_usd, avg_kw = income
+    if income_per_hour_usd <= 0 or avg_kw <= 0:
+        return None
     # usd_sek is "units of the configured currency per 1 USD" (column name
     # kept for history compatibility), so this break-even is in that currency.
     cur = get_price_source_config()["currency"]
-    break_even_sek_per_kwh = (active_rate * usd_sek) / total_kw
+    break_even_sek_per_kwh = (income_per_hour_usd * usd_sek) / avg_kw
+    active_rate = income_per_hour_usd
     margin = max(0, cfg.get("margin_pct", 15)) / 100
 
     daemon_running = (get_darkbloom_status().get("daemon") or "").startswith("running")
@@ -1291,14 +1330,14 @@ def _evaluate_price_guard(cfg):
         if last_action == "stop" or (now - last_action_at) >= min_running_sec:
             action = "stop"
             reason = (f"price {price:.3f} {cur}/kWh is above break-even {break_even_sek_per_kwh:.3f} "
-                       f"(+{cfg.get('margin_pct', 15)}% margin) for the measured ${active_rate:.4f}/hr active rate")
+                       f"(+{cfg.get('margin_pct', 15)}% margin): this Mac earns ${active_rate:.4f}/h running, at {avg_kw * 1000:.0f} W average")
         else:
             reason = "would stop, but the minimum running time hasn't elapsed since the last action"
     elif price < break_even_sek_per_kwh * (1 - margin) and not daemon_running:
         if last_action == "start" or (now - last_action_at) >= min_stopped_sec:
             action = "start"
             reason = (f"price {price:.3f} {cur}/kWh is below break-even {break_even_sek_per_kwh:.3f} "
-                       f"(-{cfg.get('margin_pct', 15)}% margin) for the measured ${active_rate:.4f}/hr active rate")
+                       f"(-{cfg.get('margin_pct', 15)}% margin): this Mac earns ${active_rate:.4f}/h running, at {avg_kw * 1000:.0f} W average")
         else:
             reason = "would start, but the minimum stopped time hasn't elapsed since the last action"
     elif daemon_running:
@@ -1310,6 +1349,12 @@ def _evaluate_price_guard(cfg):
         "currency": cur,
         "price_per_kwh": price,
         "break_even_per_kwh": break_even_sek_per_kwh,
+        "local_per_usd": usd_sek,
+        "price_usd_per_kwh": price / usd_sek,
+        "break_even_usd_per_kwh": break_even_sek_per_kwh / usd_sek,
+        "income_per_hour_usd": income_per_hour_usd,
+        "income_per_hour_local": income_per_hour_usd * usd_sek,
+        "avg_power_w": avg_kw * 1000,
         "active_rate_per_hour_usd": active_rate,
         "total_power_w": total_w,
         "daemon_running": daemon_running,
@@ -1927,6 +1972,30 @@ def _compute_hourly_rate_comparison(raw, duration_stats):
     active_sec = duration_stats.get("total_sec") or 0.0
     if not window_start or active_sec <= 0:
         return None
+    # The duration log goes back to 2026-08-31, the earnings only as far as
+    # the saved ledger window. Count active time over the earnings' span
+    # only, or the rate divides 48 h of pay by a month of work (it read
+    # $0.0041/h instead of ~$0.06/h).
+    starts = []
+    for e in raw.get("earnings", []):
+        try:
+            starts.append(_parse_iso_ts(e["created_at"]))
+        except Exception:
+            continue
+    if starts and min(starts) > window_start:
+        window_start = min(starts)
+        active_sec = 0.0
+        try:
+            with open(INFERENCE_DURATIONS_LOG) as f:
+                next(f, None)
+                for line in f:
+                    parts = line.strip().split(",")
+                    if len(parts) == 3 and float(parts[0]) >= window_start:
+                        active_sec += float(parts[2])
+        except Exception:
+            return None
+        if active_sec <= 0:
+            return None
 
     real_usd = 0.0
     real_jobs = 0

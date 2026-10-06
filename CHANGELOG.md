@@ -1,5 +1,13 @@
 # Changelog
 
+## v93
+
+**Price Guard shows one currency throughout, and its break-even is no longer ~15x too low.**
+
+- **Currencies.** The price line showed the price in SEK, the break-even with no unit, and the pay rate in dollars. Every figure is now local currency first with USD in brackets: price, break-even, and what a running hour earns. The exchange rate is in the tooltip. Two leftover keys from an old version, `last_price_sek_per_kwh` (0.147, which was really a USD figure) and `last_break_even_sek_per_kwh`, are dropped from the saved state.
+- **Break-even was badly wrong.** It used Nerdy Stats' "active rate": payouts from the saved 48-hour ledger divided by active-serving time since 2026-08-31, about 288 hours. That gave $0.0041/h and a break-even of 0.545 SEK/kWh against 2.3 SEK/kWh electricity, so in Auto Price Guard would have stopped the provider nearly all the time. It was in Manual, so nothing happened. It also ignored the base reward, which stopping forfeits too. Break-even is now (ledger payouts + base reward per hour) ÷ (average measured kW), both over the same window of up to 48 hours.
+- **Nerdy Stats' "Real pay rate"** now counts active time only over the span the earnings cover.
+
 ## v92
 
 **The Autopilot comparison survives an unverifiable model and a busy provider.** On 2026-10-05 Darkbloom published a newer nemotron revision. With `all` selected, `darkbloom autopilot enable` then refused to enroll at all ("Not reporting nvidia-nemotron-3.5-lightning: downloaded build could not be verified … Selected revision is not current"). Phase c3 (Autopilot) never started, and `experiment.py` retried every 5 minutes for 14 hours (158 times) while gpt-oss ran alone.
