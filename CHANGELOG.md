@@ -1,5 +1,14 @@
 # Changelog
 
+## v98
+
+**Every electricity price is kept, and an open page picks up a new version by itself.**
+
+- **Price archive.** Each price slot the configured source publishes (day-ahead auction, 15-minute slots) is written to `~/.darkbloom/price-archive/<source>_<zone>/YYYY-MM.jsonl` and kept for good. A background loop fills it back to 2026-08-29, one day per request, and tops it up hourly. Before, prices older than yesterday were gone.
+- **Electricity price tab** draws every range except 48h from the archive (`/api/price_history?range=…`): spot price, plus the all-in price with today's grid fee, tax and VAT, in local currency. It runs on into tomorrow once the auction is published, with the "now" line marked. 48h keeps the day-ahead chart with its earnings overlay.
+- **Forecast look-ahead** follows the range: 1h shows the next hour of published prices, 24h the next 24 h, All the whole published forecast. Before, a 1h view was mostly tomorrow.
+- **Stale tabs.** A page left open across an `install.sh` kept running the old script, so new features such as the History range buttons seemed not to work until a manual reload. The page now compares the server's version on each refresh and reloads itself when it changes. This takes effect from this version on, so a tab opened before it needs one manual reload.
+
 ## v97
 
 **Power is sampled fast only while someone is watching.** powermetrics ran at 200 ms around the clock. That used ~11% of a CPU core and wrote ~70 MB an hour to its raw log, though the fast samples only matter to the live gauges on an open page. The LaunchAgent now starts `pm-run.sh`, which reads the interval from `~/.darkbloom/pm-interval-ms`. The dashboard sets it to 200 ms while the page polls `/api/power` and to 1000 ms a minute after polling stops, restarting the job (`launchctl kickstart -k`) on each change. The energy log's 5-minute averages are unaffected, since they average whatever samples arrived. Opening the page brings the gauges back to full speed within about 5 seconds.

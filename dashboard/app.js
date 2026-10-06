@@ -1889,25 +1889,30 @@ async function refreshPowerRange() {
 }
 
 async function refreshPriceRange() {
-  // 48h keeps the day-ahead chart (yesterday, today and tomorrow's auction);
-  // every other range shows the price this Mac actually paid, from the
-  // energy log (all-in: spot + grid fee + tax + VAT).
+  // 48h keeps the day-ahead chart with earnings overlay; every other range
+  // draws from the permanent price archive (spot and all-in, local
+  // currency), running on into tomorrow once it is published.
   if (realRange === '48h') { if (lastPrice48) renderElpris(lastPrice48); return; }
   let d;
-  try { d = await (await fetch('/api/history_series?col=elpris_sek_kwh&range=' + realRange)).json(); } catch (e) { return; }
+  try { d = await (await fetch('/api/price_history?range=' + realRange)).json(); } catch (e) { return; }
   if (d.range !== realRange) return;
   const b = d.buckets || [];
-  const cur = (lastPrice48 && lastPrice48.currency) || lastCurrency;
-  renderLineChart('chart-elpris', 'tooltip-elpris', b.map(x => x.time_start),
-    [{ name: 'Price paid (all-in)', values: b.map(x => x.avg) }], ['line-elpris-total'],
-    v => `${v.toFixed(2)} ${cur}/kWh`, { allowNegative: true });
-  const vals = b.map(x => x.avg).filter(v => v != null);
+  const cur = d.currency || lastCurrency;
+  const series = [{ name: 'Spot price', values: b.map(x => x.spot) }];
+  const colors = ['line-elpris'];
+  if (d.has_surcharge) { series.push({ name: 'Incl. fees & tax', values: b.map(x => x.all_in) }); colors.push('line-elpris-total'); }
+  renderLineChart('chart-elpris', 'tooltip-elpris', b.map(x => x.time_start), series, colors,
+    v => v == null ? '–' : `${v.toFixed(2)} ${cur}/kWh`, { allowNegative: true, nowLine: true });
+  const past = b.filter(x => !x.future && x.spot != null);
+  const vals = past.map(x => d.has_surcharge ? x.all_in : x.spot);
   const st = document.getElementById('elpris-chart-stats');
   if (st) st.textContent = vals.length
-    ? `${REAL_RANGE_LABELS[realRange] || realRange} · avg ${(vals.reduce((a, v) => a + v, 0) / vals.length).toFixed(2)} ${cur}/kWh · min ${Math.min(...vals).toFixed(2)} · max ${Math.max(...vals).toFixed(2)}` + (d.log_axis ? ' · log time axis' : '')
-    : 'no prices logged in this range';
+    ? `${REAL_RANGE_LABELS[realRange] || realRange} · avg ${(vals.reduce((a, v) => a + v, 0) / vals.length).toFixed(2)} ${cur}/kWh${d.has_surcharge ? ' all-in' : ''} · min ${Math.min(...vals).toFixed(2)} · max ${Math.max(...vals).toFixed(2)}` + (d.log_axis ? ' · log time axis' : '')
+    : 'no prices archived for this range yet';
   const lg = document.getElementById('elpris-legend');
-  if (lg) lg.innerHTML = `<span><i style="background:var(--series-elpris-total)"></i>Price this Mac paid per kWh, all-in (fees, tax, VAT) - from the energy log. Choose 48h for the day-ahead auction incl. tomorrow.</span>`;
+  if (lg) lg.innerHTML = `<span><i style="background:var(--series-elpris)"></i>Spot price</span>` +
+    (d.has_surcharge ? `<span><i style="background:var(--series-elpris-total)"></i>Incl. fees & tax (today's settings)</span>` : '') +
+    `<span style="color:var(--text-muted)">Every published price is saved; history since ${d.archive_starts ? fmtTime(d.archive_starts) : '–'}.</span>`;
 }
 
 
@@ -2886,6 +2891,12 @@ async function refresh() {
     const res = await fetch('/api/data');
     const data = await res.json();
     const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations, price_48h } = data;
+    // A tab left open across an install keeps running the old script; reload
+    // as soon as the server reports a different version.
+    if (data.dashboard_version) {
+      if (window.__pageVersion == null) window.__pageVersion = data.dashboard_version;
+      else if (window.__pageVersion !== data.dashboard_version) { location.reload(); return; }
+    }
     lastUtilization = utilization || null;
     const nowPrice = (price_48h && price_48h.prices || []).filter(x => x.usd_per_kwh != null);
     if (nowPrice.length) {

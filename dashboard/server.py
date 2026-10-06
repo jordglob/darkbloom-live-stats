@@ -4209,6 +4209,133 @@ def _price_sources_public():
     }
 
 
+PRICE_ARCHIVE_DIR = HOME / ".darkbloom" / "price-archive"
+PRICE_BACKFILL_SINCE = "2026-08-29"  # first energy-log row on the original install
+_price_archive_lock = threading.Lock()
+
+
+def _price_archive_path(cfg, month):
+    return PRICE_ARCHIVE_DIR / f"{cfg['source']}_{cfg['zone']}" / f"{month}.jsonl"
+
+
+def _archived_slot_starts(cfg, month):
+    out = set()
+    path = _price_archive_path(cfg, month)
+    if path.exists():
+        with open(path) as f:
+            for line in f:
+                try:
+                    out.add(json.loads(line)["time_start"])
+                except Exception:
+                    continue
+    return out
+
+
+def archive_prices(prices, cfg):
+    """Every real price slot the source has published, kept for good (one
+    file per source/zone and month). Day-ahead prices are facts once the
+    auction clears, so a slot is written once. Placeholders are skipped."""
+    real = [p for p in prices if p.get("price_per_kwh") is not None and p.get("time_start")]
+    if not real or cfg["source"] == "fixed":
+        return 0
+    added = 0
+    with _price_archive_lock:
+        by_month = {}
+        for p in real:
+            by_month.setdefault(p["time_start"][:7], []).append(p)
+        for month, rows in by_month.items():
+            have = _archived_slot_starts(cfg, month)
+            new = [p for p in rows if p["time_start"] not in have]
+            if not new:
+                continue
+            path = _price_archive_path(cfg, month)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a") as f:
+                for p in sorted(new, key=lambda x: x["time_start"]):
+                    f.write(json.dumps({"time_start": p["time_start"], "time_end": p["time_end"],
+                                        "price_per_kwh": p["price_per_kwh"]}) + "\n")
+            added += len(new)
+    return added
+
+
+def price_backfill_loop():
+    """Fill the archive back to PRICE_BACKFILL_SINCE, one day per request
+    and gently, then top it up with each new day."""
+    while True:
+        try:
+            cfg = get_price_source_config()
+            if cfg["source"] != "fixed":
+                day = datetime.strptime(PRICE_BACKFILL_SINCE, "%Y-%m-%d").date()
+                today = datetime.now().date()
+                while day <= today + timedelta(days=1):
+                    month = day.strftime("%Y-%m")
+                    have = _archived_slot_starts(cfg, month)
+                    if not any(t.startswith(day.isoformat()) for t in have):
+                        archive_prices(_fetch_price_day(day, cfg), cfg)
+                        time.sleep(1)
+                    day += timedelta(days=1)
+        except Exception:
+            pass
+        time.sleep(3600)
+
+
+def get_price_history(range_key):
+    """Archived spot prices bucketed for a range button, with the all-in
+    price (current grid fee, tax and VAT applied) alongside. Ranges end at
+    tomorrow's last published slot, so the forecast stays visible."""
+    if range_key not in REAL_EARNINGS_RANGES:
+        range_key = "7d"
+    cfg = get_price_source_config()
+    src = PRICE_SOURCES[cfg["source"]]
+    sur = get_price_surcharge(src["default_vat_pct"])
+    rows = []
+    d = PRICE_ARCHIVE_DIR / f"{cfg['source']}_{cfg['zone']}"
+    if d.exists():
+        for path in sorted(d.glob("*.jsonl")):
+            with open(path) as f:
+                for line in f:
+                    try:
+                        e = json.loads(line)
+                        rows.append((_parse_iso_ts(e["time_start"]), _parse_iso_ts(e["time_end"]), e["price_per_kwh"]))
+                    except Exception:
+                        continue
+    rows.sort()
+    now = time.time()
+    if not rows:
+        return {"range": range_key, "currency": cfg["currency"], "buckets": []}
+    span = REAL_EARNINGS_RANGES[range_key][0]
+    # Look ahead as far as the range looks back (1h shows the next hour),
+    # all of the published forecast for All.
+    end = max(now, min(rows[-1][1], now + span) if span else rows[-1][1])
+    edges = _range_edges(range_key, rows[0][0], now)
+    if end > now and range_key not in ("log",):
+        step = (edges[1] - edges[0]) if len(edges) > 2 else 900
+        t = edges[-1]
+        while t < end:
+            t = min(end, t + step)
+            edges.append(t)
+    import bisect
+    acc = [[0.0, 0] for _ in range(len(edges) - 1)]
+    for a, b, v in rows:
+        i = bisect.bisect_right(edges, a) - 1
+        if 0 <= i < len(acc):
+            acc[i][0] += v
+            acc[i][1] += 1
+    allin = lambda v: (v + sur["grid_fee_per_kwh"] + sur["energy_tax_per_kwh"]) * (1 + sur["vat_pct"] / 100)
+    buckets = []
+    for a, b, (tot, n) in zip(edges, edges[1:], acc):
+        spot = tot / n if n else None
+        buckets.append({"time_start": datetime.fromtimestamp(a).astimezone().isoformat(),
+                        "time_end": datetime.fromtimestamp(b).astimezone().isoformat(),
+                        "spot": round(spot, 4) if spot is not None else None,
+                        "all_in": round(allin(spot), 4) if spot is not None else None,
+                        "future": a >= now})
+    return {"range": range_key, "currency": cfg["currency"], "zone": cfg["zone"], "log_axis": range_key == "log",
+            "archive_starts": datetime.fromtimestamp(rows[0][0]).astimezone().isoformat(),
+            "has_surcharge": any(sur.get(k) for k in ("grid_fee_per_kwh", "energy_tax_per_kwh", "vat_pct")),
+            "buckets": buckets}
+
+
 def get_price_48h():
     """Yesterday + today + tomorrow's electricity prices from the configured
     source - a continuous real history running into a forecast. Past days
@@ -4240,6 +4367,10 @@ def get_price_48h():
     all_prices += _fetch_price_day(today, cfg)
     tomorrow_prices = _fetch_price_day(tomorrow, cfg)
     tomorrow_available = len(tomorrow_prices) > 0
+    try:
+        archive_prices(all_prices + tomorrow_prices, cfg)
+    except Exception:
+        pass
     all_prices += tomorrow_prices if tomorrow_available else _placeholder_day_prices(tomorrow)
 
     for p in all_prices:
@@ -4797,6 +4928,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # rate without dragging the whole /api/data payload with it.
             self._send_json(get_temp_age_series())
 
+        elif self.path.startswith("/api/price_history"):
+            m = re.search(r"[?&]range=([0-9a-z]+)", self.path)
+            self._send_json(get_price_history(m.group(1) if m else "7d"))
         elif self.path.startswith("/api/history_series"):
             m = re.search(r"[?&]range=([0-9a-z]+)", self.path)
             c = re.search(r"[?&]col=([a-z_]+)", self.path)
@@ -5004,6 +5138,7 @@ if __name__ == "__main__":
     threading.Thread(target=inference_duration_tracker_loop, daemon=True).start()
     threading.Thread(target=price_guard_loop, daemon=True).start()
     threading.Thread(target=pm_interval_loop, daemon=True).start()
+    threading.Thread(target=price_backfill_loop, daemon=True).start()
     with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:
         print(f"Darkbloom Live & Stats running at http://127.0.0.1:{PORT}")
         httpd.serve_forever()
