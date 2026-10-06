@@ -1,5 +1,19 @@
 # Changelog
 
+## v95
+
+**Simpler, clearer page.** The page had grown to 13 panels, 9 gauges, 7 status cards and close to 100 explanatory tooltips. What mattered most, whether this Mac is earning and whether anything is wrong, took searching.
+
+- **Health line at the top.** One sentence with a coloured dot: what the Mac earned in the last hour (local currency, USD in brackets), which model is loaded, jobs per hour, whether everything was paid, trust. Below it, a list of anything that needs a look, worst first: provider stopped or not trusted, no paid jobs for an hour with gpt-oss loaded, unpaid jobs, over 10% of jobs not completing, a recent load error, under 15 GB (warn) or 5 GB (bad) free disk, electricity above break-even. Provider version and uptime are in its tooltip. `/api/data` carries it as `health`. It replaces the Network trust, Provider, Requests and Warm models cards. Electricity cost, Net and Autopilot remain.
+- **Four gauges instead of nine:** Total W, GPU Load, GPU Temp, RAM. CPU W, GPU W, fan and hourly serving load are in the history charts.
+- **One History panel with tabs:** Earnings vs. cost, Power, Temperature & fan, Tokens, Electricity price. One set of range buttons (1h…Log) drives both Earnings and Tokens.
+- **Sections in order:** now → history → earnings & jobs → models → experiment → settings → details → chat. "Darkbloom Account" is now "Earnings & jobs". Disk usage sits inside the Network Model Demand panel, under "Models". Price Guard and warm-up are under a collapsed "Settings". Nerdy Stats and the how-to-read guide are under a collapsed "Details".
+- **Local currency first** in the earnings chart, its totals, the balance line, Net, electricity cost and the pay rate, with USD in brackets.
+- **Shorter texts.** Version history and dates are gone from the page's tooltips (they live here).
+- **Removed:** the Ollama badge (Ollama is off) and the estimate columns in the earnings table (the ledger has the real numbers).
+- **Experiment report as a page:** `/report` (last 24 h with `?hours=24`) renders the report as HTML tables. The panel keeps its status line and links to it.
+- **Code:** the page's styles and script moved out of `index.html` into `app.css` and `app.js`, served by the dashboard and copied by `install.sh`.
+
 ## v94
 
 **Network Model Demand weighs what each model has actually done on this Mac.** Published demand turned out to be a poor guide on its own: qwen3.6 has the most of it on the network and never got a single job here, while gpt-oss, with a small published share, earns nearly everything.

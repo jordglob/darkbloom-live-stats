@@ -3310,7 +3310,66 @@ def experiment_view():
         status = json.loads(run("status"))
     except Exception as e:
         return {"installed": True, "error": str(e)}
-    return {"installed": True, "status": status, "report": run("report", "--hours", "24") if status.get("planned") else ""}
+    return {"installed": True, "status": status}
+
+
+def _md_to_html(md):
+    """Just enough Markdown for experiment.py's report: headings, tables,
+    bullet lists, paragraphs. Everything is escaped first."""
+    import html
+    out, table, bullets = [], [], []
+
+    def flush():
+        if table:
+            rows = [r for r in table if not re.match(r"^\|[-| :]+\|$", r)]
+            cells = [[c.strip() for c in r.strip("|").split("|")] for r in rows]
+            out.append("<table><thead><tr>" + "".join(f"<th>{c}</th>" for c in cells[0]) + "</tr></thead><tbody>"
+                       + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in cells[1:])
+                       + "</tbody></table>")
+            table.clear()
+        if bullets:
+            out.append("<ul>" + "".join(f"<li>{b}</li>" for b in bullets) + "</ul>")
+            bullets.clear()
+
+    for raw in md.splitlines():
+        line = html.escape(raw)
+        line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
+        if line.startswith("|"):
+            if bullets:
+                flush()
+            table.append(line)
+            continue
+        if line.startswith("- "):
+            if table:
+                flush()
+            bullets.append(line[2:])
+            continue
+        flush()
+        if line.startswith("## "):
+            out.append(f"<h2>{line[3:]}</h2>")
+        elif line.startswith("# "):
+            out.append(f"<h1>{line[2:]}</h1>")
+        elif line.strip():
+            out.append(f"<p>{line}</p>")
+    flush()
+    return "\n".join(out)
+
+
+def experiment_report_page(hours=None):
+    if not EXPERIMENT_SCRIPT.exists():
+        return "<p>Experiment not installed.</p>"
+    args = [sys.executable, str(EXPERIMENT_SCRIPT), "report"] + (["--hours", str(hours)] if hours else [])
+    md = subprocess.run(args, capture_output=True, text=True, timeout=120).stdout
+    return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Model experiment report</title><style>"
+            ":root{color-scheme:light dark;--b:#ddd;--m:#666}@media (prefers-color-scheme:dark){:root{--b:#444;--m:#aaa}}"
+            "body{font:14px/1.5 -apple-system,system-ui,sans-serif;max-width:1200px;margin:24px auto;padding:0 16px}"
+            "table{border-collapse:collapse;margin:8px 0 16px;font-size:13px;display:block;overflow-x:auto}"
+            "th,td{border:1px solid var(--b);padding:4px 8px;text-align:left;white-space:nowrap}"
+            "th{background:rgba(128,128,128,.12)}h2{margin-top:28px}p{color:var(--m)}"
+            "nav a{margin-right:12px}</style></head><body>"
+            "<nav><a href='/report?hours=24'>Last 24 h</a><a href='/report'>Everything</a><a href='/'>Back to the dashboard</a></nav>"
+            + _md_to_html(md) + "</body></html>")
 
 
 def experiment_action(action):
@@ -3457,6 +3516,90 @@ def _model_control_state():
         "comparison_running": bool(cmp) and not cmp.get("finished"),
         "experiment_running": (HOME / ".darkbloom" / "experiment" / "protocol.json").exists() and not exp.get("paused"),
     }
+
+
+HEALTH_DISK_WARN_GB = 15
+HEALTH_DISK_CRIT_GB = 5
+
+
+def get_health(d):
+    """One answer for the top of the page: is this Mac earning, and is
+    anything wrong. Built only from what /api/data already computed.
+    level is good | warn | bad; summary is one line; problems lists each
+    thing that needs a look, worst first."""
+    problems = []  # (severity 2=bad 1=warn, text)
+    status = d.get("status") or {}
+    try:
+        ds = json.loads(DAEMON_STATE_PATH.read_text())  # raw: has version, warm/advertised models, error time
+    except Exception:
+        ds = {}
+    account = d.get("account") or {}
+    daemon_up = (status.get("daemon") or "").startswith("running")
+    trust = (status.get("trust") or "")
+    if not daemon_up:
+        problems.append((2, "Provider is not running"))
+    elif not trust.startswith("hardware"):
+        problems.append((2, f"Trust is '{trust or 'unknown'}', not hardware - no paid jobs until it recovers"))
+    now = time.time()
+    hour = _ledger_rows_since(now - 3600)
+    rate = (d.get("energy") or {}).get("latest") or {}
+    try:
+        local_per_usd = float(rate.get("usd_sek") or 0) or 9.5
+    except Exception:
+        local_per_usd = 9.5
+    cur = get_price_source_config().get("currency", "SEK")
+    earned_hour_usd = sum(v for _, v in hour)
+    jo = (account.get("job_outcomes") or {}).get("windows") or {}
+    w1, w24 = jo.get("1h") or {}, jo.get("24h") or {}
+    jobs_hour = w1.get("completed")
+    warm = ds.get("warm_models") or []
+    if isinstance(warm, str):
+        warm = [m.strip() for m in warm.split(",") if m.strip()]
+    if daemon_up and trust.startswith("hardware") and jobs_hour == 0 and any(m.startswith("gpt-oss") for m in warm):
+        problems.append((1, "No paid jobs in the last hour while gpt-oss is loaded"))
+    if w24.get("unpaid", 0) > 3:
+        problems.append((1, f"{w24['unpaid']} completed jobs were not paid in the last 24 h"))
+    if (w1.get("received") or 0) >= 20 and (w1.get("incomplete") or 0) / w1["received"] > 0.1:
+        problems.append((1, f"{w1['incomplete']} of {w1['received']} jobs in the last hour did not complete"))
+    err = ds.get("last_model_load_error") or {}
+    if err.get("at") and now - err["at"] < 3600 and err.get("model") in (ds.get("advertised_models") or []):
+        problems.append((1, f"{err['model']} failed to load: {str(err.get('message', ''))[:80]}"))
+    try:
+        free_gb = shutil.disk_usage(str(HOME)).free / 1e9
+        if free_gb < HEALTH_DISK_CRIT_GB:
+            problems.append((2, f"Only {free_gb:.0f} GB free disk"))
+        elif free_gb < HEALTH_DISK_WARN_GB:
+            problems.append((1, f"Only {free_gb:.0f} GB free disk"))
+    except Exception:
+        pass
+    pg = (read_price_guard_config() or {})
+    try:
+        live = _evaluate_price_guard(pg)
+    except Exception:
+        live = None
+    if live and live.get("price_per_kwh", 0) > live.get("break_even_per_kwh", 1e9):
+        problems.append((1, f"Electricity {live['price_per_kwh']:.2f} {cur}/kWh is above break-even {live['break_even_per_kwh']:.2f}"))
+    problems.sort(key=lambda p: -p[0])
+    level = "bad" if any(p[0] == 2 for p in problems) else "warn" if problems else "good"
+    parts = []
+    if daemon_up:
+        parts.append(f"Earning {earned_hour_usd * local_per_usd:.2f} {cur}/h (${earned_hour_usd:.3f}, last hour)")
+        parts.append(", ".join(warm) if warm else "no model loaded")
+        if jobs_hour is not None:
+            parts.append(f"{jobs_hour} jobs/h")
+        if w24.get("completed"):
+            parts.append("all paid" if (w24.get("unpaid") or 0) <= 3 else f"{w24['unpaid']} unpaid")
+        parts.append("trust ok" if trust.startswith("hardware") else f"trust: {trust or '?'}")
+    else:
+        parts.append("Provider stopped")
+    detail = []
+    if ds.get("version"):
+        detail.append(f"provider {ds['version']}")
+    if ds.get("started_at"):
+        up = now - ds["started_at"]
+        detail.append(f"up {int(up // 3600)} h {int(up % 3600 // 60)} min")
+    return {"level": level, "summary": " · ".join(parts), "detail": " · ".join(detail),
+            "problems": [t for _, t in problems]}
 
 
 def annotate_model_demand(data):
@@ -4535,6 +4678,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # when this dashboard version went live.
                 "dashboard_installed_at": Path(__file__).stat().st_mtime,
             }
+            try:
+                data["health"] = get_health(data)
+            except Exception as e:
+                data["health"] = {"level": "warn", "summary": "Health check failed", "detail": str(e)[:120], "problems": []}
             self._send_json(data)
         elif self.path == "/api/serving_pulse":
             # One JSON file read - safe to poll every second. Feeds the chat
@@ -4593,6 +4740,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cfg["daemon_running"] = (get_darkbloom_status().get("daemon") or "").startswith("running")
             cfg["log_tail"] = PRICE_GUARD_LOG.read_text().splitlines()[-10:] if PRICE_GUARD_LOG.exists() else []
             self._send_json(cfg)
+        elif self.path.startswith("/report"):
+            m = re.search(r"[?&]hours=(\d+)", self.path)
+            body = experiment_report_page(int(m.group(1)) if m else None).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path in ("/app.js", "/app.css"):
+            # The page's script and styles, split out of index.html in v95.
+            asset = Path(__file__).parent / self.path.lstrip("/")
+            body = asset.read_bytes() if asset.exists() else b""
+            self.send_response(200 if body else 404)
+            self.send_header("Content-Type", "text/javascript; charset=utf-8" if self.path.endswith(".js")
+                             else "text/css; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path in ("/", "/index.html"):
             html_path = Path(__file__).parent / "index.html"
             body = html_path.read_bytes()

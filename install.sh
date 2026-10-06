@@ -42,6 +42,8 @@ done
 mkdir -p "$TARGET/dashboard"
 cp "$REPO_DIR/dashboard/server.py" "$TARGET/dashboard/server.py"
 cp "$REPO_DIR/dashboard/index.html" "$TARGET/dashboard/index.html"
+cp "$REPO_DIR/dashboard/app.js" "$TARGET/dashboard/app.js"
+cp "$REPO_DIR/dashboard/app.css" "$TARGET/dashboard/app.css"
 # The version shown on the page comes from the top CHANGELOG heading - the
 # single place it is written - so it cannot lag behind the code.
 VERSION="$(grep -m1 -oE '^## v[0-9]+' "$REPO_DIR/CHANGELOG.md" | sed 's/^## //')"
