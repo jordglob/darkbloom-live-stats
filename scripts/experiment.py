@@ -1040,8 +1040,9 @@ def _tick():
     state.setdefault("blocks", {})
     archive_network_demand(state)
     log_counts = provider_log_counts(state)
-    if not protocol:
-        # Nothing planned (e.g. a fresh install): only collect data. Finding
+    if not protocol or state.get("ended"):
+        # Nothing planned (e.g. a fresh install) or the experiments are over:
+        # only collect data. Finding
         # and downloading candidate models is part of a running experiment,
         # never something an install does on its own.
         write_json(STATE, state)
@@ -1380,6 +1381,27 @@ def fmt(x, digits=1):
     return "–" if x is None else f"{x:.{digits}f}"
 
 
+def cmd_end(args):
+    """End both the block experiment and any Autopilot comparison for good:
+    disable Autopilot, host the baseline, stop all switching and candidate
+    downloads. Data collection (network demand, provider log counts, job
+    rows) carries on."""
+    state = read_json(STATE, {})
+    reason = " ".join(args) or "ended by hand"
+    cmp = state.get("compare")
+    if cmp and not cmp.get("finished"):
+        cmp["finished"] = True
+        cmp["ended_early_at"] = iso(now())
+    ok_ap, msg_ap = autopilot_disable() if autopilot_status().get("configured", {}).get("enabled") else (True, ["already off"])
+    ok, msg, _ = apply_models(ARMS[BASELINE]["models"], "experiments ended")
+    state.update(ended=True, ended_at=iso(now()), end_reason=reason, paused=True,
+                 pause_reason="experiments ended: " + reason)
+    write_json(STATE, state)
+    event("ended", reason=reason, autopilot_disabled=ok_ap, baseline_ok=ok, message=msg)
+    print(f"ended; autopilot off: {ok_ap}; baseline: {msg}")
+    return 0
+
+
 def cmd_pause(args):
     state = read_json(STATE, {})
     state["paused"] = True
@@ -1435,7 +1457,7 @@ def cmd_status(_args):
 
 
 COMMANDS = {"plan": cmd_plan, "tick": cmd_tick, "report": cmd_report, "compare": cmd_compare,
-            "pause": cmd_pause, "resume": cmd_resume, "status": cmd_status}
+            "pause": cmd_pause, "resume": cmd_resume, "end": cmd_end, "status": cmd_status}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:

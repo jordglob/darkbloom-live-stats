@@ -1,5 +1,9 @@
 # Changelog
 
+## v100
+
+**`experiment.py end` closes the experiments for good.** It disables Darkbloom Autopilot, hosts the baseline (gpt-oss-20b alone), marks a running Autopilot comparison finished, and flags the state as ended. From then on each tick only collects data (network demand, provider log counts; job rows keep coming from the log stream), with no model switches and no candidate downloads. Both experiments were ended this way on 2026-10-06 at 21:24, after four Autopilot-comparison phases gave the same answer twice over.
+
 ## v99
 
 **A candidate model removed on purpose stays removed.** Experiment candidates whose status starts with `removed` are skipped by the hourly catalog check, instead of being downloaded again. nemotron's outdated revision, which Darkbloom no longer verifies, was deleted on 2026-10-06 to free 17 GB before the macOS 27.0.1 update.
