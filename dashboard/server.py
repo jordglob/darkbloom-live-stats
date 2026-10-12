@@ -3341,7 +3341,7 @@ def start_model_action(action, public_id):
 
 def set_hosted_models(models, reason=""):
     """Host exactly `models` (switch if the set differs) and load each one.
-    Synchronous, for scripts such as experiment.py; the page's buttons go
+    Synchronous, for scripts; the page's buttons go
     through start_model_action's background jobs instead. Returns (ok, msg)."""
     models = [m for m in models if m]
     if not models:
@@ -3437,8 +3437,8 @@ _local_record_cache = {"at": 0.0, "data": None}
 
 def get_local_model_record():
     """What each model has actually done on this Mac: hours it was advertised
-    here (from the experiment's 5-minute samples, which record the hosted
-    set), paid jobs and dollars from the ledger archive over the same period.
+    here (from the 5-minute samples the model experiment recorded until it
+    ended in v100; an install that never ran it has none), paid jobs and dollars from the ledger archive over the same period.
     Published network demand turned out to be a poor guide - qwen3.6 has the
     most of it and never got a single job here - so this is the evidence
     the Fit column now weighs too. Cached for 5 minutes."""
@@ -3495,21 +3495,13 @@ def _model_control_state():
     """Who decides the hosted models right now, so manual Serve buttons can
     say why they would conflict."""
     ap = get_autopilot_state() or {}
-    exp = {}
-    try:
-        exp = json.loads((HOME / ".darkbloom" / "experiment" / "state.json").read_text())
-    except Exception:
-        pass
-    cmp = exp.get("compare") or {}
-    return {
-        "autopilot": bool(ap.get("enabled")) and not ap.get("paused"),
-        "comparison_running": bool(cmp) and not cmp.get("finished"),
-        "experiment_running": (HOME / ".darkbloom" / "experiment" / "protocol.json").exists() and not exp.get("paused"),
-    }
+    return {"autopilot": bool(ap.get("enabled")) and not ap.get("paused")}
 
 
 HEALTH_DISK_WARN_GB = 15
 HEALTH_DISK_CRIT_GB = 5
+HEALTH_UNPAID_MIN_JOBS = 3
+HEALTH_UNPAID_MIN_SHARE = 0.01
 
 
 def get_health(d):
@@ -3551,7 +3543,12 @@ def get_health(d):
         warm = [m.strip() for m in warm.split(",") if m.strip()]
     if daemon_up and trust.startswith("hardware") and jobs_hour == 0 and any(m.startswith("gpt-oss") for m in warm):
         problems.append((1, "No paid jobs in the last hour while gpt-oss is loaded"))
-    if w24.get("unpaid", 0) > 3:
+    # A handful of unpaid jobs is noise at thousands of jobs a day (15 of 5077
+    # on 2026-10-12 kept this yellow for a day), and alarming at fifty. So it
+    # takes both more than a few and more than a sliver of the day's work.
+    unpaid_notable = (w24.get("unpaid") or 0) > HEALTH_UNPAID_MIN_JOBS and \
+        (w24.get("unpaid") or 0) > HEALTH_UNPAID_MIN_SHARE * (w24.get("completed") or 0)
+    if unpaid_notable:
         problems.append((1, f"{w24['unpaid']} completed jobs were not paid in the last 24 h"))
     if (w1.get("received") or 0) >= 20 and (w1.get("incomplete") or 0) / w1["received"] > 0.1:
         problems.append((1, f"{w1['incomplete']} of {w1['received']} jobs in the last hour did not complete"))
@@ -3582,7 +3579,7 @@ def get_health(d):
         if jobs_hour is not None:
             parts.append(f"{jobs_hour} jobs/h")
         if w24.get("completed"):
-            parts.append("all paid" if (w24.get("unpaid") or 0) <= 3 else f"{w24['unpaid']} unpaid")
+            parts.append(f"{w24['unpaid']} unpaid" if unpaid_notable else "all paid")
         parts.append("trust ok" if trust.startswith("hardware") else f"trust: {trust or '?'}")
     elif pause:
         parts.append(f"Paused by {pause['source']}, resumes by itself")

@@ -49,7 +49,7 @@ cp "$REPO_DIR/dashboard/app.css" "$TARGET/dashboard/app.css"
 VERSION="$(grep -m1 -oE '^## v[0-9]+' "$REPO_DIR/CHANGELOG.md" | sed 's/^## //')"
 echo "${VERSION:-unknown}" > "$TARGET/dashboard/VERSION"
 
-for f in pm-start.sh pm-run.sh energy-monitor.sh max-power.py experiment.py provider_log_stream.py; do
+for f in pm-start.sh pm-run.sh energy-monitor.sh max-power.py provider_log_stream.py; do
   cp "$REPO_DIR/scripts/$f" "$TARGET/$f"
   chmod +x "$TARGET/$f"
 done
@@ -131,8 +131,14 @@ SETUP
   echo "Found $TARGET/bin/darkbloom-fan-helper - run setup-fan-helper-sudoers.sh to enable automatic fan recovery."
 fi
 
-# Start the 4 services that don't need root right away.
-for svc in dashboard energy-monitor experiment log-stream; do
+# The model experiment was removed in v103. An install from before that still
+# has its service and script; its collected data in ~/.darkbloom/experiment is
+# left alone.
+launchctl bootout "gui/$(id -u)/io.darkbloom.experiment" >/dev/null 2>&1 || true
+rm -f "$LAUNCH_AGENTS/io.darkbloom.experiment.plist" "$TARGET/experiment.py"
+
+# Start the 3 services that don't need root right away.
+for svc in dashboard energy-monitor log-stream; do
   launchctl bootout "gui/$(id -u)/io.darkbloom.$svc" >/dev/null 2>&1 || true
   # bootout returns before the job is gone; bootstrapping too early fails with
   # "Bootstrap failed: 5: Input/output error" and set -e ends the install.

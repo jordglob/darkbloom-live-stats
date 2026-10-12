@@ -1,5 +1,13 @@
 # Changelog
 
+## v103
+
+**The model experiment is removed completely, and a few unpaid jobs no longer turn the page yellow.**
+
+- **`experiment.py` and its service are gone.** v102 took the panel off the page; this removes the script, the `io.darkbloom.experiment` LaunchAgent and the Serve-button notes about a running experiment or Autopilot comparison. `install.sh` stops the old service and deletes its plist and script on an existing install. What the experiment collected in `~/.darkbloom/experiment` stays, and the "On this Mac" column still reads the hours recorded there.
+- **The log follower stands alone.** `provider_log_stream.py` borrowed its log parsing from `experiment.py`; it now carries that code itself. Job tracking is unchanged.
+- **Unpaid jobs are judged by share, not only by count.** The health summary warned at more than 3 unpaid jobs in 24 h whatever the volume, so 15 of 5,077 (0.3%) kept it yellow for a day. It now takes more than 3 jobs and more than 1% of the completed ones.
+
 ## v102
 
 **The Model experiment panel is gone from the page.** The experiments ended on 2026-10-06 (v100), so the panel only showed a finished run with a Resume button nobody should press. The panel, its `/api/experiment` endpoint and the `/report` page are removed. `experiment.py` itself stays installed: its service still collects network demand and provider log counts, the job tracking uses its log parsing, and `python3 ~/.darkbloom/experiment.py report` still prints the final report in a terminal.

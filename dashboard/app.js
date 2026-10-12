@@ -1280,8 +1280,6 @@ function hereCell(h) {
 function controlNote(c) {
   if (!c) return '';
   if (c.autopilot) return `<div class="rotation-summary" style="color:var(--status-serious)">Darkbloom Autopilot is enrolled and owns the model selection - Serve and Stop are disabled here (Darkbloom refuses a manual switch until Autopilot is disabled).</div>`;
-  if (c.comparison_running) return `<div class="rotation-summary" style="color:var(--status-serious)">The Autopilot comparison is switching models on a schedule - a manual Serve now would be undone at the next phase and skew its numbers.</div>`;
-  if (c.experiment_running) return `<div class="rotation-summary" style="color:var(--status-serious)">The model experiment is running - a manual Serve pauses it (it steps aside when someone changes models by hand).</div>`;
   return '';
 }
 
