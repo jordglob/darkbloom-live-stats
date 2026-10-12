@@ -423,39 +423,6 @@ function renderWarmup(warmup) {
   });
 }
 
-function renderExperiment(d) {
-  const el = document.getElementById('experiment');
-  if (!d || !d.installed) { el.innerHTML = '<div class="warmup-status">Not installed.</div>'; return; }
-  if (d.error) { el.innerHTML = `<div class="warmup-status">Error: ${escapeHtml(d.error)}</div>`; return; }
-  const st = d.status;
-  if (!st.planned) { el.innerHTML = '<div class="warmup-status">No experiment planned. Run <code>python3 ~/.darkbloom/experiment.py plan</code>.</div>'; return; }
-  const hhmm = s => s ? s.slice(11, 16) : '';
-  const cur = st.current;
-  let line = st.finished ? 'Finished - back on gpt-oss alone.'
-    : cur ? `Now <strong>${escapeHtml(cur.id)}</strong>: arm ${cur.arm} · ${escapeHtml(cur.label)} until ${hhmm(new Date(cur.end * 1000).toTimeString())}`
-          + (cur.segment && cur.segment.arm !== cur.arm ? ` · <span style="color:var(--status-serious)">ended early, now ${escapeHtml(cur.segment.label)} (${escapeHtml(cur.segment.reason || '')})</span>` : '')
-          + (cur.segment && !cur.segment.ok ? ' · switching…' : '')
-    : 'Waiting for the first block.';
-  if (st.next) line += ` · next ${escapeHtml(st.next.id)} (${escapeHtml(st.next.label)}) at ${escapeHtml(st.next.start_local.slice(5, 16).replace('T', ' '))}`;
-  const btn = st.paused
-    ? `<button class="copy-cmd-btn" style="font-size:12px;padding:4px 10px" onclick="postExperiment('resume')">Resume experiment</button> <span class="warmup-status" style="color:var(--status-serious)">Paused: ${escapeHtml(st.pause_reason || '')}</span>`
-    : `<button class="copy-cmd-btn" style="font-size:12px;padding:4px 10px" onclick="postExperiment('pause')">Pause experiment (keep current models)</button>`;
-  const cands = Object.entries(st.candidates || {}).filter(([, v]) => v && !v.startsWith('excluded'));
-  if (cands.length) line += '<br>New models: ' + cands.map(([k, v]) => `${escapeHtml(k)} (${escapeHtml(v)})`).join(', ');
-  el.innerHTML = `<div class="warmup-status">${line} · ${st.blocks_done}/${st.blocks_total} blocks done</div>
-    <div class="warmup-row">${btn}</div>
-    <div class="warmup-status"><a href="/report?hours=24" target="_blank">Open the report (last 24 h)</a> · <a href="/report" target="_blank">everything</a></div>`;
-}
-
-async function refreshExperiment() {
-  try { renderExperiment(await (await fetch('/api/experiment')).json()); } catch (e) {}
-}
-
-async function postExperiment(action) {
-  try { await fetch('/api/experiment', { method: 'POST', body: JSON.stringify({ action }) }); } catch (e) {}
-  refreshExperiment();
-}
-
 async function postWarmupConfig(body) {
   try {
     await fetch('/api/warmup/toggle', { method: 'POST', body: JSON.stringify(body) });
@@ -3071,7 +3038,6 @@ refreshPowerFast();
 refreshWarmup();
 refreshPriceGuard();
 refreshModelDemand();
-refreshExperiment();
 applyHistoryTab();
 document.querySelectorAll('.history-range button').forEach(b => b.classList.toggle('active', b.dataset.range === realRange));
 renderChat();
@@ -3083,4 +3049,3 @@ setInterval(refreshPowerFast, POWER_FAST_REFRESH_MS);
 setInterval(refreshWarmup, 15000);
 setInterval(refreshPriceGuard, 15000);
 setInterval(refreshModelDemand, 10 * 60 * 1000);
-setInterval(refreshExperiment, 60 * 1000);

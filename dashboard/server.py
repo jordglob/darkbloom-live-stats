@@ -3371,92 +3371,6 @@ def set_hosted_models(models, reason=""):
     return True, "Serving " + ", ".join(models)
 
 
-EXPERIMENT_SCRIPT = HOME / ".darkbloom" / "experiment.py"
-
-
-def experiment_view():
-    """Status and the last day's report from experiment.py, for the panel."""
-    if not EXPERIMENT_SCRIPT.exists():
-        return {"installed": False}
-    def run(*args):
-        r = subprocess.run([sys.executable, str(EXPERIMENT_SCRIPT), *args],
-                           capture_output=True, text=True, timeout=30)
-        return r.stdout
-    try:
-        status = json.loads(run("status"))
-    except Exception as e:
-        return {"installed": True, "error": str(e)}
-    return {"installed": True, "status": status}
-
-
-def _md_to_html(md):
-    """Just enough Markdown for experiment.py's report: headings, tables,
-    bullet lists, paragraphs. Everything is escaped first."""
-    import html
-    out, table, bullets = [], [], []
-
-    def flush():
-        if table:
-            rows = [r for r in table if not re.match(r"^\|[-| :]+\|$", r)]
-            cells = [[c.strip() for c in r.strip("|").split("|")] for r in rows]
-            out.append("<table><thead><tr>" + "".join(f"<th>{c}</th>" for c in cells[0]) + "</tr></thead><tbody>"
-                       + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in cells[1:])
-                       + "</tbody></table>")
-            table.clear()
-        if bullets:
-            out.append("<ul>" + "".join(f"<li>{b}</li>" for b in bullets) + "</ul>")
-            bullets.clear()
-
-    for raw in md.splitlines():
-        line = html.escape(raw)
-        line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
-        if line.startswith("|"):
-            if bullets:
-                flush()
-            table.append(line)
-            continue
-        if line.startswith("- "):
-            if table:
-                flush()
-            bullets.append(line[2:])
-            continue
-        flush()
-        if line.startswith("## "):
-            out.append(f"<h2>{line[3:]}</h2>")
-        elif line.startswith("# "):
-            out.append(f"<h1>{line[2:]}</h1>")
-        elif line.strip():
-            out.append(f"<p>{line}</p>")
-    flush()
-    return "\n".join(out)
-
-
-def experiment_report_page(hours=None):
-    if not EXPERIMENT_SCRIPT.exists():
-        return "<p>Experiment not installed.</p>"
-    args = [sys.executable, str(EXPERIMENT_SCRIPT), "report"] + (["--hours", str(hours)] if hours else [])
-    md = subprocess.run(args, capture_output=True, text=True, timeout=120).stdout
-    return ("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<title>Model experiment report</title><style>"
-            ":root{color-scheme:light dark;--b:#ddd;--m:#666}@media (prefers-color-scheme:dark){:root{--b:#444;--m:#aaa}}"
-            "body{font:14px/1.5 -apple-system,system-ui,sans-serif;max-width:1200px;margin:24px auto;padding:0 16px}"
-            "table{border-collapse:collapse;margin:8px 0 16px;font-size:13px;display:block;overflow-x:auto}"
-            "th,td{border:1px solid var(--b);padding:4px 8px;text-align:left;white-space:nowrap}"
-            "th{background:rgba(128,128,128,.12)}h2{margin-top:28px}p{color:var(--m)}"
-            "nav a{margin-right:12px}</style></head><body>"
-            "<nav><a href='/report?hours=24'>Last 24 h</a><a href='/report'>Everything</a><a href='/'>Back to the dashboard</a></nav>"
-            + _md_to_html(md) + "</body></html>")
-
-
-def experiment_action(action):
-    if action not in ("pause", "resume") or not EXPERIMENT_SCRIPT.exists():
-        return False, "Unknown action"
-    r = subprocess.run([sys.executable, str(EXPERIMENT_SCRIPT), action, "from the dashboard"] if action == "pause"
-                       else [sys.executable, str(EXPERIMENT_SCRIPT), action],
-                       capture_output=True, text=True, timeout=30)
-    return r.returncode == 0, (r.stdout or r.stderr).strip()
-
-
 def _recommend_model(m, share, ctx):
     """Suitability for this Mac: does it fit (RAM, disk, next to what is
     already hosted) and is there enough network demand to be worth it.
@@ -4999,8 +4913,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/api/model_demand"):
             m = re.search(r"[?&]window=([0-9a-z]+)", self.path)
             self._send_json(annotate_model_demand(get_model_demand(m.group(1) if m else "24h")))
-        elif self.path == "/api/experiment":
-            self._send_json(experiment_view())
         elif self.path == "/api/price_guard":
             cfg = read_price_guard_config()
             live = _evaluate_price_guard(cfg)
@@ -5008,14 +4920,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cfg["daemon_running"] = (get_darkbloom_status().get("daemon") or "").startswith("running")
             cfg["log_tail"] = PRICE_GUARD_LOG.read_text().splitlines()[-10:] if PRICE_GUARD_LOG.exists() else []
             self._send_json(cfg)
-        elif self.path.startswith("/report"):
-            m = re.search(r"[?&]hours=(\d+)", self.path)
-            body = experiment_report_page(int(m.group(1)) if m else None).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
         elif self.path in ("/app.js", "/app.css"):
             # The page's script and styles, split out of index.html in v95.
             asset = Path(__file__).parent / self.path.lstrip("/")
@@ -5104,12 +5008,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
             ok, msg = set_hosted_models([str(m) for m in body.get("models") or []], str(body.get("reason", "")))
-            self._send_json({"ok": ok, "message": msg})
-
-        elif self.path == "/api/experiment":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length) or b"{}")
-            ok, msg = experiment_action(str(body.get("action", "")))
             self._send_json({"ok": ok, "message": msg})
 
         elif self.path == "/api/free_memory":

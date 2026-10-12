@@ -1,5 +1,9 @@
 # Changelog
 
+## v102
+
+**The Model experiment panel is gone from the page.** The experiments ended on 2026-10-06 (v100), so the panel only showed a finished run with a Resume button nobody should press. The panel, its `/api/experiment` endpoint and the `/report` page are removed. `experiment.py` itself stays installed: its service still collects network demand and provider log counts, the job tracking uses its log parsing, and `python3 ~/.darkbloom/experiment.py report` still prints the final report in a terminal.
+
 ## v101
 
 **Another tool can announce a deliberate pause.** A script that stops the provider on purpose and starts it again by itself (to hand the GPU to other work, for example) can write `~/.darkbloom/external-pause.json` with a `source`, a `reason` and a `since` time, and delete it when it resumes. While the file is there and the provider is down, the page shows a grey "Paused by …" note instead of the yellow "Renting out is off" warning, lists `darkbloom doctor` findings as notes, leaves "Provider is not running" out of the health summary, and Price Guard's Auto mode does not start the provider underneath the pause. Before, such a pause looked the same as a crash, and Auto would have started the provider again against the other tool.
