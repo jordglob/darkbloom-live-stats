@@ -2003,7 +2003,7 @@ function banner(level, html) {
   return `<div class="banner ${level}"><span class="dot"></span><span class="banner-text">${html}</span></div>`;
 }
 
-function renderBanners(status, energy, doctor, daemonState, autostart, priceSourceChosen) {
+function renderBanners(status, energy, doctor, daemonState, autostart, priceSourceChosen, externalPause) {
   const banners = [];
   const served = status.requests_served || 0;
   // "Requests are actually succeeding" is the single most reassuring fact on
@@ -2040,7 +2040,17 @@ function renderBanners(status, energy, doctor, daemonState, autostart, priceSour
   // inside the onclick attribute - the browser hands the JS back the raw form.
   const escAmp = t => String(t).replace(/&/g, '&amp;');
   const cmdRow = j => `<div class="banner-cmd"><code>${escAmp(cmdFor(j))}</code><button class="copy-cmd-btn" onclick="copyCmd('${escAmp(cmdFor(j))}', this)">Copy</button></div>`;
-  if (providerOff && !daemonRunning) {
+  // Another tool can announce that it stopped the provider on purpose and
+  // will start it again (server: get_external_pause). That is the one "not
+  // running" state that needs nobody to do anything, so it gets a calm note
+  // instead of the warnings below. The server only reports it while the
+  // provider is down, and never on an install without such a tool.
+  const paused = externalPause && !daemonRunning ? externalPause : null;
+  if (paused) {
+    const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const why = paused.reason ? `: ${esc(paused.reason)}` : '';
+    banners.push(banner('info', `<strong>Paused by ${esc(paused.source)}</strong>${why}. Stopped ${fmtAgeShort(paused.age_sec)}; it starts the provider again by itself, so nothing needs doing here.`));
+  } else if (providerOff && !daemonRunning) {
     const why = jobs.provider.enabled === false ? 'switched off in launchd' : 'not loaded in this login session';
     banners.push(banner('warning', `<strong>Renting out is off — nothing is being served.</strong> The provider's job is ${why}, so it will <strong>not</strong> start on its own: not now, and not after the next reboot either. Run this to turn it back on for good:${offJobs.map(cmdRow).join('')}<div style="margin-top:8px">Or serve right away without re-enabling: <a href="#" onclick="postPriceGuardAction('start'); return false;">Start serving now</a> — that lasts until the next reboot.</div>`));
   } else if (providerOff && daemonRunning) {
@@ -2144,7 +2154,9 @@ function renderBanners(status, energy, doctor, daemonState, autostart, priceSour
       // doctor's stock "consider a machine with more unified memory" advice is
       // actively misleading when requests are succeeding - don't show it then.
       const fix = f.fix && !(served && isRamCheck) ? ` Suggested fix: ${f.fix}` : '';
-      if (served) {
+      // During an announced pause doctor is describing a provider that is
+      // down on purpose, so its findings are notes, not alarms.
+      if (served || paused) {
         const full = `darkbloom doctor: ${label}${f.detail}${isRamCheck ? ' Working theory: this check compares against currently-free RAM rather than the total budget, so the model already loaded looks like it does not fit its own footprint.' : ''}`;
         infoNotes.push(isRamCheck
           ? `<span title="${q(full)}">doctor's RAM-fit check flags ${(f.detail.match(/^([\w.-]+)/) || [])[1] || 'the active model'} (known false positive)</span>`
@@ -2911,7 +2923,7 @@ async function refresh() {
     else if (energy && energy.latest && energy.latest.usd_sek) lastLocalPerUsd = parseFloat(energy.latest.usd_sek);
     renderHealth(data.health);
     renderCards(status, energy, account, daemon_state, disk, data.autopilot);
-    renderBanners(status, energy, doctor, daemon_state, data.autostart, data.price_source_chosen);
+    renderBanners(status, energy, doctor, daemon_state, data.autostart, data.price_source_chosen, data.external_pause);
     updateChatAvailability(status, daemon_state);
     renderAccount(account);
     renderDisk(disk);

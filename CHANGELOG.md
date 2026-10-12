@@ -1,5 +1,11 @@
 # Changelog
 
+## v101
+
+**Another tool can announce a deliberate pause.** A script that stops the provider on purpose and starts it again by itself (to hand the GPU to other work, for example) can write `~/.darkbloom/external-pause.json` with a `source`, a `reason` and a `since` time, and delete it when it resumes. While the file is there and the provider is down, the page shows a grey "Paused by …" note instead of the yellow "Renting out is off" warning, lists `darkbloom doctor` findings as notes, leaves "Provider is not running" out of the health summary, and Price Guard's Auto mode does not start the provider underneath the pause. Before, such a pause looked the same as a crash, and Auto would have started the provider again against the other tool.
+
+The file is ignored once the provider runs again and after 24 hours, so a tool that never cleaned up cannot leave a stale note or block Auto for good. An install without the file behaves exactly as before. See "Optional: telling the dashboard about a deliberate pause" in the README.
+
 ## v100
 
 **`experiment.py end` closes the experiments for good.** It disables Darkbloom Autopilot, hosts the baseline (gpt-oss-20b alone), marks a running Autopilot comparison finished, and flags the state as ended. From then on each tick only collects data (network demand, provider log counts; job rows keep coming from the log stream), with no model switches and no candidate downloads. Both experiments were ended this way on 2026-10-06 at 21:24, after four Autopilot-comparison phases gave the same answer twice over.

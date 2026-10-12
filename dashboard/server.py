@@ -97,6 +97,11 @@ WATCHDOG_PLIST = HOME / "Library" / "LaunchAgents" / "io.darkbloom.watchdog.plis
 AUTOSTART_LABELS = ("io.darkbloom.provider", "io.darkbloom.watchdog")
 AUTOSTART_CACHE_SEC = 30
 PRICE_GUARD_CONFIG = HOME / ".darkbloom" / "price-guard.json"
+# Optional hand-off from another tool that stops the provider on purpose and
+# will start it again by itself (e.g. a script that yields the GPU to other
+# work). Absent on a normal install, in which case nothing here changes.
+EXTERNAL_PAUSE_FILE = HOME / ".darkbloom" / "external-pause.json"
+EXTERNAL_PAUSE_MAX_AGE_SEC = 24 * 3600
 PRICE_GUARD_LOG = HOME / ".darkbloom" / "price-guard.log"
 PRICE_GUARD_POLL_INTERVAL_SEC = 300  # matches the account/energy poll cadence elsewhere
 
@@ -1025,6 +1030,39 @@ def _get_provider_start_args():
 SERVING_MODE_FILE = HOME / ".darkbloom" / "serving-mode.json"
 
 
+def get_external_pause(daemon_running=None):
+    """A pause another tool has announced by writing EXTERNAL_PAUSE_FILE:
+    {"source": "...", "reason": "...", "since": <unix time>}. Returns None when
+    there is no such file, which is every install that doesn't use one.
+
+    The file is only believed while the provider is actually down and the
+    note is recent. A tool that crashed after starting the provider again, or
+    never cleaned up, must not leave this page explaining a pause that ended
+    long ago - or keep Auto from ever starting again."""
+    try:
+        if not EXTERNAL_PAUSE_FILE.exists():
+            return None
+        raw = json.loads(EXTERNAL_PAUSE_FILE.read_text())
+        if not isinstance(raw, dict):
+            return None
+        since = float(raw.get("since") or EXTERNAL_PAUSE_FILE.stat().st_mtime)
+        age = time.time() - since
+        if age < 0 or age > EXTERNAL_PAUSE_MAX_AGE_SEC:
+            return None
+        if daemon_running is None:
+            daemon_running = (get_darkbloom_status().get("daemon") or "").startswith("running")
+        if daemon_running:
+            return None
+        return {
+            "source": str(raw.get("source") or "another tool")[:80],
+            "reason": str(raw.get("reason") or "")[:200],
+            "since": since,
+            "age_sec": age,
+        }
+    except Exception:
+        return None
+
+
 def read_serving_mode():
     try:
         if SERVING_MODE_FILE.exists():
@@ -1344,6 +1382,15 @@ def _evaluate_price_guard(cfg):
         reason = "running and profitable"
     else:
         reason = "stopped; still not profitable to resume"
+
+    # Whoever announced the pause starts the provider again itself. Auto
+    # starting it underneath would undo that tool's decision, and the two
+    # would then stop and start the provider against each other.
+    if action == "start":
+        pause = get_external_pause(daemon_running)
+        if pause:
+            action = None
+            reason = f"would start, but {pause['source']} has paused the provider and resumes it by itself"
 
     return {
         "currency": cur,
@@ -3565,8 +3612,12 @@ def get_health(d):
     account = d.get("account") or {}
     daemon_up = (status.get("daemon") or "").startswith("running")
     trust = (status.get("trust") or "")
+    # A pause another tool announced (get_external_pause) ends by itself and
+    # is not a fault, so it must not turn the whole summary red.
+    pause = d.get("external_pause") if not daemon_up else None
     if not daemon_up:
-        problems.append((2, "Provider is not running"))
+        if not pause:
+            problems.append((2, "Provider is not running"))
     elif not trust.startswith("hardware"):
         problems.append((2, f"Trust is '{trust or 'unknown'}', not hardware - no paid jobs until it recovers"))
     now = time.time()
@@ -3619,6 +3670,8 @@ def get_health(d):
         if w24.get("completed"):
             parts.append("all paid" if (w24.get("unpaid") or 0) <= 3 else f"{w24['unpaid']} unpaid")
         parts.append("trust ok" if trust.startswith("hardware") else f"trust: {trust or '?'}")
+    elif pause:
+        parts.append(f"Paused by {pause['source']}, resumes by itself")
     else:
         parts.append("Provider stopped")
     detail = []
@@ -4873,6 +4926,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "autostart": get_autostart_state(),
                 "autopilot": get_autopilot_state(),
                 "doctor": get_doctor_report(),
+                "external_pause": get_external_pause(),
                 "inference_durations": get_inference_duration_stats(),
                 "price_48h": get_price_48h(),
                 "dashboard_version": DASHBOARD_VERSION,

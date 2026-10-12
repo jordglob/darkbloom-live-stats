@@ -415,6 +415,30 @@ this just works out of the box - nothing to configure.
 All three are `KeepAlive` LaunchAgents - if one crashes, `launchd` restarts it.
 None depend on a Terminal window or `tmux` session staying open.
 
+## Optional: telling the dashboard about a deliberate pause
+
+If some other tool of yours stops the provider on purpose and starts it again
+by itself - a script that hands the GPU to other work while that work lasts,
+say - it can announce that by writing `~/.darkbloom/external-pause.json`:
+
+```json
+{"source": "my-gpu-scheduler", "reason": "GPU needed for a local job", "since": 1791835200}
+```
+
+and deleting the file when it starts the provider again. While the file is
+there and the provider is down, the dashboard:
+
+- shows a grey "Paused by …" note instead of the yellow "Renting out is off"
+  warning,
+- lists `darkbloom doctor` findings as notes rather than warnings,
+- says "Paused by …" in the health summary at the top instead of the red
+  "Provider stopped",
+- keeps Price Guard's Auto mode from starting the provider underneath the pause.
+
+The file is ignored once the provider is running again, and after 24 hours, so
+a tool that forgot to clean up cannot leave a stale note or block Auto for
+good. Without the file nothing changes - a normal install never has one.
+
 ## Uninstall
 
 ```bash
