@@ -1587,10 +1587,13 @@ function renderNerdyStats(daemonState, account, doctor, inferenceDurations, serv
     : 'No request durations observed yet - builds up over time as real requests come in (Darkbloom itself exposes no timing data, so this is tracked locally).';
 
   const hr = (account && account.connected) ? account.hourly_rate_comparison : null;
+  // Any of these can be null: with no base reward paid in the window (Darkbloom
+  // stopped paying it on 2026-10-15) there is no floor slot to measure.
+  const fx = (v, digits) => v == null ? '–' : v.toFixed(digits);
   const hourlyTooltip = hr ? `How this is computed, entirely from real local/ledger data - no advertised pricing anywhere in it:
 Active $/hr = real earnings (excl. base_reward) ÷ real active-serving seconds, both counted only from ${new Date(hr.window_start_at * 1000).toLocaleString('en-US', {hourCycle:'h23'})} onward - the exact moment this dashboard's local duration tracker started watching the daemon's inference_active flag.
-Floor $/hr = base_reward earnings in that same window ÷ elapsed floor-slot time. The slot width (${hr.floor_slot_minutes.toFixed(1)} min) isn't assumed - it's the smallest real gap between two back-to-back "floor:<minute>Z:..." timestamps Darkbloom itself embeds in every base_reward job_id.
-Window so far: ${hr.active_hours.toFixed(2)}h active (${fmtNum(hr.active_jobs)} jobs, ${fmtUsd(hr.active_usd)}) vs ${hr.floor_hours.toFixed(2)}h floor (${fmtNum(hr.floor_slots)} slots, ${fmtUsd(hr.floor_usd)}).
+Floor $/hr = base_reward earnings in that same window ÷ elapsed floor-slot time. The slot width (${fx(hr.floor_slot_minutes, 1)} min) isn't assumed - it's the smallest real gap between two back-to-back "floor:<minute>Z:..." timestamps Darkbloom itself embeds in every base_reward job_id.
+Window so far: ${fx(hr.active_hours, 2)}h active (${fmtNum(hr.active_jobs)} jobs, ${fmtUsd(hr.active_usd)}) vs ${fx(hr.floor_hours, 2)}h floor (${fmtNum(hr.floor_slots)} slots, ${fmtUsd(hr.floor_usd)}).
 Grows more reliable the longer the dashboard keeps running - resets to empty on every restart.
 Note: active $/hr counts every real job including likely spam (see the token-length line above) - real spam traffic really did occupy real active-serving time for near-$0 pay, so a low reading here can reflect that dilution rather than the network paying less for genuine work.` : '';
   const hourlyLine = hr

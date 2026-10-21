@@ -1,5 +1,9 @@
 # Changelog
 
+## v104
+
+**The page loads again now that Darkbloom pays no base reward.** Darkbloom's last base-reward payment was on 2026-10-15. With none in the window, the floor slot width and floor hours are empty, and the pay-rate tooltip called `.toFixed` on them. That threw inside the refresh, so everything rendered after it stayed blank: the electricity price tab showed empty source and zone pickers and no chart, and the header read "could not fetch data". Empty values now show as "–".
+
 ## v103
 
 **The model experiment is removed completely, and a few unpaid jobs no longer turn the page yellow.**
