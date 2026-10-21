@@ -1,5 +1,13 @@
 # Changelog
 
+## v105
+
+**One broken piece no longer blanks the page, and electricity prices survive a dead price source.**
+
+- **Panels render one by one.** Each panel draws inside its own guard. If one throws, the rest still draw, and the header names the panel that was skipped ("⚠ not drawn: …", details in the browser console). Before, the first exception ended the refresh, which is how v104's null value emptied the electricity price tab.
+- **`/api/data` survives a failing piece.** Each part of the response is computed on its own; one that raises is logged to the server's stderr and sent as `null`, instead of failing the whole response and leaving the page on "could not fetch data".
+- **Prices fall back to the archive.** When the configured price source errors or returns nothing for a day, that day comes from `~/.darkbloom/price-archive`, which already holds every slot fetched before. The failure is logged to `~/.darkbloom/price-fetch.log`. A source outage now means no new prices, not a blank chart and missing electricity cost.
+
 ## v104
 
 **The page loads again now that Darkbloom pays no base reward.** Darkbloom's last base-reward payment was on 2026-10-15. With none in the window, the floor slot width and floor hours are empty, and the pay-rate tooltip called `.toFixed` on them. That threw inside the refresh, so everything rendered after it stayed blank: the electricity price tab showed empty source and zone pickers and no chart, and the header read "could not fetch data". Empty values now show as "–".

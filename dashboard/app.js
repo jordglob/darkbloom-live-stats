@@ -2870,7 +2870,18 @@ async function refresh() {
   try {
     const res = await fetch('/api/data');
     const data = await res.json();
-    const { status, energy, account, utilization, disk, daemon_state, doctor, inference_durations, price_48h } = data;
+    // The server sends null for a piece that failed (see _part in server.py);
+    // default the ones every panel reads so one gap can't break the rest.
+    const status = data.status || {};
+    const energy = data.energy || {};
+    const { account, utilization, disk, daemon_state, doctor, inference_durations, price_48h } = data;
+    // Each panel renders on its own: an exception in one is logged and named
+    // in the header instead of stopping every panel drawn after it (v104:
+    // a null in the pay-rate tooltip blanked the electricity price tab).
+    const failed = [];
+    const safe = (name, fn) => {
+      try { return fn(); } catch (err) { failed.push(name); console.error(`[L&S] ${name} failed:`, err); return undefined; }
+    };
     // A tab left open across an install keeps running the old script; reload
     // as soon as the server reports a different version.
     if (data.dashboard_version) {
@@ -2885,42 +2896,44 @@ async function refresh() {
       if (cur) lastPriceUsdPerKwh = cur.usd_per_kwh;
     }
     lastAccount = account || null;
-    if (data.max_power) renderMaxPower(data.max_power.level || 0);
+    if (data.max_power) safe('max power', () => renderMaxPower(data.max_power.level || 0));
 
     if (price_48h && price_48h.local_per_usd) { lastLocalPerUsd = price_48h.local_per_usd; lastCurrency = price_48h.currency || lastCurrency; }
     else if (energy && energy.latest && energy.latest.usd_sek) lastLocalPerUsd = parseFloat(energy.latest.usd_sek);
-    renderHealth(data.health);
-    renderCards(status, energy, account, daemon_state, disk, data.autopilot);
-    renderBanners(status, energy, doctor, daemon_state, data.autostart, data.price_source_chosen, data.external_pause);
-    updateChatAvailability(status, daemon_state);
-    renderAccount(account);
-    renderDisk(disk);
-    renderNerdyStats(daemon_state, account, doctor, inference_durations, status.requests_served || 0);
-    const elprisNow = renderElpris(price_48h);
-    refreshPriceRange();
+    safe('health', () => renderHealth(data.health));
+    safe('cards', () => renderCards(status, energy, account, daemon_state, disk, data.autopilot));
+    safe('banners', () => renderBanners(status, energy, doctor, daemon_state, data.autostart, data.price_source_chosen, data.external_pause));
+    safe('chat', () => updateChatAvailability(status, daemon_state));
+    safe('account', () => renderAccount(account));
+    safe('disk', () => renderDisk(disk));
+    safe('details', () => renderNerdyStats(daemon_state, account, doctor, inference_durations, status.requests_served || 0));
+    const elprisNow = safe('electricity price', () => renderElpris(price_48h));
+    safe('price range', () => refreshPriceRange());
     lastRealPrice48 = price_48h;
-    refreshReal();
-    updateFavicon(status);
+    safe('earnings chart', () => refreshReal());
+    safe('favicon', () => updateFavicon(status));
 
-    const rows = energy.rows || {};
+    safe('power chart', () => {
+      const rows = energy.rows || {};
 
-    const hasPeak = !!(rows.peak_total_power_w && rows.peak_total_power_w.length);
-    document.getElementById('power-legend').innerHTML = hasPeak
-      ? `<span title="Each plotted point averages several 5-minute readings; the faint line is the highest single reading in that stretch, so brief spikes stay visible."><i style="background:var(--series-cost)"></i>Average</span><span><i style="background:var(--series-cost);opacity:.5"></i>Peak</span>`
-      : '';
-    const powerSeries = [{name: 'Power (incl. baseline)', values: rows.total_power_w || []}];
-    const powerColors = ['line-power'];
-    if (hasPeak) { powerSeries.push({name: 'Peak', values: rows.peak_total_power_w}); powerColors.push('line-power-peak'); }
-    // Same treatment the temp chart got at v24: a dashed line above the data
-    // reads as a limit, a band reads as the spread between typical and worst
-    // in each bucket. Two charts showing the same relationship shouldn't speak
-    // two different visual languages on one page.
-    const powerOpts = hasPeak ? { envelope: { lower: 0, upper: 1, className: 'band-power' } } : {};
-    renderLineChart('chart-power', 'tooltip-power', rows.timestamps, powerSeries, powerColors, fmtW, powerOpts);
-    const nowW = (rows.total_power_w || []).at(-1);
-    const maxW = Math.max(...(hasPeak ? rows.peak_total_power_w : (rows.total_power_w || [0])));
-    document.getElementById('power-chart-stats').textContent = nowW != null ? `now: ${fmtW(nowW)} · max: ${fmtW(maxW)}` : '';
-    refreshPowerRange();
+      const hasPeak = !!(rows.peak_total_power_w && rows.peak_total_power_w.length);
+      document.getElementById('power-legend').innerHTML = hasPeak
+        ? `<span title="Each plotted point averages several 5-minute readings; the faint line is the highest single reading in that stretch, so brief spikes stay visible."><i style="background:var(--series-cost)"></i>Average</span><span><i style="background:var(--series-cost);opacity:.5"></i>Peak</span>`
+        : '';
+      const powerSeries = [{name: 'Power (incl. baseline)', values: rows.total_power_w || []}];
+      const powerColors = ['line-power'];
+      if (hasPeak) { powerSeries.push({name: 'Peak', values: rows.peak_total_power_w}); powerColors.push('line-power-peak'); }
+      // Same treatment the temp chart got at v24: a dashed line above the data
+      // reads as a limit, a band reads as the spread between typical and worst
+      // in each bucket. Two charts showing the same relationship shouldn't speak
+      // two different visual languages on one page.
+      const powerOpts = hasPeak ? { envelope: { lower: 0, upper: 1, className: 'band-power' } } : {};
+      renderLineChart('chart-power', 'tooltip-power', rows.timestamps, powerSeries, powerColors, fmtW, powerOpts);
+      const nowW = (rows.total_power_w || []).at(-1);
+      const maxW = Math.max(...(hasPeak ? rows.peak_total_power_w : (rows.total_power_w || [0])));
+      document.getElementById('power-chart-stats').textContent = nowW != null ? `now: ${fmtW(nowW)} · max: ${fmtW(maxW)}` : '';
+      refreshPowerRange();
+    });
 
 
     // Log-age chart: the server does the pyramid (macmon ~5s out to 24h,
@@ -2932,74 +2945,82 @@ async function refresh() {
     // it. And the Net chart under it was literally these two lines
     // subtracted: server-side, net_usd is [rev - cost for rev, cost in ...].
     // Token volume is the part that was actually worth plotting over 26 days.
-    refreshTokens();
+    safe('tokens chart', () => refreshTokens());
 
-    // When each running version went live, not when the page last polled.
-    const sinceTxt = ts => {
-      const d = new Date(ts * 1000);
-      const mon = d.toLocaleString('en-US', {month: 'short'});
-      return `${d.getDate()} ${mon} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    };
-    const verBits = [];
-    if (status && status.version) {
-      const pm = data.version_meta || {};
-      verBits.push(`darkbloom ${status.version}` + (pm.promoted_at ? ` (installed ${sinceTxt(pm.promoted_at)})` : ''));
-    }
-    if (data.dashboard_version) {
-      verBits.push(`L&S ${data.dashboard_version}` + (data.dashboard_installed_at ? ` (installed ${sinceTxt(data.dashboard_installed_at)})` : ''));
-    }
-    document.getElementById('updated').textContent = verBits.join(' · ');
-    // Lead with what a kWh actually costs (spot + grid fee + energy tax, then
-    // VAT on all of it, from the surcharge fields under the price chart);
-    // spot alone is a fraction of the bill. Falls back to spot if no fees set.
-    const kwhEl = document.getElementById('kwh-price');
-    if (data.price_source_chosen === false && elprisNow && elprisNow.nowVal != null) {
-      // Not the viewer's price yet - don't show another country's currency
-      // or zone as if it were theirs.
-      kwhEl.innerHTML = `⚡ electricity: <a href="#electricity-price">set your price ↓</a>`;
-      kwhEl.title = 'No electricity price chosen yet - costs use a default until you set yours in the Electricity Price panel.';
-    } else if (elprisNow && elprisNow.nowTotal != null) {
-      const local = elprisNow.currency && elprisNow.currency !== 'USD'
-        ? ` (${elprisNow.nowTotalLocal.toFixed(2)} ${elprisNow.currency})` : '';
-      kwhEl.textContent = elprisNow.currency && elprisNow.currency !== 'USD'
-        ? `⚡ electricity ${elprisNow.nowTotalLocal.toFixed(2)} ${elprisNow.currency}/kWh ($${elprisNow.nowTotal.toFixed(3)}) right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''}`
-        : `⚡ electricity $${elprisNow.nowTotal.toFixed(3)}/kWh right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''} · spot $${elprisNow.nowVal.toFixed(3)}`;
-      kwhEl.title = 'Total = (spot + grid fee + energy tax) + VAT on all of it, using the fee and VAT fields under the electricity price chart. Spot alone is only part of what the bill charges per kWh.';
-    } else {
-      kwhEl.textContent = elprisNow && elprisNow.nowVal != null
-        ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh spot right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';
-      kwhEl.title = 'Spot price only - set grid fee, energy tax and VAT under the electricity price chart to see the full price.';
-    }
-    // Prefer the live gauge's method: the CSV's first row after a restart is
-    // always the estimate (macmon's log is empty at that instant).
-    const powerMethod = lastPowerMethod || (energy.latest && energy.latest.power_method) || 'soc+baseline';
-    const foot = document.getElementById('footnote');
-    foot.title = (powerMethod === 'smc'
-      ? 'Power: whole-Mac reading from the SMC system-power sensor via macmon (RAM, SSD, fans included), mapped to the wall as ×1.11 + 2.2W, calibrated against a wall meter on an M4 Pro Mac mini (idle 11W, full load ~100W).'
-      : 'Power: CPU+GPU from powermetrics plus a flat 7W guess for everything else. Install macmon (brew install macmon) and restart the energy monitor for a real whole-Mac reading - the guess is ~2.5x too low under heavy load.')
-      + ` Estimated token revenue (nerdy charts only) uses a flat $0.048 per million tokens, last recalibrated 2026-09-10 from this account's real ledger. ${energy.total_rows ?? 0} rows logged. Page refreshes every 10s; power gauges ~5x/s.`;
-    // What version is running and when it took over. The provider ships every
-    // ~2.4 days with auto-update on, so "what changed recently" is usually the
-    // version - and that's the first thing worth knowing when something starts
-    // behaving oddly. Promotion time comes from the watchdog, which only
-    // promotes a build after it survives 600s, so it's when the version
-    // actually took over rather than when it downloaded.
-    const vm = data.version_meta || {};
-    const ver = (status && status.version) ? `darkbloom ${status.version}` : '';
-    let verLine = '';
-    if (ver) {
-      const bits = [ver];
-      if (vm.promoted_at) {
-        const days = (Date.now() / 1000 - vm.promoted_at) / 86400;
-        bits.push(days < 1 ? `promoted ${Math.round(days * 24)}h ago` : `promoted ${days.toFixed(1)}d ago`);
+    safe('header', () => {
+      // When each running version went live, not when the page last polled.
+      const sinceTxt = ts => {
+        const d = new Date(ts * 1000);
+        const mon = d.toLocaleString('en-US', {month: 'short'});
+        return `${d.getDate()} ${mon} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      };
+      const verBits = [];
+      if (status && status.version) {
+        const pm = data.version_meta || {};
+        verBits.push(`darkbloom ${status.version}` + (pm.promoted_at ? ` (installed ${sinceTxt(pm.promoted_at)})` : ''));
       }
-      if (vm.auto_update === true) bits.push('auto-update on');
-      else if (vm.auto_update === false) bits.push('auto-update off');
-      verLine = ` · <span title="The running provider version and when the watchdog promoted it, after the build survived its 600s stabilisation window. With auto-update on, a new version can land at any time - so if something starts misbehaving, check whether this changed.">${bits.join(' · ')}</span>`;
+      if (data.dashboard_version) {
+        verBits.push(`L&S ${data.dashboard_version}` + (data.dashboard_installed_at ? ` (installed ${sinceTxt(data.dashboard_installed_at)})` : ''));
+      }
+      document.getElementById('updated').textContent = verBits.join(' · ');
+      // Lead with what a kWh actually costs (spot + grid fee + energy tax, then
+      // VAT on all of it, from the surcharge fields under the price chart);
+      // spot alone is a fraction of the bill. Falls back to spot if no fees set.
+      const kwhEl = document.getElementById('kwh-price');
+      if (data.price_source_chosen === false && elprisNow && elprisNow.nowVal != null) {
+        // Not the viewer's price yet - don't show another country's currency
+        // or zone as if it were theirs.
+        kwhEl.innerHTML = `⚡ electricity: <a href="#electricity-price">set your price ↓</a>`;
+        kwhEl.title = 'No electricity price chosen yet - costs use a default until you set yours in the Electricity Price panel.';
+      } else if (elprisNow && elprisNow.nowTotal != null) {
+        const local = elprisNow.currency && elprisNow.currency !== 'USD'
+          ? ` (${elprisNow.nowTotalLocal.toFixed(2)} ${elprisNow.currency})` : '';
+        kwhEl.textContent = elprisNow.currency && elprisNow.currency !== 'USD'
+          ? `⚡ electricity ${elprisNow.nowTotalLocal.toFixed(2)} ${elprisNow.currency}/kWh ($${elprisNow.nowTotal.toFixed(3)}) right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''}`
+          : `⚡ electricity $${elprisNow.nowTotal.toFixed(3)}/kWh right now incl. fees & VAT${elprisNow.zone ? ` (${elprisNow.zone})` : ''} · spot $${elprisNow.nowVal.toFixed(3)}`;
+        kwhEl.title = 'Total = (spot + grid fee + energy tax) + VAT on all of it, using the fee and VAT fields under the electricity price chart. Spot alone is only part of what the bill charges per kWh.';
+      } else {
+        kwhEl.textContent = elprisNow && elprisNow.nowVal != null
+          ? `⚡ electricity $${elprisNow.nowVal.toFixed(3)}/kWh spot right now${elprisNow.zone ? ` (${elprisNow.zone})` : ''}` : '';
+        kwhEl.title = 'Spot price only - set grid fee, energy tax and VAT under the electricity price chart to see the full price.';
+      }
+    });
+    safe('footnote', () => {
+      // Prefer the live gauge's method: the CSV's first row after a restart is
+      // always the estimate (macmon's log is empty at that instant).
+      const powerMethod = lastPowerMethod || (energy.latest && energy.latest.power_method) || 'soc+baseline';
+      const foot = document.getElementById('footnote');
+      foot.title = (powerMethod === 'smc'
+        ? 'Power: whole-Mac reading from the SMC system-power sensor via macmon (RAM, SSD, fans included), mapped to the wall as ×1.11 + 2.2W, calibrated against a wall meter on an M4 Pro Mac mini (idle 11W, full load ~100W).'
+        : 'Power: CPU+GPU from powermetrics plus a flat 7W guess for everything else. Install macmon (brew install macmon) and restart the energy monitor for a real whole-Mac reading - the guess is ~2.5x too low under heavy load.')
+        + ` Estimated token revenue (nerdy charts only) uses a flat $0.048 per million tokens, last recalibrated 2026-09-10 from this account's real ledger. ${energy.total_rows ?? 0} rows logged. Page refreshes every 10s; power gauges ~5x/s.`;
+      // What version is running and when it took over. The provider ships every
+      // ~2.4 days with auto-update on, so "what changed recently" is usually the
+      // version - and that's the first thing worth knowing when something starts
+      // behaving oddly. Promotion time comes from the watchdog, which only
+      // promotes a build after it survives 600s, so it's when the version
+      // actually took over rather than when it downloaded.
+      const vm = data.version_meta || {};
+      const ver = (status && status.version) ? `darkbloom ${status.version}` : '';
+      let verLine = '';
+      if (ver) {
+        const bits = [ver];
+        if (vm.promoted_at) {
+          const days = (Date.now() / 1000 - vm.promoted_at) / 86400;
+          bits.push(days < 1 ? `promoted ${Math.round(days * 24)}h ago` : `promoted ${days.toFixed(1)}d ago`);
+        }
+        if (vm.auto_update === true) bits.push('auto-update on');
+        else if (vm.auto_update === false) bits.push('auto-update off');
+        verLine = ` · <span title="The running provider version and when the watchdog promoted it, after the build survived its 600s stabilisation window. With auto-update on, a new version can land at any time - so if something starts misbehaving, check whether this changed.">${bits.join(' · ')}</span>`;
+      }
+      foot.innerHTML = (powerMethod === 'smc'
+        ? `Power measured by the Mac's own sensor · updates every 10 s <span style="opacity:.6">(hover for details)</span>`
+        : `Power is estimated — <code>brew install macmon</code> for a real reading · updates every 10 s <span style="opacity:.6">(hover for details)</span>`) + verLine;
+    });
+    if (failed.length) {
+      const upd = document.getElementById('updated');
+      upd.textContent = (upd.textContent ? upd.textContent + ' · ' : '') + `⚠ not drawn: ${failed.join(', ')} (details in the browser console)`;
     }
-    foot.innerHTML = (powerMethod === 'smc'
-      ? `Power measured by the Mac's own sensor · updates every 10 s <span style="opacity:.6">(hover for details)</span>`
-      : `Power is estimated — <code>brew install macmon</code> for a real reading · updates every 10 s <span style="opacity:.6">(hover for details)</span>`) + verLine;
   } catch (e) {
     document.getElementById('updated').textContent = 'could not fetch data: ' + e;
   }

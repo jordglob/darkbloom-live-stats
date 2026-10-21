@@ -3827,6 +3827,48 @@ def _fetch_day_fixed(date_obj, fixed_price):
 
 
 def _fetch_price_day(date_obj, cfg):
+    """A day's prices from the configured source, or - if the source fails or
+    has nothing for that day - the slots already archived for it. Sources go
+    down and change formats; a day that was fetched once should never turn
+    into a blank chart and a missing cost because of that."""
+    try:
+        prices = _fetch_price_day_live(date_obj, cfg)
+    except Exception as e:
+        log_price_fetch(f"{cfg['source']} {cfg['zone']} {date_obj}: {e}")
+        prices = []
+    if prices:
+        return prices
+    return _archived_price_day(date_obj, cfg)
+
+
+def _archived_price_day(date_obj, cfg):
+    day = date_obj.isoformat()
+    path = PRICE_ARCHIVE_DIR / f"{cfg['source']}_{cfg['zone']}" / f"{day[:7]}.jsonl"
+    rows = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if str(r.get("time_start", "")).startswith(day) and r.get("price_per_kwh") is not None:
+                    rows[r["time_start"]] = {"time_start": r["time_start"], "time_end": r["time_end"],
+                                             "price_per_kwh": r["price_per_kwh"]}
+    except Exception:
+        return []
+    return [rows[k] for k in sorted(rows)]
+
+
+def log_price_fetch(msg):
+    try:
+        with open(HOME / ".darkbloom" / "price-fetch.log", "a") as f:
+            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+    except Exception:
+        pass
+
+
+def _fetch_price_day_live(date_obj, cfg):
     source, zone = cfg["source"], cfg["zone"]
     if source == "elprisetjustnu":
         return _fetch_day_nordic(date_obj, zone, "www.elprisetjustnu.se", "SEK_per_kWh")
@@ -4808,6 +4850,17 @@ def get_energy_series():
     }
 
 
+
+def _part(name, fn):
+    """One piece of /api/data. A piece that throws becomes null (and is
+    logged) instead of failing the whole response - the page draws every
+    other panel and leaves that one empty."""
+    try:
+        return fn()
+    except Exception as e:
+        print(f"/api/data: {name} failed: {e!r}", file=sys.stderr, flush=True)
+        return None
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # quiet - avoid stdout spam
@@ -4824,29 +4877,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/data":
             data = {
-                "status": get_darkbloom_status(),
-                "energy": get_energy_series(),
-                "max_power": get_max_power_status(),
-                "serving_mode": read_serving_mode(),
-                "version_meta": get_provider_version_meta(),
-                "live_power": get_live_power(),
-                "account": get_account_data(),
-                "utilization": get_utilization(),
-                "disk": annotate_disk_usage(get_disk_usage()),
-                "daemon_state": get_daemon_state(),
-                "autostart": get_autostart_state(),
-                "autopilot": get_autopilot_state(),
-                "doctor": get_doctor_report(),
-                "external_pause": get_external_pause(),
-                "inference_durations": get_inference_duration_stats(),
-                "price_48h": get_price_48h(),
+                "status": _part("status", lambda: get_darkbloom_status()),
+                "energy": _part("energy", lambda: get_energy_series()),
+                "max_power": _part("max_power", lambda: get_max_power_status()),
+                "serving_mode": _part("serving_mode", lambda: read_serving_mode()),
+                "version_meta": _part("version_meta", lambda: get_provider_version_meta()),
+                "live_power": _part("live_power", lambda: get_live_power()),
+                "account": _part("account", lambda: get_account_data()),
+                "utilization": _part("utilization", lambda: get_utilization()),
+                "disk": _part("disk", lambda: annotate_disk_usage(get_disk_usage())),
+                "daemon_state": _part("daemon_state", lambda: get_daemon_state()),
+                "autostart": _part("autostart", lambda: get_autostart_state()),
+                "autopilot": _part("autopilot", lambda: get_autopilot_state()),
+                "doctor": _part("doctor", lambda: get_doctor_report()),
+                "external_pause": _part("external_pause", lambda: get_external_pause()),
+                "inference_durations": _part("inference_durations", lambda: get_inference_duration_stats()),
+                "price_48h": _part("price_48h", lambda: get_price_48h()),
                 "dashboard_version": DASHBOARD_VERSION,
                 # False until a price source is saved (or a pre-v14 zone
                 # file exists) - the page nags until the user sets theirs.
-                "price_source_chosen": PRICE_SOURCE_CONFIG.exists() or LEGACY_ZONE_CONFIG.exists(),
+                "price_source_chosen": _part("price_source_chosen", lambda: PRICE_SOURCE_CONFIG.exists() or LEGACY_ZONE_CONFIG.exists()),
                 # install.sh copies server.py into place, so its mtime is
                 # when this dashboard version went live.
-                "dashboard_installed_at": Path(__file__).stat().st_mtime,
+                "dashboard_installed_at": _part("dashboard_installed_at", lambda: Path(__file__).stat().st_mtime),
             }
             try:
                 data["health"] = get_health(data)
