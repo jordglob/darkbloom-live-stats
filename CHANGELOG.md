@@ -2,7 +2,7 @@
 
 ## v106
 
-**Darkbloom links under the title:** Console, Docs, GitHub and News on X, the official links from darkbloom.dev. There is no official forum or Discord to link to.
+**Darkbloom links under the title:** Console, Docs, GitHub, News on X and the community Slack.
 
 ## v105
 
