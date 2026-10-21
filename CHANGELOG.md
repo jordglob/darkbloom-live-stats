@@ -1,5 +1,9 @@
 # Changelog
 
+## v106
+
+**Darkbloom links under the title:** Console, Docs, GitHub and News on X, the official links from darkbloom.dev. There is no official forum or Discord to link to.
+
 ## v105
 
 **One broken piece no longer blanks the page, and electricity prices survive a dead price source.**
