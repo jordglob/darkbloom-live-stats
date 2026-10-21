@@ -1,8 +1,12 @@
 # Changelog
 
+## v107
+
+**Community Slack link** next to the other Darkbloom links under the title.
+
 ## v106
 
-**Darkbloom links under the title:** Console, Docs, GitHub, News on X and the community Slack.
+**Darkbloom links under the title:** Console, Docs, GitHub and News on X, the official links from darkbloom.dev.
 
 ## v105
 
