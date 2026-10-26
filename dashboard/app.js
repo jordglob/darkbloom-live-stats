@@ -14,6 +14,8 @@ const GAUGE_CATALOG = [
     tooltip: 'Average across all reported GPU thermal sensors, via `darkbloom fan status`. Under about 85 C is comfortable; the Running Hot banner appears above that if the fan is not keeping up.' },
   { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu', warnFrac: 0.85, critFrac: 0.93 },
   // Off by default; switch them on under Settings → Gauges.
+  { id: 'cpuload', label: 'CPU Load', source: 'power', key: 'cpu_load_pct', max: 100, unit: '%', color: '--gauge-total', hidden: true,
+    tooltip: 'How much of the CPU is in use: each core\'s time awake weighted by its clock against that core\'s top clock, averaged over all cores (powermetrics). The CPU counterpart of GPU Load.' },
   { id: 'cpu', label: 'CPU power', source: 'power', key: 'cpu_w', max: 40, unit: 'W', color: '--gauge-total', hidden: true,
     tooltip: 'CPU package power from powermetrics, without the rest of the Mac.' },
   { id: 'gpu', label: 'GPU power', source: 'power', key: 'gpu_w', max: 60, unit: 'W', color: '--gauge-gpu', hidden: true,
@@ -298,7 +300,7 @@ function updateGauges(data) {
         ? `awake ${power.gpu_active_pct.toFixed(0)}% at ${power.gpu_active_mhz} of ${power.gpu_max_mhz} MHz`
         : '';
     }
-    const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : ['temp', 'headroom', 'cpu', 'gpu'].includes(g.id) ? 1 : 2;
+    const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : ['temp', 'headroom', 'cpu', 'gpu', 'cpuload'].includes(g.id) ? 1 : 2;
     numEl.textContent = val.toFixed(decimals);
     if (g.source === 'utilization' && detailEl) {
       const reqH = utilization.requests_per_hour;

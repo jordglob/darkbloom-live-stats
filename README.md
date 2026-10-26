@@ -415,8 +415,8 @@ None depend on a Terminal window or `tmux` session staying open.
 
 Settings → Gauges chooses which Live Power gauges show and in what order, and
 sets each one's full scale and warning levels. Besides the four shown by
-default there are CPU power, GPU power, fan speed, electricity cost per hour
-and earning per hour. Settings are stored in `~/.darkbloom/gauges.json`
+default there are CPU Load, CPU power, GPU power, fan speed, electricity cost
+per hour and earning per hour. Settings are stored in `~/.darkbloom/gauges.json`
 (`GET`/`POST /api/gauges`); delete it, or press Reset to defaults, to go back.
 
 ## Optional: telling the dashboard about a deliberate pause

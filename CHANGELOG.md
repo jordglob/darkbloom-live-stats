@@ -1,5 +1,9 @@
 # Changelog
 
+## v109
+
+**CPU Load gauge.** The CPU counterpart of GPU Load: each core's time awake weighted by its clock against that core's top clock, averaged over all cores, from the per-core lines powermetrics already writes. Off by default; switch it on under Settings → Gauges, next to CPU power. `/api/power` and `/api/live_power` now include `cpu_load_pct`.
+
 ## v108
 
 **The Live Power gauges are configurable.** Settings → Gauges has one row per gauge: show it or not, its full scale, a warning level (yellow) and a critical level (red), and arrows to change the order. A change is saved at once to `~/.darkbloom/gauges.json`, so it holds for every browser on this Mac; Reset to defaults deletes the file. Without the file the page shows exactly what it did before.

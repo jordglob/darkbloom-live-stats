@@ -130,6 +130,9 @@ SAMPLE_HEADER_RE = re.compile(r"\*\*\* Sampled system activity \((.+?)\) \((.+?)
 GPU_ACTIVE_RESIDENCY_RE = re.compile(r"^GPU HW active residency:\s*([\d.]+)%")
 GPU_ACTIVE_FREQ_RE = re.compile(r"^GPU HW active frequency:\s*([\d.]+)\s*MHz")
 GPU_FREQ_STEP_RE = re.compile(r"([\d.]+) MHz:")
+CPU_CORE_RESIDENCY_RE = re.compile(r"^CPU (\d+) active residency:\s*([\d.]+)%")
+# "1404 MHz:  15%" pairs inside a core's residency line: share of time at each clock.
+FREQ_SHARE_RE = re.compile(r"([\d.]+) MHz:\s*([\d.]+)%")
 
 
 MACMON_LOG = HOME / ".darkbloom" / "macmon.jsonl"
@@ -191,10 +194,25 @@ def get_live_power():
     gpu_active_mhz = None
     gpu_max_mhz = None
     sample_time = None
+    # Per-core CPU load of the newest complete sample: the tail can end in a
+    # sample still being written, so the previous one is kept as a fallback.
+    cpu_cores, prev_cpu_cores = {}, {}
     for line in chunk.splitlines():
         m = SAMPLE_HEADER_RE.search(line)
         if m:
             sample_time = m.group(1)
+            if cpu_cores:
+                prev_cpu_cores, cpu_cores = cpu_cores, {}
+            continue
+        mc = CPU_CORE_RESIDENCY_RE.match(line)
+        if mc:
+            shares = [(float(f), float(pct)) for f, pct in FREQ_SHARE_RE.findall(line)]
+            top = max((f for f, _ in shares), default=0)
+            if top > 0:
+                # Same idea as GPU load: time awake weighted by clock over the
+                # core's top clock, so an idle core ticking over at its lowest
+                # clock counts for little.
+                cpu_cores[int(mc.group(1))] = min(100.0, sum(f * pct for f, pct in shares) / top)
             continue
         if line.startswith("CPU Power:"):
             try:
@@ -223,6 +241,8 @@ def get_live_power():
 
     if cpu_mw is None or gpu_mw is None:
         return None
+    cores = cpu_cores if len(cpu_cores) >= len(prev_cpu_cores) else prev_cpu_cores
+    cpu_load_pct = sum(cores.values()) / len(cores) if cores else None
     soc_w = (cpu_mw + gpu_mw) / 1000
     # Whole-system reading from the SMC (via energy-monitor.sh's macmon
     # child) when it's fresh - measures RAM/SSD/fans too, not a guess.
@@ -238,6 +258,9 @@ def get_live_power():
         total_w, total_method = estimate_w, "soc+baseline"
     return {
         "cpu_w": round(cpu_mw / 1000, 3),
+        # Average over all cores, each weighted by its clock (see above).
+        "cpu_load_pct": round(cpu_load_pct, 1) if cpu_load_pct is not None else None,
+        "cpu_cores": len(cores),
         "gpu_w": round(gpu_mw / 1000, 3),
         "total_w": round(total_w, 3),
         "total_method": total_method,
