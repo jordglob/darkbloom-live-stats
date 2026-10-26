@@ -411,6 +411,14 @@ this just works out of the box - nothing to configure.
 All three are `KeepAlive` LaunchAgents - if one crashes, `launchd` restarts it.
 None depend on a Terminal window or `tmux` session staying open.
 
+## Configuring the gauges
+
+Settings → Gauges chooses which Live Power gauges show and in what order, and
+sets each one's full scale and warning levels. Besides the four shown by
+default there are CPU power, GPU power, fan speed, electricity cost per hour
+and earning per hour. Settings are stored in `~/.darkbloom/gauges.json`
+(`GET`/`POST /api/gauges`); delete it, or press Reset to defaults, to go back.
+
 ## Optional: telling the dashboard about a deliberate pause
 
 If some other tool of yours stops the provider on purpose and starts it again

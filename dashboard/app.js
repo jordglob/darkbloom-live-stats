@@ -5,16 +5,33 @@ const POWER_FAST_REFRESH_MS = 200;    // fast poll: CPU/GPU/Total watts only (ch
 // Ordered by what a newcomer actually needs to know, not by what's cheapest
 // to measure: is it working, is it healthy, what is it costing. CPU/GPU watts
 // and RAM are detail and come last - they're for diagnosing, not deciding.
-const GAUGES = [
+const GAUGE_CATALOG = [
   { id: 'total', label: 'Total', source: 'power', key: 'total_w', max: 120, unit: 'W', color: '--gauge-total',
     tooltip: 'Whole-Mac power - this is what you pay for. "Measured" = the Mac\'s own SMC system-power sensor (RAM, SSD, fans included) mapped to the wall as ×1.11 + 2.2W, calibrated against a wall meter on an M4 Pro Mac mini (idle 11W, full load ~100W). "Estimated" = CPU+GPU plus a flat 7W guess, used when macmon isn\'t installed - about right at idle, ~2.5x too low under heavy load.' },
   { id: 'headroom', label: 'GPU Load', source: 'power', key: 'gpu_load_pct', max: 100, unit: '%', color: '--gauge-total',
     tooltip: 'How much of the GPU\'s capacity is in use right now: the share of time it is awake (powermetrics "GPU HW active residency") weighted by how fast it runs while awake (average active clock over its top clock). At rest the GPU idles at its lowest clock, so this reads a few percent; inference runs near the top clock and reads close to 100%. The line underneath shows both raw figures.' },
-  { id: 'temp', label: 'GPU Temp', source: 'fan_temp', key: 'gpu_temp_c', max: 100, unit: '°C', color: '--gauge-gpu',
+  { id: 'temp', label: 'GPU Temp', source: 'fan_temp', key: 'gpu_temp_c', max: 100, unit: '°C', color: '--gauge-gpu', warn: 85, crit: 95,
     tooltip: 'Average across all reported GPU thermal sensors, via `darkbloom fan status`. Under about 85 C is comfortable; the Running Hot banner appears above that if the fan is not keeping up.' },
-  { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu' },
+  { id: 'ram', label: 'RAM used', source: 'ram', key: 'used_gb', max: 48, unit: 'GB', color: '--gauge-gpu', warnFrac: 0.85, critFrac: 0.93 },
+  // Off by default; switch them on under Settings → Gauges.
+  { id: 'cpu', label: 'CPU power', source: 'power', key: 'cpu_w', max: 40, unit: 'W', color: '--gauge-total', hidden: true,
+    tooltip: 'CPU package power from powermetrics, without the rest of the Mac.' },
+  { id: 'gpu', label: 'GPU power', source: 'power', key: 'gpu_w', max: 60, unit: 'W', color: '--gauge-gpu', hidden: true,
+    tooltip: 'GPU power from powermetrics - what inference itself draws.' },
+  { id: 'fan', label: 'Fan', source: 'fan_temp', key: 'fan_rpm', max: 4900, unit: 'rpm', color: '--gauge-total', hidden: true,
+    tooltip: 'Fan speed via `darkbloom fan status`. The scale follows the fan\'s reported maximum unless you set one.' },
+  { id: 'cost', label: 'Electricity cost', source: 'computed', key: 'cost_per_h', max: null, unit: '/h', color: '--gauge-total', hidden: true,
+    tooltip: 'What the Mac costs to run right now: Total watts × the current electricity price including the fees and VAT set under the price chart.' },
+  { id: 'earn', label: 'Earning', source: 'computed', key: 'earn_per_h', max: null, unit: '/h', color: '--gauge-gpu', hidden: true,
+    tooltip: 'What Darkbloom paid in the last hour, base reward included, in your electricity currency.' },
 
 ];
+// The gauges shown, in order, with any saved overrides (Settings → Gauges).
+let GAUGES = GAUGE_CATALOG.filter(g => !g.hidden);
+let gaugeSettings = { gauges: null, defaults: {} };
+let lastGaugeData = null;
+let lastKwhLocal = null;
+let lastEarnedHourUsd = null;
 let lastUtilization = null;
 let lastRam = null;
 let lastOllama = null;
@@ -73,6 +90,120 @@ function gaugeArcPath() {
   return `M ${x1} ${cy} A ${GAUGE_R} ${GAUGE_R} 0 0 1 ${x2} ${cy}`;
 }
 
+// A gauge's override from Settings → Gauges, or {} when none is saved.
+function gaugeOverride(g) {
+  const list = gaugeSettings.gauges || [];
+  return list.find(x => x.id === g.id) || {};
+}
+
+// Full-scale value: the saved one, else what fits this Mac (RAM size, the
+// fan's reported maximum, the chip tier's power), else the built-in number.
+function gaugeMax(g, src) {
+  const o = gaugeOverride(g);
+  if (o.max != null) return o.max;
+  if (g.id === 'total' && gaugeSettings.defaults.total_max_w) return gaugeSettings.defaults.total_max_w;
+  if (g.id === 'ram' && src && src.total_gb) return src.total_gb;
+  if (g.id === 'fan' && src && src.fan_max_rpm) return Math.max(src.fan_max_rpm, src.fan_rpm || 0);
+  if (g.source === 'computed') return lastCurrency && lastCurrency !== 'USD' ? 5 : 0.5;
+  return g.max;
+}
+
+// Warning levels in the gauge's own unit. Saved values win; RAM's defaults
+// are shares of its scale because Macs differ in memory.
+function gaugeThresholds(g, max) {
+  const o = gaugeOverride(g);
+  return {
+    warn: o.warn != null ? o.warn : g.warnFrac != null ? g.warnFrac * max : g.warn ?? null,
+    crit: o.crit != null ? o.crit : g.critFrac != null ? g.critFrac * max : g.crit ?? null,
+  };
+}
+
+// Applies saved settings: which gauges show and in what order. Catalog
+// entries the saved list doesn't mention keep their default visibility, so a
+// gauge added in a later version still appears without resetting anything.
+function applyGaugeSettings(settings) {
+  gaugeSettings = settings || { gauges: null, defaults: {} };
+  const saved = gaugeSettings.gauges;
+  if (!saved) {
+    GAUGES = GAUGE_CATALOG.filter(g => !g.hidden);
+  } else {
+    const byId = Object.fromEntries(GAUGE_CATALOG.map(g => [g.id, g]));
+    const ordered = saved.filter(x => byId[x.id] && x.show).map(x => byId[x.id]);
+    const unmentioned = GAUGE_CATALOG.filter(g => !g.hidden && !saved.some(x => x.id === g.id));
+    GAUGES = [...ordered, ...unmentioned];
+  }
+  initGauges();
+  if (lastGaugeData) updateGauges(lastGaugeData);
+  renderGaugeSettings();
+}
+
+async function loadGaugeSettings() {
+  try { applyGaugeSettings(await (await fetch('/api/gauges')).json()); } catch (e) { /* defaults stay */ }
+}
+
+async function saveGaugeSettings(body) {
+  try {
+    const res = await fetch('/api/gauges', { method: 'POST', body: JSON.stringify(body) });
+    if (res.ok) applyGaugeSettings(await res.json());
+  } catch (e) { /* keep what is shown */ }
+}
+
+// One row per gauge: show, scale and warning levels, saved as soon as a field
+// changes - no Save button. Empty fields mean "use the default" (in grey).
+function renderGaugeSettings() {
+  const el = document.getElementById('gauge-settings');
+  if (!el || el.contains(document.activeElement)) return;
+  const saved = gaugeSettings.gauges;
+  const byId = Object.fromEntries(GAUGE_CATALOG.map(g => [g.id, g]));
+  const order = saved
+    ? [...saved.map(x => x.id).filter(id => byId[id]),
+       ...GAUGE_CATALOG.map(g => g.id).filter(id => !saved.some(x => x.id === id))]
+    : GAUGE_CATALOG.map(g => g.id);
+  const shown = new Set(GAUGES.map(g => g.id));
+  const fmt = v => v == null ? '' : +v.toFixed(2);
+  const cell = (g, field, placeholder) =>
+    `<input type="number" step="any" min="0" class="gauge-cfg" data-id="${g.id}" data-field="${field}" value="${fmt(gaugeOverride(g)[field])}" placeholder="${placeholder}" style="width:70px">`;
+  el.innerHTML = `<table class="gauge-cfg-table">
+    <tr><th>Show</th><th>Gauge</th><th title="Full scale. Empty = fits this Mac">Max</th><th title="Turns yellow at or above">Warn at</th><th title="Turns red at or above">Critical at</th><th>Order</th></tr>
+    ${order.map((id, i) => {
+      const g = byId[id];
+      const unit = g.source === 'computed' ? `${lastCurrency || ''}/h` : g.unit;
+      const dmax = gaugeMax(g, g.id === 'ram' ? lastRam : g.id === 'fan' ? lastFanTemp : null);
+      const th = gaugeThresholds(g, dmax);
+      return `<tr>
+        <td><input type="checkbox" class="gauge-cfg" data-id="${id}" data-field="show" ${shown.has(id) ? 'checked' : ''}></td>
+        <td>${g.label} <span style="opacity:.6">(${unit})</span></td>
+        <td>${cell(g, 'max', dmax != null ? +dmax.toFixed(2) : '')}</td>
+        <td>${cell(g, 'warn', th.warn != null ? +th.warn.toFixed(1) : '–')}</td>
+        <td>${cell(g, 'crit', th.crit != null ? +th.crit.toFixed(1) : '–')}</td>
+        <td><button class="copy-cmd-btn gauge-move" data-id="${id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Move left">↑</button>
+            <button class="copy-cmd-btn gauge-move" data-id="${id}" data-dir="1" ${i === order.length - 1 ? 'disabled' : ''} title="Move right">↓</button></td>
+      </tr>`;
+    }).join('')}
+  </table>
+  <div class="warmup-row"><button class="copy-cmd-btn" id="gauge-reset" title="Forget the saved gauge settings">Reset to defaults</button>
+  <span class="warmup-status" style="margin:0">Saved on this Mac, for every browser.</span></div>`;
+
+  const current = () => order.map(id => {
+    const row = { id };
+    el.querySelectorAll(`.gauge-cfg[data-id="${id}"]`).forEach(inp => {
+      row[inp.dataset.field] = inp.type === 'checkbox' ? inp.checked : (inp.value === '' ? null : parseFloat(inp.value));
+    });
+    return row;
+  });
+  el.querySelectorAll('.gauge-cfg').forEach(inp => { inp.onchange = () => saveGaugeSettings({ gauges: current() }); });
+  el.querySelectorAll('.gauge-move').forEach(btn => {
+    btn.onclick = () => {
+      const list = current();
+      const i = list.findIndex(x => x.id === btn.dataset.id), j = i + parseInt(btn.dataset.dir, 10);
+      if (j < 0 || j >= list.length) return;
+      [list[i], list[j]] = [list[j], list[i]];
+      saveGaugeSettings({ gauges: list });
+    };
+  });
+  document.getElementById('gauge-reset').onclick = () => saveGaugeSettings({ reset: true });
+}
+
 function initGauges() {
   const wrap = document.getElementById('gauges');
   wrap.innerHTML = GAUGES.map(g => `
@@ -83,9 +214,9 @@ function initGauges() {
               stroke="var(${g.color})"
               stroke-dasharray="0 ${GAUGE_ARC_LEN.toFixed(1)}" />
         <text x="20" y="112" class="gauge-scale" text-anchor="start">0</text>
-        <text x="180" y="112" class="gauge-scale" id="gauge-max-${g.id}" text-anchor="end">${g.max}${g.unit}</text>
+        <text x="180" y="112" class="gauge-scale" id="gauge-max-${g.id}" text-anchor="end">${gaugeMax(g, null) != null ? gaugeMax(g, null) + g.unit : ''}</text>
         <text x="100" y="88" class="gauge-number" id="gauge-num-${g.id}" text-anchor="middle">–</text>
-        <text x="100" y="104" class="gauge-unit" text-anchor="middle">${g.unit === 'W' ? 'watt' : g.unit}</text>
+        <text x="100" y="104" class="gauge-unit" id="gauge-unit-${g.id}" text-anchor="middle">${g.unit === 'W' ? 'watt' : g.unit}</text>
       </svg>
       <div class="gauge-label" id="gauge-label-${g.id}">${g.label}</div>
       <div class="gauge-detail" id="gauge-detail-${g.id}"></div>
@@ -94,6 +225,7 @@ function initGauges() {
 }
 
 function updateGauges(data) {
+  lastGaugeData = data;
   const timeEl = document.getElementById('live-power-time');
   const power = data && data.power;
   const ram = data && data.ram;
@@ -110,7 +242,12 @@ function updateGauges(data) {
   timeEl.textContent = '';
   timeEl.title = power && power.sample_time ? `latest sample: ${power.sample_time}` : '';
   GAUGES.forEach(g => {
-    const src = g.source === 'ram' ? ram : g.source === 'utilization' ? utilization : g.source === 'fan_temp' ? fanTemp : power;
+    const computed = {
+      cost_per_h: power && power.total_w != null && lastKwhLocal != null ? power.total_w / 1000 * lastKwhLocal : null,
+      earn_per_h: lastEarnedHourUsd != null && lastLocalPerUsd ? lastEarnedHourUsd * lastLocalPerUsd : null,
+    };
+    const src = g.source === 'ram' ? ram : g.source === 'utilization' ? utilization : g.source === 'fan_temp' ? fanTemp
+      : g.source === 'computed' ? computed : power;
     const numEl = document.getElementById(`gauge-num-${g.id}`);
     const detailEl = document.getElementById(`gauge-detail-${g.id}`);
     if (!src || src[g.key] == null) {
@@ -120,16 +257,12 @@ function updateGauges(data) {
       return;
     }
     const val = src[g.key] ?? 0;
-    let max = g.max;
-    if (g.source === 'ram' && ram && ram.total_gb) {
-      max = ram.total_gb;
-      document.getElementById(`gauge-max-${g.id}`).textContent = `${max.toFixed(0)}${g.unit}`;
-    }
-    if (g.id === 'fan' && fanTemp && fanTemp.fan_max_rpm) {
-      // The reported max (4900) is not a hard limit: 5412 RPM has been logged.
-      max = Math.max(fanTemp.fan_max_rpm, val);
-      document.getElementById(`gauge-max-${g.id}`).textContent = `${max}${g.unit}`;
-    }
+    // The reported fan max (4900) is not a hard limit: 5412 RPM has been logged,
+    // which is why gaugeMax lets the reading itself raise the fan's scale.
+    const max = gaugeMax(g, src);
+    const unitTxt = g.source === 'computed' ? `${lastCurrency || ''}/h` : g.unit;
+    document.getElementById(`gauge-max-${g.id}`).textContent = `${+max.toFixed(max < 10 ? 2 : 0)}${g.source === 'computed' ? '' : g.unit}`;
+    if (g.source === 'computed') document.getElementById(`gauge-unit-${g.id}`).textContent = unitTxt;
     const frac = Math.max(0, Math.min(1, val / max));
     const len = frac * GAUGE_ARC_LEN;
     const arcEl = document.getElementById(`gauge-arc-${g.id}`);
@@ -137,16 +270,17 @@ function updateGauges(data) {
     // RAM specifically gets a color warning as it approaches full - this is the
     // exact condition that caused real model-load failures earlier this session,
     // so flag it before a request fails, not just after.
-    if (g.id === 'ram') {
-      arcEl.setAttribute('stroke', frac > 0.93 ? 'var(--status-critical)' : frac > 0.85 ? 'var(--status-warning)' : `var(${g.color})`);
-    }
+    // Saved or default warning levels colour any gauge (RAM and GPU temp have
+    // defaults; the rest only when set under Settings → Gauges).
+    const th = gaugeThresholds(g, max);
+    arcEl.setAttribute('stroke', th.crit != null && val >= th.crit ? 'var(--status-critical)'
+      : th.warn != null && val >= th.warn ? 'var(--status-warning)' : `var(${g.color})`);
     // No colour warning on GPU Busy: neither direction is a fault. Busy means
     // paid work is running, idle means the network sent none - and the base
     // reward pays either way. It used to be shown inverted as "Headroom" with
     // a red zone, which implied idling was something to fix.
-    if (g.id === 'temp') {
-      arcEl.setAttribute('stroke', val >= 95 ? 'var(--status-critical)' : val >= 85 ? 'var(--status-warning)' : `var(${g.color})`);
-      if (detailEl) detailEl.textContent = val >= 95 ? 'very hot - see banner' : val >= 85 ? 'hot' : val >= 70 ? 'working' : 'cool';
+    if (g.id === 'temp' && detailEl) {
+      detailEl.textContent = th.crit != null && val >= th.crit ? 'very hot - see banner' : th.warn != null && val >= th.warn ? 'hot' : val >= 70 ? 'working' : 'cool';
     }
     if (g.id === 'total') {
       const measured = power && power.total_method === 'smc';
@@ -164,7 +298,7 @@ function updateGauges(data) {
         ? `awake ${power.gpu_active_pct.toFixed(0)}% at ${power.gpu_active_mhz} of ${power.gpu_max_mhz} MHz`
         : '';
     }
-    const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : g.id === 'temp' ? 1 : g.id === 'headroom' ? 1 : 2;
+    const decimals = g.source === 'ram' ? 1 : g.source === 'utilization' ? 0 : g.id === 'fan' ? 0 : ['temp', 'headroom', 'cpu', 'gpu'].includes(g.id) ? 1 : 2;
     numEl.textContent = val.toFixed(decimals);
     if (g.source === 'utilization' && detailEl) {
       const reqH = utilization.requests_per_hour;
@@ -2908,6 +3042,10 @@ async function refresh() {
     safe('disk', () => renderDisk(disk));
     safe('details', () => renderNerdyStats(daemon_state, account, doctor, inference_durations, status.requests_served || 0));
     const elprisNow = safe('electricity price', () => renderElpris(price_48h));
+    // Inputs for the optional cost and earning gauges.
+    lastKwhLocal = elprisNow && elprisNow.nowTotalLocal != null ? elprisNow.nowTotalLocal
+      : elprisNow && elprisNow.nowVal != null && lastLocalPerUsd ? elprisNow.nowVal * lastLocalPerUsd : null;
+    lastEarnedHourUsd = data.health && data.health.earned_hour_usd != null ? data.health.earned_hour_usd : null;
     safe('price range', () => refreshPriceRange());
     lastRealPrice48 = price_48h;
     safe('earnings chart', () => refreshReal());
@@ -3027,6 +3165,7 @@ async function refresh() {
 }
 
 initGauges();
+loadGaugeSettings();
 refresh();
 refreshLivePower();
 refreshTempAge();

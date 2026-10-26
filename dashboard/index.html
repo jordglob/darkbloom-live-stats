@@ -189,10 +189,14 @@
     </details>
   </div>
 
-  <div class="panel"><details class="section"><summary><h2 style="display:inline">Settings</h2> <span class="gauge-time">Price Guard, warm-up</span></summary>
+  <div class="panel"><details class="section"><summary><h2 style="display:inline">Settings</h2> <span class="gauge-time">Price Guard, gauges, warm-up</span></summary>
   <div class="sub-panel">
     <h2 title="Compares the current electricity price against this account's own measured $/hr active pay rate, converted to a break-even price per kWh in your configured currency. Auto mode calls the real darkbloom start/stop CLI commands - Manual mode just shows the numbers and lets you trigger start/stop yourself.">Price Guard <span class="gauge-time">(optional: pause serving when electricity costs more than serving earns)</span></h2>
     <div id="price-guard"></div>
+  </div>
+  <div class="sub-panel">
+    <h2 title="Which Live Power gauges show, in what order, and each one's scale and warning levels.">Gauges</h2>
+    <div id="gauge-settings"></div>
   </div>
   <div class="sub-panel">
     <h2 title="Periodically pings the provider's local endpoint to keep the active model loaded in memory, so it's ready the instant real traffic arrives.">Warmup</h2>

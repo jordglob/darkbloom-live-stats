@@ -1,5 +1,13 @@
 # Changelog
 
+## v108
+
+**The Live Power gauges are configurable.** Settings → Gauges has one row per gauge: show it or not, its full scale, a warning level (yellow) and a critical level (red), and arrows to change the order. A change is saved at once to `~/.darkbloom/gauges.json`, so it holds for every browser on this Mac; Reset to defaults deletes the file. Without the file the page shows exactly what it did before.
+
+- **Five more gauges to switch on:** CPU power, GPU power, fan speed, electricity cost per hour (Total watts × the current price including fees and VAT) and earning per hour (last hour, base reward included), both in the electricity currency.
+- **Scales that fit the Mac:** Total defaults to the chip tier's full-load draw (base 60 W, Pro 120 W, Max 200 W, Ultra 300 W) instead of 120 W for every Mac. RAM and fan already followed the machine.
+- **Warning levels for any gauge.** RAM keeps its defaults (85 % / 93 % of memory) and GPU temperature its 85 / 95 °C; any of them can be changed.
+
 ## v107
 
 **Community Slack link** next to the other Darkbloom links under the title.

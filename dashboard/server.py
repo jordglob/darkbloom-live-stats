@@ -2717,6 +2717,73 @@ def _bucket_downsample(rows, max_points):
 # get_price_48h. All sources here are free and need no API key.
 # ---------------------------------------------------------------------------
 PRICE_SOURCE_CONFIG = HOME / ".darkbloom" / "price-source.json"
+
+
+# --- Live Power gauge settings -------------------------------------------------
+#
+# Which gauges show, in what order, and each one's scale and warning levels.
+# Saved per Mac, not per browser, like the price source. No file means the
+# built-in defaults, so an install that never opens the setting is unchanged.
+GAUGES_CONFIG = HOME / ".darkbloom" / "gauges.json"
+GAUGE_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
+# Whole-Mac draw a tier reaches under full GPU load, rounded up. Used as the
+# Total gauge's default scale instead of one number for every Mac.
+CHIP_TIER_MAX_W = {"ultra": 300, "max": 200, "pro": 120, "base": 60}
+
+
+def _chip_brand():
+    try:
+        return subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return ""
+
+
+def get_gauge_settings():
+    brand = _chip_brand()
+    low = brand.lower()
+    tier = next((t for t in ("ultra", "max", "pro") if t in low.split()), "base")
+    cfg = None
+    try:
+        if GAUGES_CONFIG.exists():
+            raw = json.loads(GAUGES_CONFIG.read_text())
+            if isinstance(raw, dict) and isinstance(raw.get("gauges"), list):
+                cfg = raw["gauges"]
+    except Exception:
+        cfg = None
+    return {"gauges": cfg, "defaults": {"chip": brand, "total_max_w": CHIP_TIER_MAX_W[tier]}}
+
+
+def save_gauge_settings(body):
+    """Validates and saves {"gauges": [{id, show, max, warn, crit}, ...]} in
+    display order, or {"reset": true} to go back to the defaults."""
+    if body.get("reset"):
+        GAUGES_CONFIG.unlink(missing_ok=True)
+        return True
+    items = body.get("gauges")
+    if not isinstance(items, list) or len(items) > 32:
+        return False
+    num = lambda v: None if v in (None, "") else float(v)
+    clean, seen = [], set()
+    for it in items:
+        if not isinstance(it, dict):
+            return False
+        gid = str(it.get("id", ""))
+        if not GAUGE_ID_RE.match(gid) or gid in seen:
+            return False
+        seen.add(gid)
+        try:
+            entry = {"id": gid, "show": bool(it.get("show")),
+                     "max": num(it.get("max")), "warn": num(it.get("warn")), "crit": num(it.get("crit"))}
+        except (TypeError, ValueError):
+            return False
+        if entry["max"] is not None and entry["max"] <= 0:
+            return False
+        clean.append(entry)
+    tmp = GAUGES_CONFIG.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"gauges": clean}, indent=2))
+    tmp.replace(GAUGES_CONFIG)
+    return True
 LEGACY_ZONE_CONFIG = HOME / ".darkbloom" / "elpris-zone.json"
 PRICE_POLL_INTERVAL_SEC = 900  # matches energy-monitor.sh's own price cache cadence
 PRICE_PAST_DAYS = 1  # how many real (always-published) days to show before today
@@ -3592,6 +3659,7 @@ def get_health(d):
         up = now - ds["started_at"]
         detail.append(f"up {int(up // 3600)} h {int(up % 3600 // 60)} min")
     return {"level": level, "summary": " · ".join(parts), "detail": " · ".join(detail),
+            "earned_hour_usd": earned_hour_usd,
             "problems": [t for _, t in problems]}
 
 
@@ -4920,6 +4988,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
         elif self.path == "/api/price_now":
             self._send_json(get_price_now())
+        elif self.path == "/api/gauges":
+            self._send_json(get_gauge_settings())
         elif self.path == "/api/price_source":
             self._send_json(get_price_48h())
         elif self.path == "/api/power":
@@ -5093,6 +5163,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             result = _proxy_local_chat(body.get("model"), body.get("messages") or [])
             self._send_json(result)
+        elif self.path == "/api/gauges":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if save_gauge_settings(body):
+                self._send_json(get_gauge_settings())
+            else:
+                self.send_response(400)
+                self.end_headers()
         elif self.path == "/api/price_source":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")

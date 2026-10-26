@@ -266,3 +266,6 @@
   .explainer-section h4 { font-size: 12px; font-weight: 700; margin: 0 0 4px; color: var(--text-primary); }
   .explainer-section p { font-size: 12px; color: var(--text-secondary); margin: 3px 0; line-height: 1.55; }
   .explainer-section code { background: var(--surface-1); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, monospace; font-size: 11px; }
+  .gauge-cfg-table { border-collapse: collapse; font-size: 13px; margin: 6px 0; }
+  .gauge-cfg-table th, .gauge-cfg-table td { padding: 3px 8px; text-align: left; }
+  .gauge-cfg-table th { font-weight: 600; color: var(--text-secondary); }
