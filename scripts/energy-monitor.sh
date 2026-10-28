@@ -135,8 +135,27 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 # can never get stuck and propagate forever.
 calc() {
   local r
+  # bc has no exponent syntax: it reads "6.3E-19" as 6.3 followed by "- 19", which
+  # silently yields a wildly wrong number. Refuse any operand written that way.
+  if [[ $1 =~ [0-9.][eE][-+]?[0-9] ]]; then
+    echo "[calc] ignored an expression with a scientific-notation number: $1" >&2
+    echo 0
+    return
+  fi
   r=$(echo "$1" | bc 2>/dev/null)
   echo "${r:-0}"
+}
+
+# Print $1 as a plain decimal (no exponent), or fail if it is not a finite number
+# within +-$2 (default 1e7). A price near zero is exactly what a JSON encoder writes
+# in scientific notation (for example 6.34E-19), and bc cannot read that.
+plain_number() {
+  awk -v v="$1" -v max="${2:-10000000}" 'BEGIN {
+    if (v !~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/) exit 1
+    x = v + 0
+    if (x > max || x < -max) exit 1
+    printf "%.10f\n", x
+  }'
 }
 
 log "Starting energy-monitor. CSV: $CSV"
@@ -168,6 +187,9 @@ while true; do
     # All-in price (spot + fees + VAT); spot only from an older dashboard.
     NEWVAL=$(echo "$RESP" | jq -r '.total_per_kwh // .price_per_kwh // empty' 2>/dev/null || true)
     NEWRATE=$(echo "$RESP" | jq -r '.local_per_usd // empty' 2>/dev/null || true)
+    # Normalise to plain decimals; anything that is not a sane number is treated as "no value".
+    NEWVAL=$(plain_number "${NEWVAL:-}") || NEWVAL=""
+    NEWRATE=$(plain_number "${NEWRATE:-}") || NEWRATE=""
     if [ -n "${NEWVAL:-}" ]; then
       ELPRIS_VAL=$NEWVAL
       ELPRIS_TS=$NOW
@@ -176,7 +198,7 @@ while true; do
         USDSEK_TS=$NOW
       fi
     else
-      log "WARNING: could not get the electricity price from the dashboard at $DASHBOARD_URL (is it running?) - keeping last value ($ELPRIS_VAL per kWh)"
+      log "WARNING: could not get a valid electricity price from the dashboard at $DASHBOARD_URL (is it running?) - keeping last value ($ELPRIS_VAL per kWh)"
     fi
   fi
 
