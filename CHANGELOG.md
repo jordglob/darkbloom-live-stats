@@ -1,5 +1,12 @@
 # Changelog
 
+## v110
+
+**The dashboard no longer freezes when the earnings archive gets big.** `/api/data` built its ~18 panels one after another, and three of them (`account`, the health summary, the completion check) scanned the *entire* earnings archive — by now ~1.7 GB across the month files — on every poll, just to read the last hour or day. On a busy Mac that pushed a single `/api/data` past the client's timeout and the whole page hung.
+
+- **Each panel now runs on its own thread under a shared deadline.** A slow probe comes back empty for that one poll instead of freezing every other panel; the health summary gets its own short deadline too.
+- **The month archives are read backward and stopped at the window edge,** and whole files older than the window are skipped by mtime — so `_ledger_rows_since`, the completion check and the per-model job outcomes cost what their window needs, not the size of the whole history. Cold `/api/data` went from hanging to a few seconds; warm polls are ~0.3 s.
+
 ## v109
 
 **CPU Load gauge.** The CPU counterpart of GPU Load: each core's time awake weighted by its clock against that core's top clock, averaged over all cores, from the per-core lines powermetrics already writes. Off by default; switch it on under Settings → Gauges, next to CPU power. `/api/power` and `/api/live_power` now include `cpu_load_pct`.

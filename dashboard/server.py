@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2323,20 +2324,24 @@ def get_completion_check():
         path = EARNINGS_ARCHIVE_DIR / f"earnings-{month}.jsonl"
         if not path.exists():
             continue
-        with open(path) as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                    if e.get("model") == "base_reward" or e.get("id") in seen:
-                        continue
-                    t = _parse_iso_ts(e["created_at"])
-                except Exception:
-                    continue
-                if started <= t <= written:
-                    seen.add(e.get("id"))
-                    paid_jobs += 1
-                    paid_tokens += e.get("completion_tokens") or 0
-                    paid_usd += (e.get("amount_micro_usd") or 0) / 1e6
+        # These month files are append-ordered by time and can be hundreds of
+        # MB. The window [started, written] is just the current provider run
+        # (often only hours), so read backward and stop as soon as entries
+        # predate it - the cost tracks the run's length, not the whole month.
+        for line in _read_lines_reverse(path):
+            try:
+                e = json.loads(line)
+                t = _parse_iso_ts(e["created_at"])
+            except Exception:
+                continue
+            if t < started:
+                break  # everything earlier in this file is older too
+            if t > written or e.get("model") == "base_reward" or e.get("id") in seen:
+                continue
+            seen.add(e.get("id"))
+            paid_jobs += 1
+            paid_tokens += e.get("completion_tokens") or 0
+            paid_usd += (e.get("amount_micro_usd") or 0) / 1e6
     data = {
         "since": started,
         "until": written,
@@ -2352,8 +2357,13 @@ def get_completion_check():
     try:
         first = next(iter(sorted(EARNINGS_ARCHIVE_DIR.glob("earnings-*.jsonl"))), None)
         if first:
+            # Append-ordered, so the oldest entry is the first line - read just
+            # that instead of scanning the whole (potentially large) file.
             with open(first) as f:
-                data["archive_starts"] = min(_parse_iso_ts(json.loads(l)["created_at"]) for l in f if l.strip())
+                for l in f:
+                    if l.strip():
+                        data["archive_starts"] = _parse_iso_ts(json.loads(l)["created_at"])
+                        break
     except Exception:
         pass
     _completion_cache.update(at=now, data=data)
@@ -2394,17 +2404,24 @@ def get_job_outcomes():
         open_jobs = {}
     paid = {}
     months = {time.strftime("%Y-%m", time.gmtime(t)) for t in (now - 86400, now)}
+    # Only the last day of ledger entries can match a job in these windows
+    # (widest window 24h + payment lag), so read the big append-ordered archive
+    # backward and stop once entries are older than that.
+    paid_since = now - 86400 - 3600
     for month in months:
         path = EARNINGS_ARCHIVE_DIR / f"earnings-{month}.jsonl"
-        if path.exists():
-            with open(path) as f:
-                for line in f:
-                    try:
-                        e = json.loads(line)
-                        if e.get("job_id"):
-                            paid[e["job_id"]] = e
-                    except Exception:
-                        continue
+        if not path.exists():
+            continue
+        for line in _read_lines_reverse(path):
+            try:
+                e = json.loads(line)
+                t = _parse_iso_ts(e["created_at"])
+            except Exception:
+                continue
+            if t < paid_since:
+                break
+            if e.get("job_id"):
+                paid.setdefault(e["job_id"], e)
     first = min((j.get("received") or j.get("completed") or now) for j in jobs.values())
     out = {"tracking_since": first, "windows": {}}
     for name, span in JOB_OUTCOME_WINDOWS.items():
@@ -4099,27 +4116,70 @@ REAL_EARNINGS_LOG_BUCKETS = 120
 _real_earnings_cache = {}
 
 
+def _read_lines_reverse(path, chunk_size=1 << 16):
+    """Yields a file's lines from last to first, reading backward in chunks so
+    a multi-hundred-MB ledger archive is never loaded whole. Lets callers stop
+    as soon as entries predate their window (the archives are append-ordered
+    by time)."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos = f.tell()
+        buf = b""
+        while pos > 0:
+            read = min(chunk_size, pos)
+            pos -= read
+            f.seek(pos)
+            buf = f.read(read) + buf
+            lines = buf.split(b"\n")
+            buf = lines[0]  # keep the (possibly partial) first line for the next chunk
+            for line in reversed(lines[1:]):
+                if line:
+                    yield line.decode("utf-8", "replace")
+        if buf:
+            yield buf.decode("utf-8", "replace")
+
+
 def _ledger_rows_since(since_ts):
     """(ts, usd) for every ledger entry (base reward included) since
     since_ts, from the permanent archive (v69), falling back to the 48h
-    history file before the archive existed."""
+    history file before the archive existed.
+
+    The month archives are append-ordered by time and can be hundreds of MB
+    each, so for them we skip any file whose mtime predates the window, read
+    the rest backward, and stop at the first entry older than since_ts - the
+    cost tracks the window, not the whole history. The small rolling history
+    file is read in full (and only filtered) so its semantics are unchanged."""
     out, seen = [], set()
     paths = sorted(EARNINGS_ARCHIVE_DIR.glob("earnings-*.jsonl")) if EARNINGS_ARCHIVE_DIR.exists() else []
     for path in paths + [EARNINGS_HISTORY_PATH]:
         if not path.exists():
             continue
-        with open(path) as f:
-            for line in f:
-                try:
-                    e = json.loads(line)
-                    if e.get("id") in seen:
-                        continue
-                    t = _parse_iso_ts(e["created_at"])
-                except Exception:
-                    continue
-                if t >= since_ts:
-                    seen.add(e.get("id"))
-                    out.append((t, (e.get("amount_micro_usd") or 0) / 1e6))
+        is_history = path == EARNINGS_HISTORY_PATH
+        if not is_history:
+            try:
+                if path.stat().st_mtime < since_ts:
+                    continue  # whole archive file is older than the window
+            except OSError:
+                continue
+        if is_history:
+            with open(path) as f:
+                lines = list(f)
+        else:
+            lines = _read_lines_reverse(path)  # newest first, lets us stop early
+        for line in lines:
+            try:
+                e = json.loads(line)
+                t = _parse_iso_ts(e["created_at"])
+            except Exception:
+                continue
+            if t < since_ts:
+                if is_history:
+                    continue  # history is tiny and not assumed ordered - just filter
+                break  # archive is append-ordered: everything earlier is older too
+            if e.get("id") in seen:
+                continue
+            seen.add(e.get("id"))
+            out.append((t, (e.get("amount_micro_usd") or 0) / 1e6))
     return out
 
 
@@ -4952,6 +5012,40 @@ def _part(name, fn):
         print(f"/api/data: {name} failed: {e!r}", file=sys.stderr, flush=True)
         return None
 
+
+API_DATA_DEADLINE_SEC = 12  # hard ceiling for the whole /api/data response
+
+# A dedicated pool so /api/data's ~18 probes run concurrently instead of
+# summing their individual timeouts. Sized well above the piece count so a
+# few workers stuck in a slow subprocess (each already bounded by its own
+# timeout) still leave headroom for the next poll. daemon so it never blocks
+# shutdown.
+_API_DATA_POOL = ThreadPoolExecutor(max_workers=32, thread_name_prefix="apidata")
+
+
+def _gather_parts(parts, deadline_sec):
+    """Runs every /api/data piece concurrently and collects them under one
+    wall-clock deadline. A piece that throws OR overruns the deadline becomes
+    null (logged), exactly like _part's single-piece contract - the page draws
+    every panel that finished in time instead of freezing on the slowest one.
+    Matters most under heavy machine load, when the subprocess-backed probes
+    (darkbloom status, doctor, utilization) each crawl and their serial sum
+    used to blow past the client's timeout."""
+    futures = {name: _API_DATA_POOL.submit(fn) for name, fn in parts.items()}
+    deadline = time.monotonic() + deadline_sec
+    results = {}
+    for name, fut in futures.items():
+        try:
+            results[name] = fut.result(timeout=max(0.0, deadline - time.monotonic()))
+        except FuturesTimeout:
+            print(f"/api/data: {name} timed out (>{deadline_sec}s)", file=sys.stderr, flush=True)
+            results[name] = None
+        except Exception as e:
+            print(f"/api/data: {name} failed: {e!r}", file=sys.stderr, flush=True)
+            results[name] = None
+    return results
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # quiet - avoid stdout spam
@@ -4967,33 +5061,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/api/data":
-            data = {
-                "status": _part("status", lambda: get_darkbloom_status()),
-                "energy": _part("energy", lambda: get_energy_series()),
-                "max_power": _part("max_power", lambda: get_max_power_status()),
-                "serving_mode": _part("serving_mode", lambda: read_serving_mode()),
-                "version_meta": _part("version_meta", lambda: get_provider_version_meta()),
-                "live_power": _part("live_power", lambda: get_live_power()),
-                "account": _part("account", lambda: get_account_data()),
-                "utilization": _part("utilization", lambda: get_utilization()),
-                "disk": _part("disk", lambda: annotate_disk_usage(get_disk_usage())),
-                "daemon_state": _part("daemon_state", lambda: get_daemon_state()),
-                "autostart": _part("autostart", lambda: get_autostart_state()),
-                "autopilot": _part("autopilot", lambda: get_autopilot_state()),
-                "doctor": _part("doctor", lambda: get_doctor_report()),
-                "external_pause": _part("external_pause", lambda: get_external_pause()),
-                "inference_durations": _part("inference_durations", lambda: get_inference_duration_stats()),
-                "price_48h": _part("price_48h", lambda: get_price_48h()),
-                "dashboard_version": DASHBOARD_VERSION,
+            # Each piece runs on its own thread with a shared deadline (see
+            # _gather_parts), so the response time is the slowest single probe
+            # (capped at API_DATA_DEADLINE_SEC), not the sum of every probe's
+            # timeout. A probe that overruns comes back null and fills on the
+            # next poll, instead of freezing the whole dashboard under load.
+            data = _gather_parts({
+                "status": lambda: get_darkbloom_status(),
+                "energy": lambda: get_energy_series(),
+                "max_power": lambda: get_max_power_status(),
+                "serving_mode": lambda: read_serving_mode(),
+                "version_meta": lambda: get_provider_version_meta(),
+                "live_power": lambda: get_live_power(),
+                "account": lambda: get_account_data(),
+                "utilization": lambda: get_utilization(),
+                "disk": lambda: annotate_disk_usage(get_disk_usage()),
+                "daemon_state": lambda: get_daemon_state(),
+                "autostart": lambda: get_autostart_state(),
+                "autopilot": lambda: get_autopilot_state(),
+                "doctor": lambda: get_doctor_report(),
+                "external_pause": lambda: get_external_pause(),
+                "inference_durations": lambda: get_inference_duration_stats(),
+                "price_48h": lambda: get_price_48h(),
                 # False until a price source is saved (or a pre-v14 zone
                 # file exists) - the page nags until the user sets theirs.
-                "price_source_chosen": _part("price_source_chosen", lambda: PRICE_SOURCE_CONFIG.exists() or LEGACY_ZONE_CONFIG.exists()),
+                "price_source_chosen": lambda: PRICE_SOURCE_CONFIG.exists() or LEGACY_ZONE_CONFIG.exists(),
                 # install.sh copies server.py into place, so its mtime is
                 # when this dashboard version went live.
-                "dashboard_installed_at": _part("dashboard_installed_at", lambda: Path(__file__).stat().st_mtime),
-            }
+                "dashboard_installed_at": lambda: Path(__file__).stat().st_mtime,
+            }, API_DATA_DEADLINE_SEC)
+            data["dashboard_version"] = DASHBOARD_VERSION
+            # get_health does a little fresh I/O of its own (ledger read,
+            # price-guard eval, disk check) - run it on the pool with a short
+            # deadline too, so a slow probe in there can't hang the whole
+            # response after the pieces are already in.
             try:
-                data["health"] = get_health(data)
+                hfut = _API_DATA_POOL.submit(get_health, data)
+                data["health"] = hfut.result(timeout=5)
+            except FuturesTimeout:
+                data["health"] = {"level": "warn", "summary": "Health check timed out", "detail": "a health probe was too slow this cycle", "problems": []}
             except Exception as e:
                 data["health"] = {"level": "warn", "summary": "Health check failed", "detail": str(e)[:120], "problems": []}
             self._send_json(data)
