@@ -2336,7 +2336,9 @@ def get_completion_check():
                 continue
             if t < started:
                 break  # everything earlier in this file is older too
-            if t > written or e.get("model") == "base_reward" or e.get("id") in seen:
+            # Folded rows (older than the full-resolution window) carry no
+            # job_id and are summed, not per-job - never count them here.
+            if t > written or e.get("aggregated") or e.get("model") == "base_reward" or e.get("id") in seen:
                 continue
             seen.add(e.get("id"))
             paid_jobs += 1
@@ -2521,12 +2523,66 @@ def _update_earnings_history(fresh_entries):
             pass
 
 
+_archived_ids = None  # ids already in the archive; None until first seeded
+_archived_ids_lock = threading.Lock()
+
+
+def _seed_recent_archived_ids():
+    """Ids already archived within the full-resolution window, read from the
+    tail of each recent file (backward, stopping once past the window) so it is
+    cheap even before the first prune. Only recent ids need tracking: entries
+    older than the window are never newly archived (they're already folded)."""
+    ids = set()
+    cutoff = time.time() - ARCHIVE_FULL_RETENTION_SEC
+    try:
+        for p in sorted(EARNINGS_ARCHIVE_DIR.glob("earnings-*.jsonl")):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+            for line in _read_lines_reverse(p):
+                try:
+                    e = json.loads(line)
+                    t = _parse_iso_ts(e["created_at"])
+                except Exception:
+                    continue
+                if t < cutoff:
+                    break
+                if e.get("id") is not None:
+                    ids.add(e["id"])
+    except Exception:
+        pass
+    return ids
+
+
 def _append_to_earnings_archive(entries):
-    """Appends entries to the monthly archive files. Callers pass only ids
-    not already in the 48h file, so an entry is archived once: the API only
-    ever returns the most recent 1000, all younger than that file's window."""
+    """Appends genuinely-new entries to the monthly archive files, once each.
+    The account API returns its most recent 1000 entries on every poll, so this
+    guards twice against re-archiving: entries older than the full-resolution
+    window are skipped (already archived and since folded), and ids already
+    seen are skipped via _archived_ids. Without this guard the API's repeated
+    last-1000 filled the archive with >90 % duplicate lines."""
+    global _archived_ids
+    with _archived_ids_lock:
+        if _archived_ids is None:
+            _archived_ids = _seed_recent_archived_ids()
+        ids = _archived_ids
+    cutoff = time.time() - ARCHIVE_FULL_RETENTION_SEC
     by_month = {}
     for e in entries:
+        i = e.get("id")
+        if i is None:
+            continue
+        try:
+            if _parse_iso_ts(e["created_at"]) < cutoff:
+                continue  # too old to newly archive
+        except Exception:
+            continue
+        with _archived_ids_lock:
+            if i in ids:
+                continue
+            ids.add(i)
         month = str(e.get("created_at", ""))[:7] or "unknown"
         by_month.setdefault(month, []).append(e)
     if not by_month:
@@ -2540,6 +2596,148 @@ def _append_to_earnings_archive(entries):
                     f.write(json.dumps(e) + "\n")
     except Exception:
         pass
+
+
+# --- Earnings-archive auto-pruning (v111) ------------------------------------
+# The month files are an append-only per-job ledger growing ~100+ MB/day, most
+# of it tiny near-$0 spam jobs. Only get_real_earnings reads the old part, and
+# it buckets (ts, usd) anyway - so entries older than the full-resolution
+# window are folded into coarse time buckets (hourly, then daily) that preserve
+# the summed dollars and job count, while recent entries stay per-entry for the
+# live panels (completion check, job outcomes, price guard). Keeps the whole
+# archive under ARCHIVE_SIZE_CAP_BYTES, tightening the window toward a floor if
+# needed. Runs under _earnings_history_lock so it never races the appender.
+ARCHIVE_FULL_RETENTION_SEC = 72 * 3600        # keep this most-recent span per-entry
+ARCHIVE_FULL_RETENTION_FLOOR_SEC = 48 * 3600  # but never fold anything newer than this
+ARCHIVE_HOURLY_UNTIL_SEC = 30 * 86400         # full..here -> hourly, older -> daily
+ARCHIVE_SIZE_CAP_BYTES = 100 * 1024 * 1024
+ARCHIVE_PRUNE_INTERVAL_SEC = 6 * 3600
+
+
+def _archive_bucket_width(age, full_retention_sec):
+    """Bucket width (s) for an entry of this age: 0 = keep full resolution."""
+    if age <= full_retention_sec:
+        return 0
+    if age <= ARCHIVE_HOURLY_UNTIL_SEC:
+        return 3600
+    return 86400
+
+
+def _prune_one_month(path, now, full_retention_sec):
+    """Rewrites one month archive file: recent entries kept verbatim, older
+    ones (including already-aggregated rows that should now be coarser) folded
+    into (ts, summed-usd, count) buckets. Streams the file so a multi-GB
+    archive is never held whole in memory. Atomic (temp + replace). Returns
+    True if it rewrote the file."""
+    keep = []        # (created_at, original_line) kept at full resolution
+    buckets = {}     # (width, bucket_start) -> [amount_micro_sum, entry_count]
+    seen = set()     # dedup by id (the appender has historically re-written the
+                     # API's last-1000 every poll, so files are mostly duplicates)
+    n_raw_folded = n_agg_rebucketed = n_dupes = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                    t = _parse_iso_ts(e["created_at"])
+                except Exception:
+                    continue
+                i = e.get("id")
+                if i in seen:
+                    n_dupes += 1
+                    continue
+                seen.add(i)
+                w = _archive_bucket_width(now - t, full_retention_sec)
+                is_agg = bool(e.get("aggregated"))
+                if w == 0:
+                    keep.append((e["created_at"], line))
+                    continue
+                if is_agg:
+                    if e.get("bucket_sec") != w:
+                        n_agg_rebucketed += 1
+                else:
+                    n_raw_folded += 1
+                start = int(t // w) * w
+                b = buckets.setdefault((w, start), [0, 0])
+                b[0] += e.get("amount_micro_usd") or 0
+                b[1] += e.get("entries") or 1
+    except FileNotFoundError:
+        return False
+    # Already in shape: nothing to fold, re-bucket, or de-duplicate.
+    if not n_raw_folded and not n_agg_rebucketed and not n_dupes:
+        return False
+    agg_rows = []
+    for (w, start), (amt, cnt) in buckets.items():
+        created = datetime.fromtimestamp(start, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        agg_rows.append((created, json.dumps({
+            "id": f"agg-{w}-{start}", "created_at": created,
+            "amount_micro_usd": amt, "aggregated": True,
+            "bucket_sec": w, "entries": cnt,
+        })))
+    out = sorted(keep + agg_rows, key=lambda r: r[0])
+    tmp = str(path) + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            for _, line in out:
+                f.write(line + "\n")
+        os.replace(tmp, path)
+        return True
+    except Exception as ex:
+        print(f"prune: rewrite {path} failed: {ex!r}", file=sys.stderr, flush=True)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _archive_total_bytes():
+    try:
+        return sum(p.stat().st_size for p in EARNINGS_ARCHIVE_DIR.glob("earnings-*.jsonl"))
+    except Exception:
+        return 0
+
+
+def prune_earnings_archive():
+    """Downsamples the whole earnings archive and keeps it under the size cap,
+    tightening the full-resolution window toward the floor if the cap is still
+    exceeded. Safe to call repeatedly (idempotent once in shape)."""
+    global _archived_ids
+    if not EARNINGS_ARCHIVE_DIR.exists():
+        return
+    now = time.time()
+    full = ARCHIVE_FULL_RETENTION_SEC
+    for _ in range(3):  # at most a couple of tightening passes
+        with _earnings_history_lock:
+            for path in sorted(EARNINGS_ARCHIVE_DIR.glob("earnings-*.jsonl")):
+                _prune_one_month(path, now, full)
+        size = _archive_total_bytes()
+        if size <= ARCHIVE_SIZE_CAP_BYTES or full <= ARCHIVE_FULL_RETENTION_FLOOR_SEC:
+            if size > ARCHIVE_SIZE_CAP_BYTES:
+                print(f"prune: archive {size/1e6:.0f} MB still over cap at the "
+                      f"{full/3600:.0f}h floor - kept for correctness",
+                      file=sys.stderr, flush=True)
+            break
+        full = max(ARCHIVE_FULL_RETENTION_FLOOR_SEC, full // 2)
+    # Re-seed the appender's id set from the now-deduped recent rows, so it
+    # stays bounded and never holds ids that have since been folded away.
+    with _earnings_history_lock:
+        with _archived_ids_lock:
+            _archived_ids = _seed_recent_archived_ids()
+
+
+def archive_prune_loop():
+    """Background pruner: once shortly after start, then on an interval."""
+    time.sleep(90)  # let the dashboard finish coming up first
+    while True:
+        try:
+            prune_earnings_archive()
+        except Exception as ex:
+            print(f"prune loop error: {ex!r}", file=sys.stderr, flush=True)
+        time.sleep(ARCHIVE_PRUNE_INTERVAL_SEC)
 
 
 def _load_earnings_history():
@@ -5348,6 +5546,7 @@ if __name__ == "__main__":
     threading.Thread(target=price_guard_loop, daemon=True).start()
     threading.Thread(target=pm_interval_loop, daemon=True).start()
     threading.Thread(target=price_backfill_loop, daemon=True).start()
+    threading.Thread(target=archive_prune_loop, daemon=True).start()
     with ReusableTCPServer(("127.0.0.1", PORT), Handler) as httpd:
         print(f"Darkbloom Live & Stats running at http://127.0.0.1:{PORT}")
         httpd.serve_forever()

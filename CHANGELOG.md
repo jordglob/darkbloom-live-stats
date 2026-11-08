@@ -1,5 +1,13 @@
 # Changelog
 
+## v111
+
+**The earnings archive prunes itself and stops duplicating.** Two problems had grown it to ~1.8 GB. First, a re-append bug: the account API returns its most recent 1000 entries on every 30 s poll, and any of them older than the 48 h history file were written to the archive *again* each poll — so the month files were 92–99.9 % duplicate lines. Second, nothing ever downsampled old history.
+
+- **The appender now writes each entry once.** It skips entries older than the full-resolution window and keeps an in-memory set of archived ids, so the API's repeated last-1000 no longer piles up duplicates.
+- **A background pruner keeps the archive small and under a size cap.** Entries within 72 h stay per-entry (the completion check, job outcomes and price guard need them); older ones are folded into coarse `(timestamp, summed-usd, count)` buckets — hourly out to 30 days, then daily — that preserve the dollars and job count the Real Earnings chart reads. It de-duplicates as it folds and runs every 6 hours.
+- **Result on a real archive:** 1.8 GB / 5.06 M lines → 408 KB / 1 400 lines, with the local ledger total unchanged to the micro-dollar. `/api/real_earnings` for the full range dropped to well under a second.
+
 ## v110
 
 **The dashboard no longer freezes when the earnings archive gets big.** `/api/data` built its ~18 panels one after another, and three of them (`account`, the health summary, the completion check) scanned the *entire* earnings archive — by now ~1.7 GB across the month files — on every poll, just to read the last hour or day. On a busy Mac that pushed a single `/api/data` past the client's timeout and the whole page hung.
